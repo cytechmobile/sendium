@@ -1,0 +1,11 @@
+# This is a comment.
+# Each line is a file pattern followed by one or more owners.
+
+# Assign all files in the repository to @your-github-username
+#* @your-github-username
+
+# Assign all JavaScript files to the 'frontend-team'
+#*.js    @your-organization/frontend-team
+
+# Assign files in the directory to a specific user
+#/sms-gateway/  @exampleUser
