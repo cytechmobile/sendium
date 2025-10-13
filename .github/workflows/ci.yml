@@ -5,12 +5,12 @@ on: push
 # By setting up concurrency group using github.ref, we essentially instruct github to only run one workflow at a time per branch
 # With "cancel-in-progress: true" we also specify that existing/running workflows for that branch will be canceled
 concurrency:
-  group: ossgTests-${{github.ref}}
+  group: SendiumTests-${{github.ref}}
   cancel-in-progress: true
 
 jobs:
   tests:
-    runs-on: [ self-hosted, linux ]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -36,7 +36,7 @@ jobs:
           chmod +x ./mvnw
           ./mvnw verify
       - id: result
-        name: OSSG Test Result
+        name: Sendium Test Result
         if: always()
         run: |
           echo "result=${{job.status}}" >> $GITHUB_ENV
@@ -85,7 +85,7 @@ jobs:
       - name: Google Chat Notification
         uses: jchrist/google-chat-github-action@v1
         with:
-          name: ossg Build
+          name: Sendium Build
           url: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
           status: ${{ job.status }}
         if: always()
@@ -323,7 +323,7 @@ jobs:
       - name: Google Chat Notification
         uses: jchrist/google-chat-github-action@v1
         with:
-          name: ossg Build
+          name: Sendium Build
           url: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
           status: ${{ job.status }}
         if: always()

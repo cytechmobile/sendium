@@ -6,7 +6,7 @@ on:
 jobs:
   # A single job in this workflow called "build"
   build:
-    runs-on: [ self-hosted, linux ]
+    runs-on: ubuntu-latest
     steps:
       # 1. Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - name: Checkout repository
