@@ -1,0 +1,17 @@
+name: 🤖 Automatic Issue Labeler
+
+on:
+  issues:
+    types: [opened, edited] # Run when an issue is opened or edited
+
+jobs:
+  label-issues:
+    runs-on: [ self-hosted, linux ]
+    permissions:
+      issues: write
+    steps:
+      - name: Add labels based on content
+        uses: actions/labeler@v6
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml

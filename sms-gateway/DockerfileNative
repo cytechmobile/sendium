@@ -1,0 +1,18 @@
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+RUN microdnf -y install glibc-langpack-en && \
+    microdnf clean all
+
+WORKDIR /work/
+
+COPY target/sms-gateway-1.3.0-runner ./application
+
+RUN chmod 775 ./application
+
+EXPOSE 8080 2775
+
+VOLUME ["/work/conf", "/work/logs"]
+
+# The "-Dquarkus.http.host=0.0.0.0" argument is important to make the application accessible from outside the container.
+CMD ["./application", "-Dquarkus.http.host=0.0.0.0"]
+

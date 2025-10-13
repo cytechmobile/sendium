@@ -1,0 +1,17 @@
+# Labels related to the type of issue
+documentation:
+  - 'documentation'
+  - 'docs'
+  - 'doc'
+
+bug:
+  - 'bug'
+  - 'error'
+  - 'issue'
+  - 'problem'
+  - 'crash'
+
+enhancement:
+  - 'feature'
+  - 'enhancement'
+  - 'suggestion'

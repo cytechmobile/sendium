@@ -1,0 +1,346 @@
+name: CI Pipeline
+
+on: push
+
+# By setting up concurrency group using github.ref, we essentially instruct github to only run one workflow at a time per branch
+# With "cancel-in-progress: true" we also specify that existing/running workflows for that branch will be canceled
+concurrency:
+  group: ossgTests-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: [ self-hosted, linux ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Setup Java
+        id: setup_java
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 'lts/*'
+      - name: Update NPM
+        run: npm i -g npm
+      - name: Build Backend
+        working-directory: './sms-gateway'
+        run: |
+          mkdir -p ~/.redhat
+          echo '{"disabled":true}' >> ~/.redhat/io.quarkus.analytics.localconfig
+          # reduce logs1
+          export QUARKUS_LOG_LEVEL=ERROR
+          chmod +x ./mvnw
+          ./mvnw verify
+      - id: result
+        name: OSSG Test Result
+        if: always()
+        run: |
+          echo "result=${{job.status}}" >> $GITHUB_ENV
+          echo "result=${{job.status}}" >> $GITHUB_OUTPUT
+      - name: Cancel current workflow run
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            })
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: |
+          npm install
+      - name: Prepare Backend
+        id: prepare_backend
+        working-directory: './sms-gateway'
+        run: |
+          ./mvnw quarkus:dev > ./app.log &
+      - name: Prepare UI Tests
+        shell: bash
+        if: success()
+        working-directory: './frontend'
+        run: |
+          npx playwright install --with-deps
+      - name: Run Playwright E2E tests
+        working-directory: ./frontend
+        run: |
+          npm run build -- --mode "ci"
+          npm run test:e2e
+      - name: Print backend logs on failure
+        if: failure() && steps.prepare_backend.outcome == 'success'
+        working-directory: './sms-gateway'
+        run: |
+          cat ./app.log
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: ./frontend/tests/test-results
+      - name: Google Chat Notification
+        uses: jchrist/google-chat-github-action@v1
+        with:
+          name: ossg Build
+          url: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          status: ${{ job.status }}
+        if: always()
+        # this allows the build to succeed even when the notification fails
+        continue-on-error: true
+  post-merge-actions:
+    name: Post-Merge (Version, Changelog, Release, Notify)
+    runs-on: ubuntu-latest
+    # Only run if a PR was successfully merged into the main branch
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true)
+    needs: [ tests ] # Ensures tests passed on the merge commit
+
+    steps:
+      - name: Full Checkout for Release Process
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # Required for git describe (tags) and git log (commits)
+          token: ${{ secrets.GITHUB_TOKEN }} # Use GITHUB_TOKEN for checkout and subsequent push
+          ref: 'main' # Explicitly checkout the main branch post-merge
+
+      - name: Configure Git User
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          echo "Git user configured for commits."
+
+      - name: Setup Java (GraalVM) for versioning
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+
+      - name: Check Version, Generate Changelog, and Commit Changes
+        id: version_check_release_prep
+        working-directory: './sms-gateway'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e # Exit immediately if a command exits with a non-zero status.
+          # set -x # Uncomment for detailed command printing during debugging
+          
+          echo "Ensuring local main is up-to-date with remote..."
+          git pull origin main --ff-only # Ensure working branch is latest main
+          
+          # --- Determine Current Version from ./pom.xml ----
+          if [ -f "./mvnw" ]; then # Check for Maven wrapper in 
+            chmod +x ./mvnw
+            CURRENT_PROJECT_VERSION=$(./mvnw -q -B org.apache.maven.plugins:maven-help-plugin:evaluate -Dexpression=project.version -DforceStdout)
+          elif command -v mvn &> /dev/null; then # Fallback to global mvn
+            CURRENT_PROJECT_VERSION=$(mvn -q -B org.apache.maven.plugins:maven-help-plugin:evaluate -Dexpression=project.version -DforceStdout)
+          else
+            echo "Error: Neither ./mvnw nor global mvn command found."
+            exit 1
+          fi
+          echo "Current version from ./pom.xml: ${CURRENT_PROJECT_VERSION}"
+          # --- Fetch all tags ---
+          echo "Fetching all tags..."
+          git fetch --all --tags --prune --force # Ensure all remote tags are available locally
+          
+          # --- Generate Release Notes from Commits ---
+          prevTag=$(git describe --tags --abbrev=0 2>/dev/null || echo "") # Get last tag, or empty if no tags
+          
+          commits_range_log=""
+          if [ -n "$prevTag" ]; then
+            echo "Previous tag found: $prevTag. Getting commits since then."
+            commits_range_log="$prevTag..HEAD"
+          else
+            echo "No previous tags found. Changelog will include all commits on current branch (main)."
+            commits_range_log="HEAD"
+          fi
+          
+          echo "Generating changelog for commit range: $commits_range_log"
+          commits=$(git log $commits_range_log --pretty="format:%h %s" --no-decorate)
+          
+          release_notes_body=''
+          SKIP_RELEASE="true" # Default to skipping release unless relevant commits are found
+          VSTEP='patch'       # Default version increment step: patch, minor, major
+          
+          while IFS= read -r commit_line; do
+            if [ -z "$commit_line" ]; then continue; fi
+          
+            commit_hash=$(echo "${commit_line}" | awk '{print $1}')
+            commit_subject=$(echo "${commit_line}" | cut -d' ' -f2-)
+          
+            is_merge_commit=$(git show --no-patch --format=%P "$commit_hash" | wc -w)
+            if [ "$is_merge_commit" -gt 1 ]; then
+              echo "Skipping merge commit: $commit_line"
+              continue
+            fi
+            if [[ "$commit_subject" == chore\(release\):* || "$commit_subject" == ci:* ]]; then
+                echo "Skipping CI/release chore commit: $commit_line"
+                continue
+            fi
+          
+            commit_type_extracted=$(echo "$commit_line" | cut -f2 -d' ' | cut -f1 -d':' | cut -f1 -d'(' | tr '[:upper:]' '[:lower:]')
+            is_breaking=false
+            if [[ "$commit_type_extracted" == *"!"* ]]; then
+              is_breaking=true
+              commit_type_for_logic=$(echo "$commit_type_extracted" | sed 's/!$//')
+            else
+              commit_type_for_logic="$commit_type_extracted"
+            fi
+          
+            echo "Commit: $commit_line | Extracted Type: $commit_type_for_logic | Breaking Marker: $is_breaking"
+          
+            if [[ "$is_breaking" == "true" ]]; then
+              SKIP_RELEASE="false"; VSTEP='major'
+            elif [[ "$commit_type_for_logic" == "feat" ]]; then
+              SKIP_RELEASE="false"; if [[ "$VSTEP" != "major" ]]; then VSTEP='minor'; fi
+            elif [[ "$commit_type_for_logic" == "fix" || "$commit_type_for_logic" == "perf" ]]; then
+              SKIP_RELEASE="false" # VSTEP remains patch unless already minor or major
+            fi
+            release_notes_body="${release_notes_body}* ${commit_line}
+          "
+          done <<< "${commits}"
+          
+          if [ -n "$release_notes_body" ]; then
+            release_notes_body=$(echo "${release_notes_body}" | sed 's/[[:space:]]*$//')
+          else
+            SKIP_RELEASE="true"
+          fi
+          
+          if [[ "$SKIP_RELEASE" == "true" ]]; then
+            echo "No relevant commits (feat/fix/perf or breaking change) found since last tag ($prevTag)."
+            echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+            exit 0 # Successfully exit, subsequent release step will be skipped
+          fi
+          
+          echo "Determined version increment step: $VSTEP based on commits."
+           # --- Version Bumping Logic (Corrected) ------
+          TARGET_VERSION_BASE="${CURRENT_PROJECT_VERSION}" 
+          FINAL_NEW_VERSION=""
+          VSTEP_EFFECTIVE="$VSTEP" # Use this for current iteration's bump type
+          
+          while true; do 
+            # Parse TARGET_VERSION_BASE (e.g., "1.0.0" or "0.2.5-SNAPSHOT")
+            # This correctly splits by '.' without introducing extra spaces.
+            IFS='.' read -r v_maj_raw v_min_raw v_pat_raw <<< "$TARGET_VERSION_BASE"
+          
+            v_major=${v_maj_raw:-0}
+            v_minor=${v_min_raw:-0}
+          
+            # Extract numeric part of patch, handling suffixes like -SNAPSHOT
+            # Uses grep to get leading digits only. Defaults to "0" if no digits or empty.
+            v_patch_numeric_str=$(echo "${v_pat_raw:-0}" | grep -o '^[0-9]\+' || echo "0")
+            v_patch_numeric=${v_patch_numeric_str:-0} # Ensure it's a number, default to 0
+          
+            echo "Debug: Parsed base for iteration: M=$v_major, m=$v_minor, p_num=$v_patch_numeric (from $TARGET_VERSION_BASE). VSTEP_EFFECTIVE=$VSTEP_EFFECTIVE"
+          
+            # Increment based on VSTEP_EFFECTIVE
+            if [[ "$VSTEP_EFFECTIVE" == "major" ]]; then
+              v_major=$((v_major + 1))
+              v_minor=0 # Reset minor and patch
+              v_patch_numeric=0
+            elif [[ "$VSTEP_EFFECTIVE" == "minor" ]]; then
+              v_minor=$((v_minor + 1))
+              v_patch_numeric=0 # Reset patch
+            elif [[ "$VSTEP_EFFECTIVE" == "patch" ]]; then
+              v_patch_numeric=$((v_patch_numeric + 1))
+            fi
+          
+            # Construct the proposed new version string
+            PROPOSED_VERSION="$v_major.$v_minor.$v_patch_numeric"
+            echo "Debug: Proposed version after increment: $PROPOSED_VERSION"
+          
+            # Check if this tag already exists
+            if git tag --list "${PROPOSED_VERSION}" | grep -qw "${PROPOSED_VERSION}"; then
+              echo "Tag ${PROPOSED_VERSION} already exists. Will increment patch from this version and retry."
+              TARGET_VERSION_BASE="${PROPOSED_VERSION}" # Next attempt will bump from this existing tag
+              VSTEP_EFFECTIVE="patch" # Force next increment to be a patch
+            else
+              FINAL_NEW_VERSION="${PROPOSED_VERSION}"
+              echo "Final new version determined: ${FINAL_NEW_VERSION}"
+              break # Exit loop, unique version found
+            fi
+          done
+          
+          # --- Update version in ./pom.xml ---
+          echo "Setting version to ${FINAL_NEW_VERSION} in ./pom.xml..."
+          if [ -f "./mvnw" ]; then
+            ./mvnw -q -B org.codehaus.mojo:versions-maven-plugin:set -DnewVersion="${FINAL_NEW_VERSION}" -DgenerateBackupPoms=false
+          else
+            mvn -q -B org.codehaus.mojo:versions-maven-plugin:set -DnewVersion="${FINAL_NEW_VERSION}" -DgenerateBackupPoms=false
+          fi
+          git add pom.xml # Stage ./pom.xml
+          
+          # --- Update Changelog.md (at the root) ---
+          echo "Updating Changelog.md for version ${FINAL_NEW_VERSION}..."
+          TEMP_CHANGELOG="CHANGELOG.md.tmp" # Temporary file in the root
+          {
+            echo "## ${FINAL_NEW_VERSION} ($(date +%Y-%m-%d))"
+            echo ""
+            echo "${release_notes_body}"
+            echo "" # Ensure a blank line before old content
+          } > "${TEMP_CHANGELOG}"
+          
+          if [ -f "CHANGELOG.md" ]; then # Check for existing changelog in the root
+            cat "CHANGELOG.md" >> "${TEMP_CHANGELOG}"
+          else
+            echo "Creating new CHANGELOG.md."
+          fi
+          mv "${TEMP_CHANGELOG}" "CHANGELOG.md"
+          git add CHANGELOG.md # Stage ./CHANGELOG.md
+          echo "Changelog.md updated."
+          # ------- Commit and Push all changes (./pom.xml and ./CHANGELOG.md) ---
+          
+          if git diff --staged --quiet; then
+            echo "No files were changed by the versioning script unexpectedly. Skipping commit."
+            echo "SKIP_RELEASE=true" >> "$GITHUB_ENV" # Prevent release if no files changed
+          else
+            echo "Committing version ${FINAL_NEW_VERSION} and changelog updates..."
+            COMMIT_MESSAGE_BODY="Generated release notes: ${release_notes_body}"
+            git commit -m "chore(release): Version ${FINAL_NEW_VERSION} [skip ci]" -m "${COMMIT_MESSAGE_BODY}"
+            echo "Pushing changes to main..."
+            git push origin main
+            echo "SKIP_RELEASE=false" >> "$GITHUB_ENV"
+          fi
+          # --- Set outputs for GitHub Release step ---
+          echo "VERSION=${FINAL_NEW_VERSION}" >> "$GITHUB_ENV"
+          echo 'RELEASE_NOTES_TEXT<<EOF' >> "$GITHUB_ENV"
+          echo "${release_notes_body}" >> "$GITHUB_ENV"
+          echo 'EOF' >> "$GITHUB_ENV"
+          echo "Environment variables VERSION and RELEASE_NOTES_TEXT set for release step."
+      - name: Create GitHub Release
+        id: create_gh_release
+        uses: softprops/action-gh-release@v2
+        if: success() && env.SKIP_RELEASE != 'true' && env.VERSION != ''
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
+          body: ${{ env.RELEASE_NOTES_TEXT }}
+          draft: false
+          prerelease: false
+      - name: Google Chat Notification
+        uses: jchrist/google-chat-github-action@v1
+        with:
+          name: ossg Build
+          url: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          status: ${{ job.status }}
+        if: always()
+        continue-on-error: true
+  automerge-dependabot:
+    needs: tests
+    if: success() && github.actor == 'dependabot[bot]' && github.ref != 'refs/heads/main'
+    runs-on: [ self-hosted, linux ]
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Auto-merge Dependabot PRs
+        env:
+          GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        run: |
+          echo "found successful dependabot PR, merging it"
+          gh pr merge --merge

@@ -1,0 +1,28 @@
+{
+  "name": "sms-gateway-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 8081",
+    "test:e2e": "npx playwright test"
+  },
+  "dependencies": {
+    "@mdi/font": "^7.4.47",
+    "axios": "^1.12.2",
+    "lodash-es": "^4.17.21",
+    "vue": "^3.5.22",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@mdi/js": "^7.4.47",
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^24.7.1",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "sass": "^1.93.2",
+    "vite": "^7.1.9",
+    "vite-plugin-vuetify": "^2.1.2",
+    "vuetify": "^3.10.5"
+  }
+}
