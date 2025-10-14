@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v5
       # 2. Sets up the specified version of Node.js
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 'lts/' # Specify the Node.js version you use
           cache: 'npm' # Optional: Caches npm dependencies for faster builds
