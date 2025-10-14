@@ -95,7 +95,7 @@ jobs:
     name: Post-Merge (Version, Changelog, Release, Notify)
     runs-on: ubuntu-latest
     # Only run if a PR was successfully merged into the main branch
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [ tests ] # Ensures tests passed on the merge commit
 
     steps:
@@ -331,7 +331,7 @@ jobs:
   automerge-dependabot:
     needs: tests
     if: success() && github.actor == 'dependabot[bot]' && github.ref != 'refs/heads/main'
-    runs-on: [ self-hosted, linux ]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
@@ -343,4 +343,4 @@ jobs:
           GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
         run: |
           echo "found successful dependabot PR, merging it"
-          gh pr merge --merge
+          gh pr merge --auto --rebase

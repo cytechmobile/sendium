@@ -1,4 +1,4 @@
-FROM container-registry.oracle.com/graalvm/jdk:21
+FROM container-registry.oracle.com/graalvm/jdk:25
 ENV JAVA_TOOL_OPTIONS="-XX:+UseContainerSupport"
 WORKDIR /app
 COPY target/quarkus-app/ .

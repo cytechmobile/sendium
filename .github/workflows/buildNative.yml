@@ -61,7 +61,7 @@ jobs:
           # The build context is the directory containing the Dockerfile and source
           context: ./sms-gateway
           # The path to the Dockerfile
-          file: ./sms-gateway/DockerfileNative
+          file: ./sms-gateway/Dockerfile.native
           # Push the image to the registry
           push: true
           # The tags for the image. Use your Docker Hub username.
