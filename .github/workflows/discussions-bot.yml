@@ -1,0 +1,79 @@
+name: 🤖 Discussions Helper Bot
+
+on:
+  discussion:
+    types: [created]
+
+permissions:
+  discussions: write
+
+jobs:
+  auto-label-and-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add label based on keywords
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const discussion = context.payload.discussion;
+            const title = discussion.title.toLowerCase();
+            const body = discussion.body.toLowerCase();
+            let labelToAdd = '';
+
+            if (title.includes('security')) {
+              labelToAdd = 'security';
+            } else if (title.includes('api') || body.includes('endpoint')) {
+              labelToAdd = 'api';
+            }
+
+            if (labelToAdd) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: discussion.number,
+                labels: [labelToAdd]
+              });
+            }
+
+      - name: Mention relevant code owners
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const body = context.payload.discussion.body.toLowerCase();
+            let commentBody = '';
+
+            if (body.includes('smpp')) {
+              commentBody = 'Thanks for starting this discussion! Pinging our expert @smpp-owner-username for their input.';
+            } else if (body.includes('ui') || body.includes('frontend')) {
+              commentBody = 'Great topic! Mentioning our UI specialist @frontend-lead-username to take a look.';
+            }
+
+            if (commentBody) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.discussion.number,
+                body: commentBody
+              });
+            }
+      - name: Suggest relevant documentation
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const body = context.payload.discussion.body.toLowerCase();
+            let docComment = '';
+
+            if (body.includes('how to upgrade') || body.includes('migration')) {
+              docComment = 'It looks like you are asking about upgrading. Have you seen our **[Migration Guides on the Wiki](${{ github.server_url }}/${{ github.repository }}/wiki)?** They might have the answer you are looking for!';
+            } else if (body.includes('roadmap') || body.includes('future plans')) {
+              docComment = 'For information about future features, you can check out our official **[Project Roadmap](${{ github.server_url }}/${{ github.repository }}/wiki/Roadmap)**.';
+            }
+
+            if (docComment) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.discussion.number,
+                body: docComment
+              });
+            }

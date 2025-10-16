@@ -1,8 +1,6 @@
 name: 🤖 Automatic Issue Labeler
-
 on:
-  issues:
-    types: [opened, edited] # Run when an issue is opened or edited
+  - pull_request_target
 
 jobs:
   label-issues:
