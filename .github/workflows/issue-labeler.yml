@@ -10,7 +10,7 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Add labels based on content
+      - name: Add labels based on contentdd
         uses: actions/labeler@v6
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
