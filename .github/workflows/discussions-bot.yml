@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Add label based on keywords
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             const discussion = context.payload.discussion;
@@ -36,7 +36,7 @@ jobs:
             }
 
       - name: Mention relevant code owners
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             const body = context.payload.discussion.body.toLowerCase();
@@ -57,7 +57,7 @@ jobs:
               });
             }
       - name: Suggest relevant documentation
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             const body = context.payload.discussion.body.toLowerCase();
