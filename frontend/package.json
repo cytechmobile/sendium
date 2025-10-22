@@ -21,7 +21,7 @@
     "@types/node": "^24.7.2",
     "@vitejs/plugin-vue": "^6.0.1",
     "sass": "^1.93.2",
-    "vite": "^7.1.10",
+    "vite": "^7.1.11",
     "vite-plugin-vuetify": "^2.1.2",
     "vuetify": "^3.10.5"
   }
