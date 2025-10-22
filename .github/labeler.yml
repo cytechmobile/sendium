@@ -1,8 +1,11 @@
 frontend:
-  - /frontend/**/*
+- changed-files:
+  - any-glob-to-any-file: 'frontend/**/*'
 
 backend:
-  - /sms-gateway/**/*
+- changed-files:
+  - any-glob-to-any-file: 'sms-gateway/**/*'
 
 documentation:
-  - '*.md'
+- changed-files:
+  - any-glob-to-any-file: '**/*.md'

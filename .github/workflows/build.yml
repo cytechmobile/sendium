@@ -1,35 +1,27 @@
 name: Build Docker Image
 on:
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
-  # A single job in this workflow called "build"
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - name: Checkout repository
         uses: actions/checkout@v5
-      # 2. Sets up the specified version of Node.js
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 'lts/*' # Specify the Node.js version you use
-          cache: 'npm' # Optional: Caches npm dependencies for faster builds
+          cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
-      # 3. Installs the frontend dependencies
       - name: Install Dependencies
-        # Specifies the working directory for this step
         working-directory: ./frontend
         run: npm install
 
-      # 4. Runs the build script defined in your package.json
       - name: Build Frontend Application
         working-directory: ./frontend
         run: npm run build
 
-      # 5. Move frontend assets to the Quarkus resources directory
       - name: Move Frontend Assets to Backend
         run: |
           cp -r frontend/dist/* sms-gateway/src/main/resources/META-INF/resources/
@@ -41,28 +33,20 @@ jobs:
           java-version: '25'
           distribution: 'graalvm'
 
-      # 7. Build Quarkus Backend with Maven
       - name: Build Backend Application
         working-directory: ./sms-gateway
         run: ./mvnw -B package -DskipTests
 
-      # 8. Log in to Docker Hub
-      # You must create DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets in your repository settings
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 9. Build and push the Docker image to Docker Hub
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v6
         with:
-          # The build context is the directory containing the Dockerfile and source
           context: ./sms-gateway
-          # The path to the Dockerfile
           file: ./sms-gateway/Dockerfile
-          # Push the image to the registry
           push: true
-          # The tags for the image. Use your Docker Hub username.
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/sendium:latest
