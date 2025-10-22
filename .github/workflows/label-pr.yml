@@ -6,6 +6,8 @@ jobs:
   label-issues:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
+      pull-requests: write
       issues: write
     steps:
       - name: Add labels based on content
