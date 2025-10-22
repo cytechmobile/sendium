@@ -1,9 +1,9 @@
-name: 🤖 Automatic Issue Labeler
+name: 🤖 Automatic PR Labeler
 on:
   - pull_request_target
 
 jobs:
-  label-issues:
+  label-pr:
     runs-on: ubuntu-latest
     permissions:
       contents: read
