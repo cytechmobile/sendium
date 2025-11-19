@@ -17,7 +17,7 @@
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
     <skipITs>true</skipITs>
     <surefire-plugin.version>3.5.4</surefire-plugin.version>
-    <spotless.plugin.version>3.0.0</spotless.plugin.version>
+    <spotless.plugin.version>3.1.0</spotless.plugin.version>
     <spotless.google.java.format.version>1.28.0</spotless.google.java.format.version>
 
     <quarkus.platform.version>3.29.3</quarkus.platform.version>
