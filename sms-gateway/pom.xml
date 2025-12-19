@@ -21,7 +21,7 @@
     <spotless.google.java.format.version>1.28.0</spotless.google.java.format.version>
 
     <quarkus.platform.version>3.30.4</quarkus.platform.version>
-    <cloudhopper.smpp.version>7.2.1</cloudhopper.smpp.version>
+    <cloudhopper.smpp.version>7.2.2</cloudhopper.smpp.version>
     <assertj.version>3.27.6</assertj.version>
     <wiremock.version>3.13.2</wiremock.version>
   </properties>
