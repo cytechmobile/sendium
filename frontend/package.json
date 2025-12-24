@@ -23,6 +23,6 @@
     "sass": "^1.97.1",
     "vite": "^7.3.0",
     "vite-plugin-vuetify": "^2.1.2",
-    "vuetify": "^3.11.4"
+    "vuetify": "^3.11.5"
   }
 }
