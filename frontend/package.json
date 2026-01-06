@@ -20,7 +20,7 @@
     "@playwright/test": "^1.57.0",
     "@types/node": "^25.0.3",
     "@vitejs/plugin-vue": "^6.0.3",
-    "sass": "^1.97.1",
+    "sass": "^1.97.2",
     "vite": "^7.3.0",
     "vite-plugin-vuetify": "^2.1.2",
     "vuetify": "^3.11.6"
