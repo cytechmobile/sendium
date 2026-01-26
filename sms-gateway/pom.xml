@@ -22,7 +22,7 @@
 
     <quarkus.platform.version>3.30.8</quarkus.platform.version>
     <cloudhopper.smpp.version>7.2.2</cloudhopper.smpp.version>
-    <assertj.version>3.27.6</assertj.version>
+    <assertj.version>3.27.7</assertj.version>
     <wiremock.version>3.13.2</wiremock.version>
   </properties>
 
