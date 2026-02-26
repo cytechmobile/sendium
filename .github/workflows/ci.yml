@@ -78,7 +78,7 @@ jobs:
           cat ./app.log
       - name: Upload test results on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: ./frontend/tests/test-results
