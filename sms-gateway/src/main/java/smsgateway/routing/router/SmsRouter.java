@@ -60,6 +60,7 @@ public class SmsRouter {
         payload.setToAddress(message.getTo());
         payload.setOriginatingSessionId(message.getSessionId());
         payload.setBody(message.getText());
+        payload.setForwardUrl(message.getForwardUrl());
         dlrMappingService.storeDlrPayload(message.getInternalId(), payload);
         boolean handled =
                 processMessageRecursive(message, ruleLoader.getDefaultGroupName(), new HashSet<>());

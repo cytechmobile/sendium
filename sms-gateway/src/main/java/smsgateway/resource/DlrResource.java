@@ -11,14 +11,24 @@ import java.util.Collections;
 import java.util.List;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.enums.SchemaType;
+import org.eclipse.microprofile.openapi.annotations.enums.SecuritySchemeIn;
+import org.eclipse.microprofile.openapi.annotations.enums.SecuritySchemeType;
 import org.eclipse.microprofile.openapi.annotations.media.Content;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.eclipse.microprofile.openapi.annotations.security.SecurityRequirement;
+import org.eclipse.microprofile.openapi.annotations.security.SecurityScheme;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 import smsgateway.auth.SecuredAsMessageSender;
 import smsgateway.dto.DlrForwardingPayload;
 import smsgateway.services.DlrMappingService;
 
+@SecurityScheme(
+        securitySchemeName = "ApiKeyAuth",
+        type = SecuritySchemeType.APIKEY,
+        in = SecuritySchemeIn.HEADER,
+        apiKeyName = "x-api-key")
+@SecurityRequirement(name = "ApiKeyAuth")
 @Path("/api/dlr")
 @SecuredAsMessageSender
 @Tag(

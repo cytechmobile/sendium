@@ -10,34 +10,39 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import java.time.Instant;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
+import org.eclipse.microprofile.openapi.annotations.enums.SecuritySchemeIn;
+import org.eclipse.microprofile.openapi.annotations.enums.SecuritySchemeType;
 import org.eclipse.microprofile.openapi.annotations.media.Content;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import org.eclipse.microprofile.openapi.annotations.parameters.RequestBody;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.eclipse.microprofile.openapi.annotations.security.SecurityRequirement;
+import org.eclipse.microprofile.openapi.annotations.security.SecurityScheme;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 import org.slf4j.Logger;
 import smsgateway.auth.SecuredAsMessageSender;
-import smsgateway.dto.DlrForwardingPayload;
 import smsgateway.dto.IncomingSms;
 import smsgateway.providers.LogProvider;
 import smsgateway.routing.router.SmsRouter;
-import smsgateway.services.DlrMappingService;
 
+@SecurityScheme(
+        securitySchemeName = "ApiKeyAuth",
+        type = SecuritySchemeType.APIKEY,
+        in = SecuritySchemeIn.HEADER,
+        apiKeyName = "x-api-key")
+@SecurityRequirement(name = "ApiKeyAuth")
 @Path("/api/sms")
 @SecuredAsMessageSender
 @Tag(name = "SMS", description = "Operations for sending SMS messages")
 public class SmsResource {
     private static final Logger LOGGER = LogProvider.getHttpLogger(SmsResource.class.getName());
     private final SmsRouter smsRouter;
-    private final DlrMappingService dlrMappingService;
 
     @Inject
-    public SmsResource(SmsRouter smsRouter, DlrMappingService dlrMappingService) {
+    public SmsResource(SmsRouter smsRouter) {
         this.smsRouter = smsRouter;
-        this.dlrMappingService = dlrMappingService;
     }
 
     @POST
@@ -85,16 +90,6 @@ public class SmsResource {
 
             String internalId = UUID.randomUUID().toString();
             incomingSms.setInternalId(internalId);
-
-            // Create and store DLR payload
-            DlrForwardingPayload payload = new DlrForwardingPayload();
-            payload.setForwardingId(internalId);
-            payload.setStatus("ACCEPTED"); // Consider using constants for statuses
-            payload.setReceivedAt(Instant.now());
-            payload.setFromAddress(incomingSms.getFrom());
-            payload.setToAddress(incomingSms.getTo());
-            payload.setForwardUrl(incomingSms.getForwardUrl());
-            dlrMappingService.storeDlrPayload(internalId, payload);
 
             smsRouter.route(incomingSms);
             LOGGER.info(
