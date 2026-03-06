@@ -91,10 +91,9 @@ public class DlrForwardingService {
                 logger.warn("Session not found for dlr:{}", payload);
             }
         } else {
-            String url =
-                    Strings.isNullOrEmpty(payload.getForwardUrl())
-                            ? forwardingUrl
-                            : payload.getForwardUrl();
+            String forwardUrl =
+                    dlrMappingService.getDlrPayload(payload.getForwardingId()).getForwardUrl();
+            String url = Strings.isNullOrEmpty(forwardUrl) ? forwardingUrl : forwardUrl;
             webClient
                     .postAbs(url)
                     .putHeader("Content-Type", "application/json")
