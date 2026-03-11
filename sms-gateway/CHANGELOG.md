@@ -1,3 +1,7 @@
+## 1.5.1 (2026-03-11)
+
+* 4e14fcb fix(ci): CI Workflow does not contain permissions
+
 ## 1.5.0 (2026-03-11)
 
 * 4dec55d refactor(ci): Refactored post merge action process
