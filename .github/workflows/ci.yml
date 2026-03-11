@@ -94,6 +94,8 @@ jobs:
   post-merge-actions:
     name: Post-Merge (Version, Changelog, Release, Notify)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # Only run if a PR was successfully merged into the main branch
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [ tests ] # Ensures tests passed on the merge commit
