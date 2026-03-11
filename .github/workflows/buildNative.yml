@@ -1,4 +1,6 @@
 name: Build Docker Native Image
+permissions:
+  contents: read
 on:
   workflow_dispatch:
 
