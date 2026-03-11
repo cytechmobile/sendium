@@ -1,11 +1,14 @@
 package smsgateway.services;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.Collection;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import smsgateway.dto.DlrForwardingPayload;
 import smsgateway.dto.IncomingSms;
@@ -16,50 +19,46 @@ public class DlrMappingService {
     private static final Logger logger =
             LogProvider.getRoutingLogger(DlrMappingService.class.getName());
 
-    private final ConcurrentHashMap<String, String> internalToVendorIdMap =
-            new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, String> vendorToInternalIdMap =
-            new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, DlrForwardingPayload> dlrPayloadMap =
-            new ConcurrentHashMap<>();
+    @Inject
+    @ConfigProperty(name = "sms.gateway.dlr.map.max-size", defaultValue = "100000")
+    int maxMapSize;
 
-    @Inject ObjectMapper objectMapper;
+    private Map<String, String> vendorToInternalIdMap;
+    private Map<String, DlrForwardingPayload> dlrPayloadMap;
+
+    @PostConstruct
+    public void init() {
+        // Create an LRU cache that evicts the oldest entry when maxSize is exceeded
+        vendorToInternalIdMap =
+                Collections.synchronizedMap(
+                        new LinkedHashMap<String, String>(maxMapSize, 0.75f, true) {
+                            @Override
+                            protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+                                return size() > maxMapSize;
+                            }
+                        });
+
+        dlrPayloadMap =
+                Collections.synchronizedMap(
+                        new LinkedHashMap<String, DlrForwardingPayload>(maxMapSize, 0.75f, true) {
+                            @Override
+                            protected boolean removeEldestEntry(
+                                    Map.Entry<String, DlrForwardingPayload> eldest) {
+                                return size() > maxMapSize;
+                            }
+                        });
+    }
 
     public void put(String internalId, String vendorMessageId) {
         if (internalId == null || vendorMessageId == null) {
             // Or throw an IllegalArgumentException, depending on desired behavior
             return;
         }
-        internalToVendorIdMap.put(internalId, vendorMessageId);
         vendorToInternalIdMap.put(vendorMessageId, internalId);
-    }
-
-    public ObjectMapper getObjectMapper() {
-        return objectMapper;
-    }
-
-    public String getVendorId(String internalId) {
-        return internalToVendorIdMap.get(internalId);
     }
 
     public String getInternalId(String vendorMessageId) {
         return vendorToInternalIdMap.get(vendorMessageId);
-    }
-
-    public String removeByInternalId(String internalId) {
-        String vendorId = internalToVendorIdMap.remove(internalId);
-        if (vendorId != null) {
-            vendorToInternalIdMap.remove(vendorId);
-        }
-        return vendorId;
-    }
-
-    public String removeByVendorId(String vendorMessageId) {
-        String internalId = vendorToInternalIdMap.remove(vendorMessageId);
-        if (internalId != null) {
-            internalToVendorIdMap.remove(internalId);
-        }
-        return internalId;
     }
 
     public void storeDlrPayload(String internalId, DlrForwardingPayload payload) {
@@ -72,10 +71,6 @@ public class DlrMappingService {
 
     public DlrForwardingPayload getDlrPayload(String internalId) {
         return dlrPayloadMap.get(internalId);
-    }
-
-    public DlrForwardingPayload removeDlrPayload(String internalId) {
-        return dlrPayloadMap.remove(internalId);
     }
 
     public Collection<DlrForwardingPayload> getAllDlrPayloads() {
