@@ -4,7 +4,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.example</groupId>
   <artifactId>sms-gateway</artifactId>
-  <version>1.4.1</version>
+  <version>1.5.0</version>
   <properties>
     <compiler-plugin.version>3.15.0</compiler-plugin.version>
     <maven.compiler.parameters>true</maven.compiler.parameters>

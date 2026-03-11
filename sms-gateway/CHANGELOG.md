@@ -1,3 +1,144 @@
+## 1.5.0 (2026-03-11)
+
+* 4dec55d refactor(ci): Refactored post merge action process
+* a20eef7 fix(ci): wiki publish does not contain permissions
+* 0c33c75 fix(ci): workflow build does not contain permissions
+* 09fffcc fix(ci): workflow build native does not contain permissions
+* d81f178 fix(ci): Workflow CI does not contain permissions
+* 2ff59fb feat(Send): Dlr map size
+* f2b2182 build(deps): Bump vue from 3.5.29 to 3.5.30 in /frontend
+* 8cc7fc0 build(deps-dev): Bump @types/node from 25.3.3 to 25.4.0 in /frontend
+* bc00fe2 build(deps): Bump docker/build-push-action from 6 to 7
+* 37e62b3 docs(Swagger): Added security scheme
+* 887c1b1 build(deps): Bump quarkus.platform.version in /sms-gateway
+* ddce151 build(deps-dev): Bump immutable from 5.1.3 to 5.1.5 in /frontend
+* e6921a6 build(deps-dev): Bump vuetify from 4.0.0 to 4.0.1 in /frontend
+* 7c8a615 build(deps): Bump docker/login-action from 3 to 4
+* ac2f147 build(deps-dev): Bump com.diffplug.spotless:spotless-maven-plugin
+* 127ab42 build(deps-dev): Bump @types/node from 25.3.2 to 25.3.3 in /frontend
+* e2fabf6 build(deps): Bump axios from 1.13.5 to 1.13.6 in /frontend
+* 62721f6 build(deps-dev): Bump rollup from 4.43.0 to 4.59.0 in /frontend
+* 4d73d03 build(deps): Bump actions/upload-artifact from 6 to 7
+* 7e7f955 build(deps-dev): Bump @types/node from 25.3.0 to 25.3.2 in /frontend
+* 35b8797 build(deps): Bump quarkus.platform.version in /sms-gateway
+* cab4174 build(deps): Bump vue-router from 5.0.2 to 5.0.3 in /frontend
+* a026018 build(deps): Bump vue from 3.5.28 to 3.5.29 in /frontend
+* 6871fbb build(deps-dev): Bump vuetify from 3.12.0 to 4.0.0 in /frontend
+* 7f82d78 build(deps-dev): Bump surefire-plugin.version in /sms-gateway
+* c05a741 build(deps-dev): Bump vuetify from 3.11.8 to 3.12.0 in /frontend
+* c2d742a build(deps-dev): Bump @types/node from 25.2.3 to 25.3.0 in /frontend
+* a77338c build(deps): Bump quarkus.platform.version in /sms-gateway
+* 4facf3a build(deps): Bump quarkus.platform.version in /sms-gateway
+* db435a7 build(deps-dev): Bump @types/node from 25.2.2 to 25.2.3 in /frontend
+* 94eb714 build(deps): Bump axios from 1.13.4 to 1.13.5 in /frontend
+* 885546f build(deps): Bump vue from 3.5.27 to 3.5.28 in /frontend
+* 6fa0d38 build(deps-dev): Bump @types/node from 25.2.1 to 25.2.2 in /frontend
+* 45f9dcc build(deps-dev): Bump @playwright/test in /frontend
+* 3c575dc build(deps-dev): Bump @types/node from 25.2.0 to 25.2.1 in /frontend
+* 3a16392 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 664c8bb build(deps-dev): Bump @vitejs/plugin-vue in /frontend
+* bd03c7f build(deps-dev): Bump org.apache.maven.plugins:maven-compiler-plugin
+* b00d75d build(deps): Bump vue-router from 5.0.1 to 5.0.2 in /frontend
+* c28eee3 build(deps-dev): Bump @types/node from 25.1.0 to 25.2.0 in /frontend
+* aae38e2 build(deps-dev): Bump @playwright/test in /frontend
+* 3f9d8a3 build(deps): Bump vue-router from 5.0.0 to 5.0.1 in /frontend
+* c1cb030 build(deps-dev): Bump vuetify from 3.11.7 to 3.11.8 in /frontend
+* f6201ef build(deps): Bump vue-router from 4.6.4 to 5.0.0 in /frontend
+* 1636f79 build(deps): Bump quarkus.platform.version in /sms-gateway
+* b2a1e24 build(deps-dev): Bump com.diffplug.spotless:spotless-maven-plugin
+* 6ce07e7 build(deps-dev): Bump @types/node from 25.0.10 to 25.1.0 in /frontend
+* d236d49 build(deps): Bump axios from 1.13.3 to 1.13.4 in /frontend
+* 4bdbd6d build(deps): Bump axios from 1.13.2 to 1.13.3 in /frontend
+* cb7873d build(deps-dev): Bump org.assertj:assertj-core in /sms-gateway
+* f806166 build(deps-dev): Bump com.diffplug.spotless:spotless-maven-plugin
+* db670b8 build(deps-dev): Bump @playwright/test in /frontend
+* dec7961 build(deps): Bump quarkus.platform.version in /sms-gateway
+* adbea98 build(deps-dev): Bump sass from 1.97.2 to 1.97.3 in /frontend
+* bf96e09 build(deps-dev): Bump @types/node from 25.0.9 to 25.0.10 in /frontend
+* 97190b3 build(deps): Bump lodash-es from 4.17.22 to 4.17.23 in /frontend
+* f88b27c build(deps): Bump quarkus.platform.version in /sms-gateway
+* 9b8b07e build(deps-dev): Bump vuetify from 3.11.6 to 3.11.7 in /frontend
+* e2ef9c6 build(deps-dev): Bump vite-plugin-vuetify in /frontend
+* 554d00f build(deps): Bump vue from 3.5.26 to 3.5.27 in /frontend
+* 077184a build(deps-dev): Bump @types/node from 25.0.8 to 25.0.9 in /frontend
+* cb06ee5 build(deps-dev): Bump @types/node from 25.0.6 to 25.0.8 in /frontend
+* 41384de build(deps-dev): Bump @types/node from 25.0.3 to 25.0.6 in /frontend
+* 3aca31e build(deps-dev): Bump vite from 7.3.0 to 7.3.1 in /frontend
+* 4875efc build(deps): Bump quarkus.platform.version in /sms-gateway
+* 69e3062 build(deps-dev): Bump sass from 1.97.1 to 1.97.2 in /frontend
+* cd16f20 build(deps-dev): Bump vuetify from 3.11.5 to 3.11.6 in /frontend
+* e2b4192 build(deps-dev): Bump vuetify from 3.11.4 to 3.11.5 in /frontend
+* 441bb34 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 86ec942 build(deps-dev): Bump sass from 1.97.0 to 1.97.1 in /frontend
+* e234113 build(deps): Bump com.github.cytechmobile:cloudhopper-smpp
+* 3411750 build(deps): Bump vue from 3.5.25 to 3.5.26 in /frontend
+* 5e36732 build(deps-dev): Bump vuetify from 3.11.3 to 3.11.4 in /frontend
+* 86265f2 build(deps-dev): Bump @types/node from 25.0.2 to 25.0.3 in /frontend
+* c569544 build(deps): Bump lodash-es from 4.17.21 to 4.17.22 in /frontend
+* 225cea4 build(deps-dev): Bump sass from 1.96.0 to 1.97.0 in /frontend
+* d8d477e build(deps): Bump quarkus.platform.version in /sms-gateway
+* dc47c6c build(deps-dev): Bump vite from 7.2.7 to 7.3.0 in /frontend
+* 9e3a072 build(deps-dev): Bump @types/node from 25.0.1 to 25.0.2 in /frontend
+* 107fbb6 build(deps-dev): Bump @vitejs/plugin-vue in /frontend
+* 3aca546 build(deps-dev): Bump @types/node from 25.0.0 to 25.0.1 in /frontend
+* 9cb4279 build(deps): Bump actions/upload-artifact from 5 to 6
+* 4757762 build(deps): Bump vue-router from 4.6.3 to 4.6.4 in /frontend
+* f8bfd31 build(deps-dev): Bump sass from 1.95.1 to 1.96.0 in /frontend
+* 0fea4fc build(deps-dev): Bump sass from 1.95.0 to 1.95.1 in /frontend
+* 293d2b0 build(deps-dev): Bump @types/node from 24.10.2 to 25.0.0 in /frontend
+* e38c9c2 build(deps): Bump quarkus.platform.version in /sms-gateway
+* cf285a3 build(deps-dev): Bump vuetify from 3.11.2 to 3.11.3 in /frontend
+* cd4e8dc build(deps-dev): Bump @types/node from 24.10.1 to 24.10.2 in /frontend
+* 54a2376 build(deps-dev): Bump vite from 7.2.6 to 7.2.7 in /frontend
+* fc17a31 build(deps-dev): Bump sass from 1.94.2 to 1.95.0 in /frontend
+* 0d4465a build(deps-dev): Bump vuetify from 3.11.1 to 3.11.2 in /frontend
+* db7c86a build(deps): Bump quarkus.platform.version in /sms-gateway
+* b762764 build(deps-dev): Bump vite from 7.2.4 to 7.2.6 in /frontend
+* 56bcda2 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 4608421 build(deps-dev): Bump @playwright/test in /frontend
+* 9717b06 build(deps): Bump actions/checkout from 5 to 6
+* 9128300 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 1760564 build(deps-dev): Bump vuetify from 3.10.11 to 3.11.1 in /frontend
+* 4315b36 build(deps-dev): Bump vite from 7.2.2 to 7.2.4 in /frontend
+* f36b03d build(deps-dev): Bump sass from 1.94.1 to 1.94.2 in /frontend
+* 53da2ad build(deps): Bump vue from 3.5.24 to 3.5.25 in /frontend
+* 656ed0b build(deps): Bump com.diffplug.spotless:spotless-maven-plugin
+* 0f88ae7 ci(workflow): Added auto approve for dependabot
+* c1ad606 build(deps-dev): Bump @vitejs/plugin-vue in /frontend
+* b593339 build(deps-dev): Bump vuetify from 3.10.10 to 3.10.11 in /frontend
+* dd8b9c6 build(deps): Bump actions/github-script from 6 to 8
+* 5cb08ff build(deps-dev): Bump org.wiremock:wiremock-standalone in /sms-gateway
+* 679e627 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 069233a build(deps-dev): Bump sass from 1.93.2 to 1.94.0 in /frontend
+* 13b873c build(deps): Bump axios from 1.13.1 to 1.13.2 in /frontend
+* 68c59ab build(deps): Bump vue from 3.5.22 to 3.5.24 in /frontend
+* 1fea964 build(deps-dev): Bump vite from 7.1.12 to 7.2.2 in /frontend
+* 1323685 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 2c5d084 build(deps): Bump actions/upload-artifact from 4 to 5
+* 1a2cfaf build(deps): Bump vue-router from 4.6.0 to 4.6.3 in /frontend
+* 71089e0 Create CODE_OF_CONDUCT.md
+* 5e58a56 build(deps-dev): Bump vuetify from 3.10.5 to 3.10.8 in /frontend
+* cbb447e build(deps): Bump axios from 1.12.2 to 1.13.1 in /frontend
+* 1095e57 build(deps-dev): Bump @types/node from 24.9.1 to 24.9.2 in /frontend
+* ef847cb build(deps-dev): Bump vite from 7.1.11 to 7.1.12 in /frontend
+* 19ad0da build(deps-dev): Bump vite from 7.1.10 to 7.1.11 in /frontend
+* a5a5853 build(deps-dev): Bump @types/node from 24.7.2 to 24.9.1 in /frontend
+* 1061e66 build(deps-dev): Bump @playwright/test in /frontend
+* d790f16 docs: Automations
+* b9acdda docs: test
+* e825bc7 docs: test
+* 8e3865b docs: test
+* 4ee38d2 docs: test
+* a0243b0 build(deps-dev): Bump @types/node from 24.7.1 to 24.7.2 in /frontend
+* 0eba228 build(deps): Bump actions/setup-node from 5 to 6
+* 2c95145 build(deps-dev): Bump vite from 7.1.9 to 7.1.10 in /frontend
+* 6aee975 build(deps): Bump vue-router from 4.5.1 to 4.6.0 in /frontend
+* 7b3d069 build: rename Dockerfile.native and fix automerge job
+* aa3ad61 build(deps): Bump com.github.cytechmobile:cloudhopper-smpp
+* b413ed3 ci(workflow): Additional setup on contributing
+* 2f1d08f build(app): Initial commit
+* 9e61560 Initial commit
+
 ## 1.4.1 (2025-10-10)
 
 * f270286 fix(ci): bug template
