@@ -7,6 +7,8 @@ on:
 jobs:
   publish-migration-guide:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout main repository
         uses: actions/checkout@v6
