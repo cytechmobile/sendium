@@ -1,10 +1,12 @@
 package smsgateway.resource;
 
 import com.google.common.base.Strings;
+import io.smallrye.faulttolerance.api.RateLimit;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import org.eclipse.microprofile.openapi.annotations.Operation;
@@ -29,6 +31,7 @@ import smsgateway.providers.LogProvider;
         in = SecuritySchemeIn.HEADER,
         apiKeyName = "x-api-key")
 @SecurityRequirement(name = "ApiKeyAuth")
+@RateLimit(value = 5, window = 1, windowUnit = ChronoUnit.SECONDS)
 @Path("/api/admin/api-keys")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)

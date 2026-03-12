@@ -1,5 +1,6 @@
 package smsgateway.resource;
 
+import io.smallrye.faulttolerance.api.RateLimit;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -9,6 +10,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import org.eclipse.microprofile.openapi.annotations.Operation;
@@ -34,6 +36,7 @@ import smsgateway.routing.loader.RoutingRuleLoader;
         in = SecuritySchemeIn.HEADER,
         apiKeyName = "x-api-key")
 @SecurityRequirement(name = "ApiKeyAuth")
+@RateLimit(value = 5, window = 1, windowUnit = ChronoUnit.SECONDS)
 @Path("/api/admin/routing-rules")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)

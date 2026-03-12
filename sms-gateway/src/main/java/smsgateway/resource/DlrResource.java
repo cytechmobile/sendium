@@ -1,10 +1,12 @@
 package smsgateway.resource;
 
+import io.smallrye.faulttolerance.api.RateLimit;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -29,6 +31,7 @@ import smsgateway.services.DlrMappingService;
         in = SecuritySchemeIn.HEADER,
         apiKeyName = "x-api-key")
 @SecurityRequirement(name = "ApiKeyAuth")
+@RateLimit(value = 5, window = 1, windowUnit = ChronoUnit.SECONDS)
 @Path("/api/dlr")
 @SecuredAsMessageSender
 @Tag(

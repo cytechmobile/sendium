@@ -3,6 +3,7 @@ package smsgateway.resource;
 import com.cloudhopper.commons.charset.CharsetUtil;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.smallrye.faulttolerance.api.RateLimit;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -10,6 +11,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.enums.SecuritySchemeIn;
@@ -47,6 +49,7 @@ public class SmsResource {
 
     @POST
     @Path("/send")
+    @RateLimit(value = 500, window = 1, windowUnit = ChronoUnit.SECONDS)
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     @Operation(summary = "Send an SMS message", description = "Sends a new SMS message.")
