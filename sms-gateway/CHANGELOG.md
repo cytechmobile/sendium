@@ -1,3 +1,7 @@
+## 1.7.0 (2026-03-12)
+
+* ff96d39 feat(http): Added rate limits on http requests received
+
 ## 1.6.0 (2026-03-12)
 
 * 12b1555 feat(metrics): Added support for metrics with micrometer for Prometheus
