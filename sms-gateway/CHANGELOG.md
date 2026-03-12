@@ -1,3 +1,10 @@
+## 1.6.0 (2026-03-12)
+
+* 12b1555 feat(metrics): Added support for metrics with micrometer for Prometheus
+* 8f9b3b0 build(deps): Bump quarkus.platform.version in /sms-gateway
+* be7daa4 build(deps-dev): Bump sass from 1.97.3 to 1.98.0 in /frontend
+* 19bb388 build(deps): Bump actions/create-github-app-token from 1 to 2
+
 ## 1.5.1 (2026-03-11)
 
 * 4e14fcb fix(ci): CI Workflow does not contain permissions
