@@ -1,0 +1,26 @@
+name: Gateway Dependency Check
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * *'
+
+jobs:
+  DependencyCheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+      - name: Setup Java
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: 25
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check Gateway Dependencies
+        working-directory: ./sms-gatway
+        run: |
+          MVN_OPTS="-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true --batch-mode --fail-at-end --show-version"
+          OWASP_VERSION=$(curl -s https://dependency-check.github.io/DependencyCheck/current.txt | head -1)
+          ./mvnw "org.owasp:dependency-check-maven:${OWASP_VERSION}":check -DfailBuildOnCVSS=7 ${MVN_OPTS}
