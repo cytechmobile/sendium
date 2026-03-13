@@ -1,3 +1,11 @@
+## 1.8.0 (2026-03-13)
+
+* df4ea9a feat(security): Added automated dependency chek workflow
+* cf11216 build(deps-dev): Bump @types/node from 25.4.0 to 25.5.0 in /frontend
+* 6606a24 build(deps-dev): Bump vite from 7.3.1 to 8.0.0 in /frontend
+* 02f933c build(deps-dev): Bump vuetify from 4.0.1 to 4.0.2 in /frontend
+* a66491e build(deps-dev): Bump @vitejs/plugin-vue in /frontend
+
 ## 1.7.0 (2026-03-12)
 
 * ff96d39 feat(http): Added rate limits on http requests received
