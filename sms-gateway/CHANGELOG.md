@@ -1,3 +1,32 @@
+## 1.8.1 (2026-04-10)
+
+* c11b035 fix(ci): Fixed build process
+* 278a859 build(deps-dev): Bump vite from 8.0.7 to 8.0.8 in /frontend
+* 3283a9c build(deps): Bump axios from 1.14.0 to 1.15.0 in /frontend
+* b263e38 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 03061ef build(deps-dev): Bump vite from 8.0.5 to 8.0.7 in /frontend
+* 2886d6c build(deps-dev): Bump vite from 8.0.3 to 8.0.5 in /frontend
+* 7ae3615 build(deps-dev): Bump sass from 1.98.0 to 1.99.0 in /frontend
+* 1f06efc build(deps-dev): Bump @types/node from 25.5.0 to 25.5.2 in /frontend
+* 16fb756 build(deps): Bump vue from 3.5.31 to 3.5.32 in /frontend
+* 050cdc0 build(deps-dev): Bump vuetify from 4.0.4 to 4.0.5 in /frontend
+* badf672 build(deps): Bump quarkus.platform.version in /sms-gateway
+* 34ddf44 build(deps-dev): Bump @playwright/test in /frontend
+* 82a31bf build(deps): Bump lodash-es from 4.17.23 to 4.18.1 in /frontend
+* 535d909 build(deps): Bump axios from 1.13.6 to 1.14.0 in /frontend
+* 7e516a6 build(deps-dev): Bump vite from 8.0.2 to 8.0.3 in /frontend
+* 902676a build(deps-dev): Bump picomatch from 2.3.1 to 2.3.2 in /frontend
+* b7b3277 build(deps): Bump yaml from 2.8.2 to 2.8.3 in /frontend
+* 7c2e121 build(deps): Bump vue from 3.5.30 to 3.5.31 in /frontend
+* e2d7411 build(deps-dev): Bump vuetify from 4.0.3 to 4.0.4 in /frontend
+* 878ddaf build(deps-dev): Bump vite from 8.0.1 to 8.0.2 in /frontend
+* d1cd326 build(deps-dev): Bump vite from 8.0.0 to 8.0.1 in /frontend
+* 8e26f3f build(deps): Bump vue-router from 5.0.3 to 5.0.4 in /frontend
+* f7fb8ad build(deps-dev): Bump vuetify from 4.0.2 to 4.0.3 in /frontend
+* 6a4e5df build(deps-dev): Bump com.diffplug.spotless:spotless-maven-plugin
+* 0277ae1 build(deps): Bump quarkus.platform.version in /sms-gateway
+* ea98d84 build(deps): Bump actions/create-github-app-token from 2 to 3
+
 ## 1.8.0 (2026-03-13)
 
 * df4ea9a feat(security): Added automated dependency chek workflow
