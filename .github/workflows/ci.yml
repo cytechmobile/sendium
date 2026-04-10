@@ -45,7 +45,7 @@ jobs:
           echo "result=${{job.status}}" >> $GITHUB_OUTPUT
       - name: Cancel current workflow run
         if: failure()
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             github.rest.actions.cancelWorkflowRun({
