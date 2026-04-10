@@ -26,6 +26,7 @@ jobs:
 
       - name: Move Frontend Assets to Backend
         run: |
+          mkdir -p sms-gateway/src/main/resources/META-INF/resources/
           cp -r frontend/dist/* sms-gateway/src/main/resources/META-INF/resources/
 
       - name: Setup Java
@@ -37,7 +38,9 @@ jobs:
 
       - name: Build Backend Application
         working-directory: ./sms-gateway
-        run: ./mvnw -B package -DskipTests
+        run: |
+          chmod +x mvnw
+          ./mvnw -B package -DskipTests
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
