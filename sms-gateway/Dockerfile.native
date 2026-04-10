@@ -5,7 +5,7 @@ RUN microdnf -y install glibc-langpack-en && \
 
 WORKDIR /work/
 
-COPY target/sms-gateway-1.3.0-runner ./application
+COPY target/*-runner ./application
 
 RUN chmod 775 ./application
 

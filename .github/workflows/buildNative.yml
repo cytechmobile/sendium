@@ -55,4 +55,4 @@ jobs:
           context: ./sms-gateway
           file: ./sms-gateway/Dockerfile.native
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/sendium:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/sendium:latest-native
