@@ -320,7 +320,7 @@ jobs:
           echo "Environment variables VERSION and RELEASE_NOTES_TEXT set for release step."
       - name: Create GitHub Release
         id: create_gh_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: success() && env.SKIP_RELEASE != 'true' && env.VERSION != ''
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
