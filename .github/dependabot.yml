@@ -1,0 +1,52 @@
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: daily
+      time: "20:00"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build(maven)
+    groups:
+      quarkus:
+        patterns:
+          - io.quarkus*
+          - io.quarkus.platform*
+      maven-plugins:
+        patterns:
+          - org.apache.maven.plugins:*
+          - io.smallrye:jandex-maven-plugin
+      test-dependencies:
+        patterns:
+          - org.assertj:*
+          - org.mockito:*
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: "daily"
+      time: "20:00"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build(actions)
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /sendium-app/src/main/docker
+    schedule:
+      interval: "daily"
+      time: "20:00"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps(docker)
+    groups:
+      docker-images:
+        patterns:
+          - "*"

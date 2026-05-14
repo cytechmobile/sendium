@@ -1,0 +1,68 @@
+name: Run Tests
+
+on: push
+
+concurrency:
+  group: SendiumTests-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Setup Java
+        id: setup_java
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: 25
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Backend
+        run: |
+          export QUARKUS_LOG_LEVEL=ERROR
+          chmod +x ./mvnw
+          ./mvnw verify
+      - id: result
+        name: Sendium Test Result
+        if: always()
+        run: |
+          echo "result=${{job.status}}" >> $GITHUB_ENV
+          echo "result=${{job.status}}" >> $GITHUB_OUTPUT
+      - name: Cancel current workflow run
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            })
+      - name: Google Chat Notification
+        uses: jchrist/google-chat-github-action@v1
+        with:
+          name: Sendium Build
+          url: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          status: ${{ job.status }}
+        if: always()
+        continue-on-error: true
+  automerge-dependabot:
+    needs: tests
+    if: success() && github.actor == 'dependabot[bot]' && github.ref != 'refs/heads/main'
+    runs-on: [self-hosted, linux]
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Auto-merge Dependabot PRs
+        env:
+          GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        run: |
+          echo "found successful dependabot PR, merging it"
+          gh pr merge --auto --rebase

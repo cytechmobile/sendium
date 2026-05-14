@@ -1,0 +1,23 @@
+name: Publish package
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: [self-hosted, linux]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          server-id: github # Matches the ID in pom.xml
+      - name: Publish to GitHub Packages
+        run: |
+          ./mvnw -B deploy -DskipTests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
