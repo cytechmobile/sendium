@@ -14,13 +14,13 @@
         <module>sendium-app</module>
     </modules>
 
-   <!-- <distributionManagement>
+    <distributionManagement>
         <repository>
             <id>github</id>
             <name>GitHub Packages</name>
             <url>https://maven.pkg.github.com/cytechmobile/sendium</url>
         </repository>
-    </distributionManagement>-->
+    </distributionManagement>
 
     <properties>
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
