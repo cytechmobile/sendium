@@ -1,0 +1,7 @@
+backend:
+- changed-files:
+  - any-glob-to-any-file: 'sendium/**/*'
+
+documentation:
+- changed-files:
+  - any-glob-to-any-file: '**/*.md'
