@@ -11,6 +11,14 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import org.eclipse.microprofile.openapi.annotations.Operation;
+import org.eclipse.microprofile.openapi.annotations.media.Content;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponses;
+import org.eclipse.microprofile.openapi.annotations.tags.Tag;
+
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;
@@ -24,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 @Path("/sendsms")
+@Tag(name = "sendsms", description = "Operations for sending SMS messages via a Kannel-compatible HTTP interface")
 public class KannelResource {
     private static final Logger logger = LoggerFactory.getLogger(KannelResource.class);
 
@@ -31,36 +40,70 @@ public class KannelResource {
     InMemoryQueueProvider queueProvider;
 
     @Inject
-    CredentialFileWatcher  credentialFileWatcher;
+    CredentialFileWatcher credentialFileWatcher;
 
     @Inject
-    InMemoryDlrService  dlrService;
+    InMemoryDlrService dlrService;
 
+    @Operation(
+            operationId = "sendSms",
+            summary = "Send an SMS message",
+            description = "Enqueues an SMS message for delivery. Expects Kannel-compatible GET parameters for authentication, routing, and message payload."
+    )
+    @APIResponses(value = {
+            @APIResponse(
+                    responseCode = "202",
+                    description = "Message successfully accepted and enqueued. Returns the message serial UUID.",
+                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(implementation = String.class, examples = "123e4567-e89b-12d3-a456-426614174000"))
+            ),
+            @APIResponse(
+                    responseCode = "400",
+                    description = "Bad Request. Missing required parameters like 'to', 'from', or 'text'.",
+                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(examples = "Missing 'to' parameter"))
+            ),
+            @APIResponse(
+                    responseCode = "401",
+                    description = "Unauthorized. Invalid or missing username/password credentials.",
+                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(examples = "Invalid credentials"))
+            ),
+            @APIResponse(
+                    responseCode = "500",
+                    description = "Internal Server Error while processing the SMS.",
+                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(examples = "Error processing SMS"))
+            ),
+            @APIResponse(
+                    responseCode = "503",
+                    description = "Service Unavailable. Temporal failure, usually due to a queue enqueue interruption.",
+                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(examples = "Temporal failure, try again later."))
+            )
+    })
     @GET
     @PermitAll
     @Produces(MediaType.TEXT_PLAIN)
     public Response receiveSms(
-            @QueryParam("username") String username,
-            @QueryParam("password") String password,
-            @QueryParam("from") String from,
-            @QueryParam("to") String to,
-            @QueryParam("text") String text,
-            @QueryParam("charset") String charset,
-            @QueryParam("udh") String udh,
-            @QueryParam("smsc") String smsc,
-            @QueryParam("mclass") Integer mclass,
-            @QueryParam("coding") Integer coding,
-            @QueryParam("validity") Integer validity,
-            @QueryParam("deferred") Integer deferred,
-            @QueryParam("dlr-url") String dlrUrl,
-            @QueryParam("pid") Integer pid,
-            @QueryParam("alt-dcs") Integer altDcs,
-            @QueryParam("rpi") Integer rpi,
-            @QueryParam("account") String account,
-            @QueryParam("binfo") String binfo,
-            @QueryParam("priority") Integer priority,
-            @QueryParam("user") String user,
-            @QueryParam("pass") String pass) {
+            @Parameter(description = "Username for authentication (preferred over 'user')" , required = true) @QueryParam("username") String username,
+            @Parameter(description = "Password for authentication (preferred over 'pass')" , required = true) @QueryParam("password") String password,
+            @Parameter(description = "Sender ID (phone number or alphanumeric string)", required = true) @QueryParam("from") String from,
+            @Parameter(description = "Recipient phone number", required = true) @QueryParam("to") String to,
+            @Parameter(description = "Message payload (URL encoded)", required = true) @QueryParam("text") String text,
+            @Parameter(description = "Character set of the text parameter (e.g., UTF-8, ISO-8859-1)") @QueryParam("charset") String charset,
+            @Parameter(description = "User Data Header (UDH) in hex format for concatenated messages or special encoding") @QueryParam("udh") String udh,
+            @Parameter(description = "Target SMSC routing ID") @QueryParam("smsc") String smsc,
+            @Parameter(description = "Message class (0 = Flash, 1 = ME specific, 2 = SIM specific, 3 = TE specific)") @QueryParam("mclass") Integer mclass,
+            @Parameter(description = "Data coding scheme (0 = 7-bit, 1 = 8-bit, 2 = UCS-2)") @QueryParam("coding") Integer coding,
+            @Parameter(description = "Validity period in minutes") @QueryParam("validity") Integer validity,
+            @Parameter(description = "Deferred delivery time in minutes") @QueryParam("deferred") Integer deferred,
+            @Parameter(description = "Delivery report (DLR) callback URL. Supports Kannel variables like %d (status), %A (reply), etc.",
+                    example = "https://your-backend.example.com/dlr?msgid=12345&status=%d") @QueryParam("dlr-url") String dlrUrl,
+            @Parameter(description = "Protocol Identifier (PID)") @QueryParam("pid") Integer pid,
+            @Parameter(description = "Alternative Data Coding Scheme") @QueryParam("alt-dcs") Integer altDcs,
+            @Parameter(description = "Return Path Indicator") @QueryParam("rpi") Integer rpi,
+            @Parameter(description = "Accounting identifier/owner ID for the message") @QueryParam("account") String account,
+            @Parameter(description = "Billing information") @QueryParam("binfo") String binfo,
+            @Parameter(description = "Message priority (e.g., 0, 1, 2, 3)") @QueryParam("priority") Integer priority,
+            @Parameter(description = "Username for authentication (alternative to 'username') ") @QueryParam("user") String user,
+            @Parameter(description = "Password for authentication (alternative to 'password') ") @QueryParam("pass") String pass) {
+
         String usr = Strings.isNullOrEmpty(user) ? username : user;
         String passwrd = Strings.isNullOrEmpty(pass) ? password : pass;
         validateKannelAuth(usr, passwrd);
