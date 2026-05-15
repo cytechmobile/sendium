@@ -13,6 +13,8 @@ public interface CoreMessage {
 
     public long getLongValue(int pidx) throws IllegalArgumentException;
 
+    public double getDoubleValue(int pidx) throws IllegalArgumentException;
+
     public float getFloatValue(int pidx) throws IllegalArgumentException;
 
     public short getShortValue(int pidx) throws IllegalArgumentException;

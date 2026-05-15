@@ -243,7 +243,7 @@ public class RoutingRule {
         private int intValue;
         private boolean booleanValue;
         private long longValue;
-        private float floatValue;
+        private double doubleValue;
         private short shortValue;
         private char charValue;
         private byte byteValue;
@@ -274,7 +274,7 @@ public class RoutingRule {
             intValue = 0;
             booleanValue = false;
             longValue = 0;
-            floatValue = 0;
+            doubleValue = 0;
             shortValue = 0;
             charValue = 0;
             byteValue = 0;
@@ -331,8 +331,8 @@ public class RoutingRule {
                     staticMsg.getLongValue(fieldIdx);
                     break; // long
                 case 5:
-                    staticMsg.getFloatValue(fieldIdx);
-                    break; // float
+                    staticMsg.getDoubleValue(fieldIdx);
+                    break; // float/double
                 case 6:
                     staticMsg.getShortValue(fieldIdx);
                     break; // short
@@ -370,8 +370,8 @@ public class RoutingRule {
                     longValue = Long.parseLong(value);
                     break; // long
                 case 5:
-                    floatValue = Float.parseFloat(value);
-                    break; // float
+                    doubleValue = Double.parseDouble(value);
+                    break; // float/double
                 case 6:
                     shortValue = Short.parseShort(value);
                     break; // short
@@ -560,8 +560,8 @@ public class RoutingRule {
                     match = matchLong(pMsg);
                     break; // long
                 case 5:
-                    match = matchFloat(pMsg);
-                    break; // float
+                    match = matchDouble(pMsg);
+                    break; // float/double
                 case 6:
                     match = matchShort(pMsg);
                     break; // short
@@ -673,19 +673,19 @@ public class RoutingRule {
             }
         }
 
-        private boolean matchFloat(CoreMessage pMsg) {
-            float msgVal = pMsg.getFloatValue(fieldIdx);
+        private boolean matchDouble(CoreMessage pMsg) {
+            double msgVal = pMsg.getDoubleValue(fieldIdx);
             switch (polIdx) {
                 case 12:
-                    return msgVal == floatValue;
+                    return msgVal == doubleValue;
                 case 13:
-                    return msgVal > floatValue;
+                    return msgVal > doubleValue;
                 case 14:
-                    return msgVal >= floatValue;
+                    return msgVal >= doubleValue;
                 case 15:
-                    return msgVal < floatValue;
+                    return msgVal < doubleValue;
                 case 16:
-                    return msgVal <= floatValue;
+                    return msgVal <= doubleValue;
                 default:
                     return false;
             }
