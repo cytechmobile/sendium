@@ -638,13 +638,34 @@ public class StandardMessage implements Comparable<StandardMessage>, CoreMessage
                 case 42: return (Float) field8;
                 case 43: return (Float) field9;
                 case 44: return (Float) field10;
-                case 71: return (float) marginPercentage;
             }
         } catch (Exception e) {
             logger.warn("error converting field {} to float", pidx);
         }
         throw new IllegalArgumentException("Field number: " + pidx + " is not float");
     }
+
+    public double getDoubleValue(int pidx) throws IllegalArgumentException {
+        try {
+            switch (pidx) {
+                case 35: return ((Number) field1).doubleValue();
+                case 36: return ((Number) field2).doubleValue();
+                case 37: return ((Number) field3).doubleValue();
+                case 38: return ((Number) field4).doubleValue();
+                case 39: return ((Number) field5).doubleValue();
+                case 40: return ((Number) field6).doubleValue();
+                case 41: return ((Number) field7).doubleValue();
+                case 42: return ((Number) field8).doubleValue();
+                case 43: return ((Number) field9).doubleValue();
+                case 44: return ((Number) field10).doubleValue();
+                case 71: return marginPercentage;
+            }
+        } catch (Exception e) {
+            logger.warn("error converting field {} to double", pidx);
+        }
+        throw new IllegalArgumentException("Field number: " + pidx + " is not double");
+    }
+
 
     public char getCharValue(int pidx) throws IllegalArgumentException {
         try {
