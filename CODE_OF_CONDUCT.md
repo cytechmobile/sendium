@@ -62,4 +62,4 @@ Contributor Covenant.
 ---
 
 **Contact:** **info@sendium.org**  
-**Last updated:** 2025-11-17
+**Last updated:** 2026-05-18
