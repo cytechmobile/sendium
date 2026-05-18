@@ -11,6 +11,10 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.media.Content;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
@@ -18,11 +22,6 @@ import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponses;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
-
-import jakarta.ws.rs.QueryParam;
-import jakarta.ws.rs.WebApplicationException;
-import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,7 +53,8 @@ public class KannelResource {
             @APIResponse(
                     responseCode = "202",
                     description = "Message successfully accepted and enqueued. Returns the message serial UUID.",
-                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(implementation = String.class, examples = "123e4567-e89b-12d3-a456-426614174000"))
+                    content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(implementation = String.class,
+                            examples = "123e4567-e89b-12d3-a456-426614174000"))
             ),
             @APIResponse(
                     responseCode = "400",
@@ -81,8 +81,8 @@ public class KannelResource {
     @PermitAll
     @Produces(MediaType.TEXT_PLAIN)
     public Response receiveSms(
-            @Parameter(description = "Username for authentication (preferred over 'user')" , required = true) @QueryParam("username") String username,
-            @Parameter(description = "Password for authentication (preferred over 'pass')" , required = true) @QueryParam("password") String password,
+            @Parameter(description = "Username for authentication (preferred over 'user')", required = true) @QueryParam("username") String username,
+            @Parameter(description = "Password for authentication (preferred over 'pass')", required = true) @QueryParam("password") String password,
             @Parameter(description = "Sender ID (phone number or alphanumeric string)", required = true) @QueryParam("from") String from,
             @Parameter(description = "Recipient phone number", required = true) @QueryParam("to") String to,
             @Parameter(description = "Message payload (URL encoded)", required = true) @QueryParam("text") String text,
