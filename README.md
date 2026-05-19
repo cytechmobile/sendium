@@ -18,7 +18,13 @@ Eliminate vendor lock-in, manage your own routing logic, and scale your messagin
 * **High Throughput:** Designed for low latency and massive scale.
 
 ---
+## 🏢 Backed by Cytech
 
+**Sendium** is proudly created and maintained by **[Cytech](https://www.cytechmobile.com/)**.
+
+With over 20 years of experience building high-performance telecommunications software, we open-sourced Sendium to provide the community with a modern, reliable Kannel alternative. Sendium is also the underlying routing engine that powers **[mcore](https://www.cytechmobile.com/mobile/mcore-a2p-wholesale-platform/)**, our complete enterprise business platform.
+
+---
 ## 🛠 Core Capabilities
 
 | Feature | Description |
@@ -121,6 +127,23 @@ docker run -d --name sendium \
 ```
 
 ## 💬 Documentation & Support
+
+The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, and community resources.
+
+Key docs:
+
+1. **[Architecture Overview](docs/01-architecture.md):** Understand runtime components, queues, routing flow, workers, DLRs with diagrams.
+2. **[Docker Deployment](docs/02-docker-deployment.md):** Run Sendium with Docker, volumes, ports, logs, and startup checks.
+3. **[Authentication & Security](docs/03-auth-security.md):** Configure HTTP and SMPP credentials.
+4. **[SMPP Configuration](docs/04-smpp-configuration.md):** Configure SMPP server, SMPP client, worker behavior, TLS, retries, and logging.
+5. **[Routing Engine](docs/05-routing-engine.md):** Configure routing tables, rules, operators, and fallbacks.
+6. **[HTTP API](docs/06-http-api.md):** Submit SMS through the Kannel-compatible `/sendsms` endpoint.
+7. **[Webhooks](docs/07-webhooks.md):** Configure DLR callbacks and MO forwarding.
+8. **[Monitoring & Observability](docs/08-monitoring-observability.md):** Expose Prometheus metrics and configure Prometheus/Grafana.
+9. **[Configuration Reference](docs/09-configuration-reference.md):** Review paths, Docker environment variables, logging, and OpenAPI endpoints.
+10. **[Troubleshooting](docs/10-troubleshooting.md):** Diagnose common setup and runtime issues.
+
+When Sendium is running, API discovery is available at `/swagger-ui` and `/openapi.json`.
 
 If you run into issues, have questions, or want to share what you're building, we'd love to hear from you! We use **[GitHub Discussions](https://github.com/cytechmobile/sendium/discussions)** for our community hub.
 
