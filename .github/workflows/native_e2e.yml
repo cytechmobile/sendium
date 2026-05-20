@@ -1,0 +1,49 @@
+name: Native E2E Tests
+
+on:
+  pull_request:
+    paths:
+      - 'sendium-core/**'
+      - 'sendium-app/**'
+      - 'pom.xml'
+      - '.github/workflows/native_e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: SendiumNativeE2E-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: 25
+          distribution: graalvm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build native application
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -B clean install -DskipTests
+          ./mvnw -B package -pl sendium-app -Pnative -Dquarkus.native.container-build=false
+
+      - name: Build native Docker image
+        run: docker build -t sendium:native-e2e -f sendium-app/src/main/docker/Dockerfile.native sendium-app
+
+      - name: Run native E2E smoke tests
+        env:
+          SENDIUM_NATIVE_IMAGE: sendium:native-e2e
+        run: |
+          ./mvnw -B -pl sendium-core -DskipTests test-compile org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
+            -Dexec.classpathScope=test \
+            -Dexec.mainClass=utils.NativeE2eSmoke

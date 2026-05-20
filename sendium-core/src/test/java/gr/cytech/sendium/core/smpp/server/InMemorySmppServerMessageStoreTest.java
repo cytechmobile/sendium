@@ -7,6 +7,7 @@ import gr.cytech.sendium.external.WorkerResourceProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -49,12 +50,14 @@ class InMemorySmppServerMessageStoreTest {
 
         StandardMessage msg1 = new StandardMessage();
         msg1.serial = "gw-1";
+        msg1.owner_id = "account1";
         msg1.systemId = "sys1";
         msg1.from = "from1";
         msg1.to = "to1";
 
         StandardMessage msg2 = new StandardMessage();
         msg2.serial = "gw-2";
+        msg2.owner_id = "account2";
         msg2.systemId = "sys2";
         msg2.from = "from2";
         msg2.to = "to2";
@@ -67,7 +70,12 @@ class InMemorySmppServerMessageStoreTest {
 
         messageStore.persistMessages(events);
 
-        verify(dlrService, times(2)).saveInitialState(any(MessageState.class));
+        ArgumentCaptor<MessageState> captor = ArgumentCaptor.forClass(MessageState.class);
+        verify(dlrService, times(2)).saveInitialState(captor.capture());
+        assertEquals("account1", captor.getAllValues().get(0).getAccountId());
+        assertEquals("sys1", captor.getAllValues().get(0).getSystemId());
+        assertEquals("account2", captor.getAllValues().get(1).getAccountId());
+        assertEquals("sys2", captor.getAllValues().get(1).getSystemId());
     }
 
     @Test
