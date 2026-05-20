@@ -37,11 +37,12 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
                 StandardMessage msg = event.pMsg;
                 if (msg != null) {
                     String gatewayMsgId = msg.serial;
+                    String accountId = msg.owner_id;
                     String systemId = msg.systemId;
                     String sourceAddr = msg.from;
                     String destAddr = msg.to;
 
-                    MessageState state = new MessageState(gatewayMsgId, systemId, sourceAddr, destAddr, null);
+                    MessageState state = new MessageState(gatewayMsgId, accountId, systemId, sourceAddr, destAddr, null);
                     worker.getWorkerResources().getDlrService().saveInitialState(state);
                 }
             } catch (Exception e) {

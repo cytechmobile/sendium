@@ -6,6 +6,7 @@ import gr.cytech.sendium.external.WorkerResourceProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -92,13 +93,17 @@ class InMemoryMessageTrackerTest {
     }
 
     @Test
-    void createAndEnqueueDLR_KnownMessage_ResolvesFromDlrService() {
-        MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
+    void createAndEnqueueDLR_KnownMessage_ResolvesFromDlrService() throws InterruptedException {
+        MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
         when(dlrService.resolveAndRemoveDlr("op-456", 0)).thenReturn(java.util.Optional.of(state));
 
         tracker.createAndEnqueueDLR(1, "op-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
 
         verify(dlrService).resolveAndRemoveDlr("op-456", 0);
+        ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
+        verify(outWorker).enqueueToRouter(captor.capture());
+        assertEquals("accountId", captor.getValue().owner_id);
+        assertEquals("systemId", captor.getValue().systemId);
     }
 
     @Test

@@ -78,7 +78,7 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
             dlrMsg.state = state;
             dlrMsg.errcode = errorCode != null ? errorCode : "";
             dlrMsg.systemId = msgState.getSystemId();
-            dlrMsg.owner_id = msgState.getSystemId();
+            dlrMsg.owner_id = msgState.getAccountId();
             dlrMsg.type = StandardMessage.MSG_DLR;
             try {
                 outWorker.enqueueToRouter(dlrMsg);

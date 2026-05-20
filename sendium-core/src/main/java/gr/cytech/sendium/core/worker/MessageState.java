@@ -9,6 +9,7 @@ public class MessageState implements Serializable {
     private static final long serialVersionUID = 1L;
 
     private String gatewayMsgId;
+    private String accountId;
     private String systemId;
     private String sourceAddr;
     private String destAddr;
@@ -21,7 +22,12 @@ public class MessageState implements Serializable {
     }
 
     public MessageState(String gatewayMsgId, String systemId, String sourceAddr, String destAddr, String forwardDlrUrl) {
+        this(gatewayMsgId, systemId, systemId, sourceAddr, destAddr, forwardDlrUrl);
+    }
+
+    public MessageState(String gatewayMsgId, String accountId, String systemId, String sourceAddr, String destAddr, String forwardDlrUrl) {
         this.gatewayMsgId = gatewayMsgId;
+        this.accountId = accountId;
         this.systemId = systemId;
         this.sourceAddr = sourceAddr;
         this.destAddr = destAddr;
@@ -33,6 +39,10 @@ public class MessageState implements Serializable {
 
     public String getGatewayMsgId() {
         return gatewayMsgId;
+    }
+
+    public String getAccountId() {
+        return accountId == null || accountId.isBlank() ? systemId : accountId;
     }
 
     public String getSystemId() {

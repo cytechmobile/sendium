@@ -11,9 +11,18 @@ class MessageStateTest {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
 
         assertEquals("gw-123", state.getGatewayMsgId());
+        assertEquals("systemId", state.getAccountId());
         assertEquals("systemId", state.getSystemId());
         assertEquals("from", state.getSourceAddr());
         assertEquals("to", state.getDestAddr());
+    }
+
+    @Test
+    void constructor_WithAccountId_SetsAccountSeparatelyFromSystemId() {
+        MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
+
+        assertEquals("accountId", state.getAccountId());
+        assertEquals("systemId", state.getSystemId());
     }
 
     @Test
