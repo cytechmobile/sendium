@@ -19,7 +19,6 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check Gateway Dependencies
-        working-directory: ./sms-gatway
         run: |
           MVN_OPTS="-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true --batch-mode --fail-at-end --show-version"
           OWASP_VERSION=$(curl -s https://dependency-check.github.io/DependencyCheck/current.txt | head -1)
