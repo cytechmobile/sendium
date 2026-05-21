@@ -25,6 +25,7 @@ import com.cloudhopper.smpp.type.SmppProcessingException;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.sun.net.httpserver.HttpServer;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.h2.mvstore.MVStore;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -42,6 +43,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -73,8 +75,9 @@ public class NativeE2eSmoke {
             require(upstream.awaitSessionBound(), "Sendium native container did not bind to the upstream SMPP server");
             Thread.sleep(3_000);
 
-            verifySmppSubmitGetsDeliverSm(upstream);
-            verifyHttpSubmitGetsDlrCallback(upstream, callbackServer);
+            container = verifyUnpushedDlrSurvivesRestart(containerName, workDir, upstream);
+            verifySmppSubmitGetsDeliverSm(upstream, 2);
+            verifyHttpSubmitGetsDlrCallback(upstream, callbackServer, 3);
         } catch (Throwable t) {
             printDockerLogs(containerName);
             throw t;
@@ -86,7 +89,7 @@ public class NativeE2eSmoke {
         }
     }
 
-    private static void verifySmppSubmitGetsDeliverSm(UpstreamSmppServer upstream) throws Exception {
+    private static void verifySmppSubmitGetsDeliverSm(UpstreamSmppServer upstream, int expectedSubmitCount) throws Exception {
         try (DownstreamSmppClient client = new DownstreamSmppClient()) {
             client.start();
             SubmitSmResp response = client.sendSms("smpp-sender", "306900000001", "native smpp e2e");
@@ -94,15 +97,17 @@ public class NativeE2eSmoke {
                     "SMPP submit_sm_resp status was " + response.getCommandStatus());
             require(response.getMessageId() != null && !response.getMessageId().isBlank(),
                     "SMPP submit_sm_resp did not contain a message id");
-            require(upstream.awaitSubmitCount(1), "Upstream SMPP server did not receive the SMPP-originated message");
+            require(upstream.awaitSubmitCount(expectedSubmitCount), "Upstream SMPP server did not receive the SMPP-originated message");
             DeliverSm deliverSm = client.awaitDeliverSm();
             require(deliverSm != null, "Downstream SMPP client did not receive deliver_sm");
             String body = new String(deliverSm.getShortMessage(), StandardCharsets.UTF_8);
             require(body.contains("DELIVRD"), "Downstream deliver_sm was not delivered: " + body);
+            Thread.sleep(500);
         }
     }
 
-    private static void verifyHttpSubmitGetsDlrCallback(UpstreamSmppServer upstream, CallbackServer callbackServer) throws Exception {
+    private static void verifyHttpSubmitGetsDlrCallback(UpstreamSmppServer upstream, CallbackServer callbackServer,
+                                                        int expectedSubmitCount) throws Exception {
         String dlrUrl = "http://host.docker.internal:" + callbackServer.port() + "/dlr?status=%d&id=%s";
         String query = "username=http-user"
                 + "&password=http-pass"
@@ -122,12 +127,55 @@ public class NativeE2eSmoke {
 
         String gatewayId = response.body().trim();
         require(!gatewayId.isBlank(), "HTTP /sendsms did not return a gateway message id");
-        require(upstream.awaitSubmitCount(2), "Upstream SMPP server did not receive the HTTP-originated message");
+        require(upstream.awaitSubmitCount(expectedSubmitCount), "Upstream SMPP server did not receive the HTTP-originated message");
 
         String callbackQuery = callbackServer.awaitCallback();
         require(callbackQuery != null, "DLR callback URL was not called");
         require(callbackQuery.contains("status=1"), "DLR callback did not contain delivered status: " + callbackQuery);
         require(callbackQuery.contains("id=" + gatewayId), "DLR callback did not contain gateway id " + gatewayId + ": " + callbackQuery);
+    }
+
+    private static Process verifyUnpushedDlrSurvivesRestart(String containerName, Path workDir,
+                                                            UpstreamSmppServer upstream) throws Exception {
+        upstream.setDeliveryReceiptDelayMillis(2_500);
+        String gatewayId;
+        try (DownstreamSmppClient client = new DownstreamSmppClient()) {
+            client.start();
+            SubmitSmResp response = client.sendSms("smpp-sender", "306900000003", "native restart dlr e2e");
+            require(response.getCommandStatus() == SmppConstants.STATUS_OK,
+                    "SMPP restart submit_sm_resp status was " + response.getCommandStatus());
+            gatewayId = response.getMessageId();
+            require(gatewayId != null && !gatewayId.isBlank(), "SMPP restart submit_sm_resp did not contain a message id");
+            require(upstream.awaitSubmitCount(1), "Upstream SMPP server did not receive the restart test message");
+        } finally {
+            upstream.setDeliveryReceiptDelayMillis(1_000);
+        }
+
+        Thread.sleep(6_000);
+        stopContainer(containerName);
+        assertUnpushedDlrPersisted(workDir, gatewayId, "before restart");
+
+        Process replayContainer = startSendiumContainer(containerName, workDir);
+        waitForPort("localhost", SENDIUM_HTTP_PORT, TIMEOUT);
+        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
+        require(upstream.awaitSessionBoundCount(2), "Sendium native container did not rebind to upstream after restart");
+
+        try (DownstreamSmppClient reconnectedClient = new DownstreamSmppClient()) {
+            reconnectedClient.start();
+            DeliverSm deliverSm = reconnectedClient.awaitDeliverSm();
+            require(deliverSm != null, "Reconnected downstream SMPP client did not receive persisted unpushed DLR");
+            String body = new String(deliverSm.getShortMessage(), StandardCharsets.UTF_8);
+            require(body.contains("DELIVRD"), "Persisted unpushed DLR was not delivered: " + body);
+        }
+
+        stopContainer(containerName);
+        replayContainer.destroyForcibly();
+        assertUnpushedDlrRemoved(workDir, gatewayId, "after replay");
+        Process container = startSendiumContainer(containerName, workDir);
+        waitForPort("localhost", SENDIUM_HTTP_PORT, TIMEOUT);
+        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
+        require(upstream.awaitSessionBoundCount(3), "Sendium native container did not rebind to upstream after replay check");
+        return container;
     }
 
     private static Process startSendiumContainer(String containerName, Path workDir) throws Exception {
@@ -250,6 +298,31 @@ public class NativeE2eSmoke {
         }
     }
 
+    private static void assertUnpushedDlrPersisted(Path workDir, String gatewayId, String phase) {
+        requireUnpushedDlrPresence(workDir, gatewayId, true, phase);
+    }
+
+    private static void assertUnpushedDlrRemoved(Path workDir, String gatewayId, String phase) {
+        requireUnpushedDlrPresence(workDir, gatewayId, false, phase);
+    }
+
+    private static void requireUnpushedDlrPresence(Path workDir, String gatewayId, boolean expectedPresent, String phase) {
+        Path dbPath = workDir.resolve("data").resolve("dlr-mvstore.db");
+        require(Files.exists(dbPath), "DLR MVStore does not exist " + phase + ": " + dbPath);
+        try (MVStore store = new MVStore.Builder().fileName(dbPath.toAbsolutePath().toString()).readOnly().open()) {
+            Map<String, String> dlrStore = store.openMap("unpushedDlrStore");
+            Map<String, String> dlrIndex = store.openMap("unpushedDlrIndex");
+            boolean present = dlrStore.values().stream().anyMatch(value -> value.contains("\"serial\":\"" + gatewayId + "\""));
+            require(present == expectedPresent,
+                    "Unexpected unpushed DLR presence " + phase + " for gatewayId " + gatewayId
+                            + ": " + present + " expected " + expectedPresent
+                            + " storeSize=" + dlrStore.size() + " indexSize=" + dlrIndex.size());
+            if (expectedPresent) {
+                require(dlrIndex.containsKey("smpp-user"), "Unpushed DLR index did not contain smpp-user " + phase);
+            }
+        }
+    }
+
     private static final class CallbackServer implements AutoCloseable {
         private final CountDownLatch latch = new CountDownLatch(1);
         private final List<String> queries = Collections.synchronizedList(new ArrayList<>());
@@ -291,10 +364,12 @@ public class NativeE2eSmoke {
     private static final class UpstreamSmppServer implements AutoCloseable {
         private final int port;
         private final AtomicInteger receivedSubmits = new AtomicInteger();
+        private final AtomicInteger boundSessions = new AtomicInteger();
         private final CountDownLatch sessionBound = new CountDownLatch(1);
         private final CountDownLatch firstTwoSubmits = new CountDownLatch(2);
         private final Set<SmppSession> sessions = Collections.newSetFromMap(new ConcurrentHashMap<>());
         private final DefaultSmppServer server;
+        private volatile long deliveryReceiptDelayMillis = 1_000;
 
         private UpstreamSmppServer(int port) {
             this.port = port;
@@ -327,8 +402,9 @@ public class NativeE2eSmoke {
 
                 @Override
                 public void sessionCreated(Long sessionId, SmppServerSession session,
-                                           BaseBindResp preparedBindResponse) throws SmppProcessingException {
+                                            BaseBindResp preparedBindResponse) throws SmppProcessingException {
                     sessions.add(session);
+                    boundSessions.incrementAndGet();
                     sessionBound.countDown();
                     session.serverReady(sessionHandler);
                 }
@@ -370,9 +446,24 @@ public class NativeE2eSmoke {
             return sessionBound.await(TIMEOUT.toSeconds(), TimeUnit.SECONDS);
         }
 
+        private boolean awaitSessionBoundCount(int expected) throws InterruptedException {
+            long deadline = System.nanoTime() + TIMEOUT.toNanos();
+            while (System.nanoTime() < deadline) {
+                if (boundSessions.get() >= expected) {
+                    return true;
+                }
+                Thread.sleep(500);
+            }
+            return false;
+        }
+
+        private void setDeliveryReceiptDelayMillis(long deliveryReceiptDelayMillis) {
+            this.deliveryReceiptDelayMillis = deliveryReceiptDelayMillis;
+        }
+
         private void sendDeliveryReceipt(SubmitSm submitSm, String messageId) {
             try {
-                Thread.sleep(1_000);
+                Thread.sleep(deliveryReceiptDelayMillis);
                 DeliverSm deliverSm = new DeliverSm();
                 deliverSm.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
                 deliverSm.setEsmClass(SmppConstants.ESM_CLASS_MT_SMSC_DELIVERY_RECEIPT);

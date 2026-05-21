@@ -84,6 +84,13 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
 
         logger.info("Session created for account ID: {}", accountId);
         session.serverReady(handler);
+        try {
+            if (worker.getMessageStore() != null) {
+                worker.getMessageStore().onClientConnected(handler.getSystemId());
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to process unpushed DLRs for systemId:{}", handler.getSystemId(), e);
+        }
     }
 
     public void sessionDestroyed(Long sessionId, SmppServerSession session) {
