@@ -1,6 +1,7 @@
 package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.worker.InMemoryDlrService;
 import gr.cytech.sendium.core.worker.MessageState;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -54,8 +55,48 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
 
     @Override
     public boolean markAsUnpushed(StandardMessage msg) {
-        logger.info("markAsUnpushed message {}", msg);
-        return true;
+        if (msg == null || msg.type != StandardMessage.MSG_DLR) {
+            return false;
+        }
+
+        try {
+            boolean saved = getDlrService().saveUnpushedDlr(msg);
+            if (!saved) {
+                logger.warn("Failed to save unpushed DLR: {}", msg);
+            }
+            return saved;
+        } catch (Exception e) {
+            logger.warn("Exception while saving unpushed DLR: {}", msg, e);
+            return false;
+        }
+    }
+
+    @Override
+    public void onClientConnected(String systemId) {
+        InMemoryDlrService dlrService = getDlrService();
+        List<StandardMessage> unpushedDlrs = dlrService.claimUnpushedDlrs(systemId);
+        if (unpushedDlrs.isEmpty()) {
+            logger.info("Unpushed DLR(s) not found for systemId:{}", systemId);
+            return;
+        }
+
+        logger.info("Re-enqueuing {} unpushed DLR(s) for systemId:{}", unpushedDlrs.size(), systemId);
+        for (StandardMessage msg : unpushedDlrs) {
+            try {
+                if (worker.enqueueNoExceptions(msg)) {
+                    dlrService.removeUnpushedDlr(msg);
+                } else {
+                    dlrService.releaseUnpushedDlrClaim(msg);
+                }
+            } catch (Exception e) {
+                dlrService.releaseUnpushedDlrClaim(msg);
+                logger.warn("Failed to re-enqueue unpushed DLR: {}", msg, e);
+            }
+        }
+    }
+
+    private InMemoryDlrService getDlrService() {
+        return worker.getWorkerResources().getDlrService();
     }
 
     @Override

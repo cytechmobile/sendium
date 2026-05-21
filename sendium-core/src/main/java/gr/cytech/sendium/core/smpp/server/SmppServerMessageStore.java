@@ -29,6 +29,12 @@ public interface SmppServerMessageStore<M extends StandardMessage> {
     boolean markAsUnpushed(M msg);
 
     /**
+     * Called when a transmittable SMPP client session becomes available again.
+     */
+    default void onClientConnected(String systemId) {
+    }
+
+    /**
      * Fetch the maximum allowed attempts for a message.
      */
     int getMaxAttempts(boolean isDlr);

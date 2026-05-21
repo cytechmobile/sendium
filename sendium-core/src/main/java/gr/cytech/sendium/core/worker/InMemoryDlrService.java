@@ -1,7 +1,10 @@
 package gr.cytech.sendium.core.worker;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import gr.cytech.sendium.core.message.StandardMessage;
 import io.quarkus.runtime.ShutdownEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -12,36 +15,63 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Stores DLR correlation state and unpushed SMPP DLRs.
+ *
+ * <p>
+ * The service uses H2 MVStore when available and falls back to in-memory maps if the store cannot be opened.
+ * The primary/correlation maps track submitted messages until operator DLRs arrive. The unpushed-DLR maps
+ * persist DLRs that could not be delivered to a disconnected SMPP client, then replay them when the matching
+ * systemId reconnects.
+ *
+ * <p>
+ * This is an application-scoped singleton. The primary/correlation state follows the existing model of map-level
+ * concurrency: each operation is safe to call from worker threads, but multi-step updates are not globally serialized.
+ * Unpushed DLRs have stronger consistency requirements because each entry is split across payload, timestamp, and
+ * systemId index maps. Those compound operations are guarded by {@code unpushedDlrLock}. Replay also claims keys
+ * before returning them so concurrent reconnect callbacks for the same systemId cannot enqueue the same DLR twice.
+ */
 @ApplicationScoped
-public class InMemoryDlrService implements Serializable {
+public class InMemoryDlrService {
     private static final Logger logger = LoggerFactory.getLogger(InMemoryDlrService.class);
     private static final long SEVEN_DAYS_MILLIS = TimeUnit.DAYS.toMillis(7);
     private static final long THREE_DAYS_MILLIS = TimeUnit.DAYS.toMillis(3);
-    private static final long serialVersionUID = 1L;
     private static final long EXPIRY_CHECK_INTERVAL = TimeUnit.HOURS.toMillis(1);
 
     private static final String DB_PATH_PROPERTY = "sendium.dlr.db.path";
     private static final String DEFAULT_DB_PATH = "data/dlr-mvstore.db";
-    private static final ObjectMapper mapper = new ObjectMapper();
+    private static final ObjectMapper mapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    private static final TypeReference<List<String>> STRING_LIST_TYPE = new TypeReference<>() {
+    };
 
     @Inject
     ForwardDlrService forwardDlrService;
 
-    private transient MVStore store;
+    private final Object unpushedDlrStateLock = new Object();
+    private final Set<String> claimedUnpushedDlrKeys = ConcurrentHashMap.newKeySet();
 
-    private transient Map<String, String> primaryStore;
-    private transient Map<String, String> correlationIndex;
-    private transient Map<String, Long> primaryTimestamps;
-    private transient Map<String, Long> correlationTimestamps;
-    private transient volatile long lastExpiryCheck = 0;
+    private MVStore store;
+
+    private Map<String, String> primaryStore;
+    private Map<String, String> correlationIndex;
+    private Map<String, Long> primaryTimestamps;
+    private Map<String, Long> correlationTimestamps;
+    private Map<String, String> unpushedDlrStore;
+    private Map<String, Long> unpushedDlrTimestamps;
+    private Map<String, String> unpushedDlrIndex;
+
+    private volatile long lastExpiryCheck = 0;
     @SuppressWarnings("unused")
-    private transient volatile boolean initialized = false;
+    private volatile boolean initialized = false;
 
     @PostConstruct
     void init() {
@@ -74,13 +104,16 @@ public class InMemoryDlrService implements Serializable {
             correlationIndex = store.openMap("correlationIndex");
             primaryTimestamps = store.openMap("primaryTimestamps");
             correlationTimestamps = store.openMap("correlationTimestamps");
+            unpushedDlrStore = store.openMap("unpushedDlrStore");
+            unpushedDlrTimestamps = store.openMap("unpushedDlrTimestamps");
+            unpushedDlrIndex = store.openMap("unpushedDlrIndex");
 
-            if (primaryStore == null || correlationIndex == null) {
+            if (primaryStore == null || correlationIndex == null || unpushedDlrStore == null || unpushedDlrIndex == null) {
                 logger.error("Failed to load maps from DB, falling back to in-memory");
                 fallbackToInMemory();
             } else {
-                logger.info("Loaded from DB - primaryStore: {}, correlationIndex: {}",
-                        primaryStore.size(), correlationIndex.size());
+                logger.info("Loaded from DB - primaryStore: {}, correlationIndex: {}, unpushedDlrStore: {}, unpushedDlrIndex: {}",
+                        primaryStore.size(), correlationIndex.size(), unpushedDlrStore.size(), unpushedDlrIndex.size());
                 initialized = true;
             }
         } catch (Exception e) {
@@ -99,6 +132,9 @@ public class InMemoryDlrService implements Serializable {
         correlationIndex = new ConcurrentHashMap<>();
         primaryTimestamps = new ConcurrentHashMap<>();
         correlationTimestamps = new ConcurrentHashMap<>();
+        unpushedDlrStore = new ConcurrentHashMap<>();
+        unpushedDlrTimestamps = new ConcurrentHashMap<>();
+        unpushedDlrIndex = new ConcurrentHashMap<>();
         initialized = true;
         logger.info("Using in-memory mode (no persistence)");
     }
@@ -275,6 +311,197 @@ public class InMemoryDlrService implements Serializable {
         return false;
     }
 
+    /**
+     * Persist a DLR that could not be pushed to the SMPP client.
+     */
+    public boolean saveUnpushedDlr(StandardMessage msg) {
+        checkExpiry();
+        if (unpushedDlrStore == null || unpushedDlrIndex == null || msg == null || msg.type != StandardMessage.MSG_DLR ||
+                msg.systemId == null || msg.systemId.isBlank()) {
+            return false;
+        }
+
+        String key = getUnpushedDlrKey(msg);
+        synchronized (unpushedDlrStateLock) {
+            try {
+                unpushedDlrStore.put(key, mapper.writeValueAsString(UnpushedDlr.fromMessage(msg)));
+                unpushedDlrTimestamps.put(key, System.currentTimeMillis());
+                addKeyToUnpushedDlrIndex(msg.systemId, key);
+                commitStore();
+                logger.info("Saved unpushed DLR key: {}", key);
+                return true;
+            } catch (JsonProcessingException e) {
+                logger.error("Failed to serialize unpushed DLR key: {}", key, e);
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Load unpushed DLRs for one SMPP systemId without marking them for replay.
+     */
+    public List<StandardMessage> getUnpushedDlrs(String systemId) {
+        return loadUnpushedDlrs(systemId, false);
+    }
+
+    /**
+     * Load and claim unpushed DLRs for replay. Claimed entries are hidden from later claims until removed or released.
+     */
+    public List<StandardMessage> claimUnpushedDlrs(String systemId) {
+        return loadUnpushedDlrs(systemId, true);
+    }
+
+    private List<StandardMessage> loadUnpushedDlrs(String systemId, boolean claimForReplay) {
+        checkExpiry();
+        List<StandardMessage> messages = new ArrayList<>();
+        if (unpushedDlrStore == null || unpushedDlrIndex == null || systemId == null || systemId.isBlank()) {
+            return messages;
+        }
+
+        boolean changed = false;
+        synchronized (unpushedDlrStateLock) {
+            for (String key : getUnpushedDlrKeys(systemId)) {
+                if (claimForReplay && claimedUnpushedDlrKeys.contains(key)) {
+                    continue;
+                }
+
+                String msgJson = unpushedDlrStore.get(key);
+                if (msgJson == null) {
+                    removeKeyFromUnpushedDlrIndex(systemId, key);
+                    changed = true;
+                    continue;
+                }
+                try {
+                    UnpushedDlr dlr = mapper.readValue(msgJson, UnpushedDlr.class);
+                    if (isUnpushedDlrForConnection(dlr, systemId)) {
+                        if (!claimForReplay || claimedUnpushedDlrKeys.add(key)) {
+                            messages.add(dlr.toMessage());
+                        }
+                    } else {
+                        removeKeyFromUnpushedDlrIndex(systemId, key);
+                        changed = true;
+                    }
+                } catch (JsonProcessingException e) {
+                    logger.error("Failed to deserialize unpushed DLR key: {}. Removing corrupt entry", key, e);
+                    unpushedDlrStore.remove(key);
+                    unpushedDlrTimestamps.remove(key);
+                    claimedUnpushedDlrKeys.remove(key);
+                    removeKeyFromUnpushedDlrIndex(systemId, key);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                commitStore();
+            }
+        }
+
+        return messages;
+    }
+
+    /**
+     * Remove a replayed DLR from all unpushed-DLR maps.
+     */
+    public boolean removeUnpushedDlr(StandardMessage msg) {
+        if (unpushedDlrStore == null || unpushedDlrIndex == null || msg == null || msg.systemId == null || msg.systemId.isBlank()) {
+            return false;
+        }
+
+        String key = getUnpushedDlrKey(msg);
+        synchronized (unpushedDlrStateLock) {
+            final boolean removed = unpushedDlrStore.remove(key) != null;
+            unpushedDlrTimestamps.remove(key);
+            claimedUnpushedDlrKeys.remove(key);
+            removeKeyFromUnpushedDlrIndex(msg.systemId, key);
+            if (removed) {
+                commitStore();
+            }
+            return removed;
+        }
+    }
+
+    /**
+     * Make a claimed but not yet removed DLR eligible for a later replay attempt.
+     */
+    public void releaseUnpushedDlrClaim(StandardMessage msg) {
+        if (msg == null || msg.systemId == null || msg.systemId.isBlank()) {
+            return;
+        }
+
+        synchronized (unpushedDlrStateLock) {
+            claimedUnpushedDlrKeys.remove(getUnpushedDlrKey(msg));
+        }
+    }
+
+    private boolean isUnpushedDlrForConnection(UnpushedDlr dlr, String systemId) {
+        return dlr != null && dlr.systemId != null && dlr.systemId.equals(systemId);
+    }
+
+    private String getUnpushedDlrKey(StandardMessage msg) {
+        return String.join("|",
+                nullToEmpty(msg.systemId),
+                nullToEmpty(msg.serial),
+                String.valueOf(msg.state),
+                nullToEmpty(msg.errcode),
+                String.valueOf(msg.msgId));
+    }
+
+    private void addKeyToUnpushedDlrIndex(String systemId, String key) throws JsonProcessingException {
+        List<String> keys = getUnpushedDlrKeys(systemId);
+        if (!keys.contains(key)) {
+            keys.add(key);
+            unpushedDlrIndex.put(systemId, mapper.writeValueAsString(keys));
+        }
+    }
+
+    private List<String> getUnpushedDlrKeys(String systemId) {
+        String keysJson = unpushedDlrIndex.get(systemId);
+        if (keysJson == null || keysJson.isBlank()) {
+            return new ArrayList<>();
+        }
+        try {
+            return new ArrayList<>(mapper.readValue(keysJson, STRING_LIST_TYPE));
+        } catch (JsonProcessingException e) {
+            logger.error("Failed to deserialize unpushed DLR index for systemId: {}. Clearing corrupt index", systemId, e);
+            unpushedDlrIndex.remove(systemId);
+            return new ArrayList<>();
+        }
+    }
+
+    private void removeKeyFromUnpushedDlrIndex(String systemId, String key) {
+        if (systemId == null || unpushedDlrIndex == null) {
+            return;
+        }
+        List<String> keys = getUnpushedDlrKeys(systemId);
+        if (!keys.remove(key)) {
+            return;
+        }
+        if (keys.isEmpty()) {
+            unpushedDlrIndex.remove(systemId);
+            return;
+        }
+        try {
+            unpushedDlrIndex.put(systemId, mapper.writeValueAsString(keys));
+        } catch (JsonProcessingException e) {
+            logger.error("Failed to serialize unpushed DLR index for systemId: {}. Clearing index", systemId, e);
+            unpushedDlrIndex.remove(systemId);
+        }
+    }
+
+    private String getSystemIdFromUnpushedDlrKey(String key) {
+        int separator = key.indexOf('|');
+        return separator >= 0 ? key.substring(0, separator) : key;
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private void commitStore() {
+        if (store != null && !store.isClosed()) {
+            store.commit();
+        }
+    }
+
     private synchronized void checkExpiry() {
         long now = System.currentTimeMillis();
         if (now - lastExpiryCheck < EXPIRY_CHECK_INTERVAL) {
@@ -305,6 +532,26 @@ public class InMemoryDlrService implements Serializable {
                 }
             }
         }
+
+        boolean removedExpired = false;
+        if (unpushedDlrStore != null && unpushedDlrTimestamps != null) {
+            synchronized (unpushedDlrStateLock) {
+                for (String key : unpushedDlrTimestamps.keySet()) {
+                    Long ts = unpushedDlrTimestamps.get(key);
+                    if (ts != null && (now - ts) > SEVEN_DAYS_MILLIS) {
+                        unpushedDlrStore.remove(key);
+                        unpushedDlrTimestamps.remove(key);
+                        claimedUnpushedDlrKeys.remove(key);
+                        removeKeyFromUnpushedDlrIndex(getSystemIdFromUnpushedDlrKey(key), key);
+                        removedExpired = true;
+                        logger.debug("Expired unpushed DLR entry: {}", key);
+                    }
+                }
+            }
+        }
+        if (removedExpired) {
+            commitStore();
+        }
     }
 
     public int getPrimaryStoreSize() {
@@ -313,6 +560,14 @@ public class InMemoryDlrService implements Serializable {
 
     public int getCorrelationIndexSize() {
         return correlationIndex != null ? correlationIndex.size() : 0;
+    }
+
+    public int getUnpushedDlrStoreSize() {
+        return unpushedDlrStore != null ? unpushedDlrStore.size() : 0;
+    }
+
+    public int getUnpushedDlrIndexSize() {
+        return unpushedDlrIndex != null ? unpushedDlrIndex.size() : 0;
     }
 
     public boolean isPersistent() {

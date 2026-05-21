@@ -106,4 +106,55 @@ class InMemorySmppServerMessageStoreTest {
 
         assertEquals(3, result);
     }
+
+    @Test
+    void markAsUnpushed_Dlr_SavesToDlrService() {
+        StandardMessage msg = new StandardMessage();
+        msg.type = StandardMessage.MSG_DLR;
+        when(dlrService.saveUnpushedDlr(msg)).thenReturn(true);
+
+        boolean result = messageStore.markAsUnpushed(msg);
+
+        assertTrue(result);
+        verify(dlrService).saveUnpushedDlr(msg);
+    }
+
+    @Test
+    void markAsUnpushed_NonDlr_ReturnsFalse() {
+        StandardMessage msg = new StandardMessage();
+        msg.type = StandardMessage.MSG_TEXT;
+
+        boolean result = messageStore.markAsUnpushed(msg);
+
+        assertFalse(result);
+        verify(dlrService, never()).saveUnpushedDlr(any());
+    }
+
+    @Test
+    void onClientConnected_ReEnqueuesAndRemovesMatchingDlrs() {
+        StandardMessage dlr = new StandardMessage();
+        dlr.type = StandardMessage.MSG_DLR;
+        dlr.owner_id = "account1";
+        dlr.systemId = "sys1";
+        when(dlrService.claimUnpushedDlrs("sys1")).thenReturn(List.of(dlr));
+        when(worker.enqueueNoExceptions(dlr)).thenReturn(true);
+
+        messageStore.onClientConnected("sys1");
+
+        verify(worker).enqueueNoExceptions(dlr);
+        verify(dlrService).removeUnpushedDlr(dlr);
+    }
+
+    @Test
+    void onClientConnected_LeavesDlrStoredWhenReEnqueueFails() {
+        StandardMessage dlr = new StandardMessage();
+        dlr.type = StandardMessage.MSG_DLR;
+        when(dlrService.claimUnpushedDlrs("sys1")).thenReturn(List.of(dlr));
+        when(worker.enqueueNoExceptions(dlr)).thenReturn(false);
+
+        messageStore.onClientConnected("sys1");
+
+        verify(dlrService, never()).removeUnpushedDlr(any());
+        verify(dlrService).releaseUnpushedDlrClaim(dlr);
+    }
 }
