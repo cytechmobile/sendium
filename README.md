@@ -108,7 +108,14 @@ testRoute::default:
 ```
 
 ### Running with Docker
-Run the following command to start the gateway in the background:
+Sendium publishes two Docker image variants:
+
+| Image | Runtime |
+| :--- | :--- |
+| `cytechmobile/sendium:latest` | JVM image based on Eclipse Temurin 25 JRE. |
+| `cytechmobile/sendium:latest-native` | Native executable image. |
+
+Run the following command to start the default JVM image in the background:
 
 ```bash
 docker run -d --name sendium \
@@ -123,8 +130,10 @@ docker run -d --name sendium \
   -v ./conf:/work/conf \
   -v ./data:/work/data \
   -v ./logs:/work/logs \
-  cytechmobile/sendium:latest-native
+  cytechmobile/sendium:latest
 ```
+
+To run the native image instead, use `cytechmobile/sendium:latest-native`.
 
 ## 💬 Documentation & Support
 
