@@ -14,6 +14,13 @@ By default, Sendium reads these files relative to the application working direct
 
 In the Docker image, the working directory is `/work`, so the default configuration directory is `/work/conf`.
 
+## Docker Images
+
+| Image | Runtime |
+| :--- | :--- |
+| `cytechmobile/sendium:latest` | JVM image based on Eclipse Temurin 25 JRE. |
+| `cytechmobile/sendium:latest-native` | Native executable image. |
+
 ## Important Files
 
 | File | Description |

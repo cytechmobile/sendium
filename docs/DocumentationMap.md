@@ -47,16 +47,15 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | Document | Description |
 | :--- | :--- |
 | [01. Architecture Overview](01-architecture.md) | Runtime components, queues, routing flow, worker lifecycle, DLR/MO handling, and Mermaid diagrams. |
-| [02. Docker Deployment](02-docker-deployment.md) | Container setup, volumes, ports, startup checks, and operational notes. |
+| [02. Docker Deployment](02-docker-deployment.md) | Container setup, image variants, volumes, ports, startup checks, and operational notes. |
 | [03. Authentication and Security](03-auth-security.md) | Credential file format, validation rules, IP allowlisting, and reload behavior. |
 | [04. SMPP Configuration](04-smpp-configuration.md) | SMPP server, SMPP client, worker, retry, TLS, logging, and MO settings. |
 | [05. Routing Engine](05-routing-engine.md) | Routing table syntax, operators, message attributes, and routing examples. |
 | [06. HTTP API](06-http-api.md) | Kannel-compatible HTTP submission endpoint, parameters, and response codes. |
 | [07. Webhooks](07-webhooks.md) | DLR callback URLs and MO forwarding behavior. |
 | [08. Monitoring And Observability](08-monitoring-observability.md) | Prometheus metrics endpoint, Prometheus scrape configuration, Grafana setup, and troubleshooting. |
-| [09. Configuration Reference](09-configuration-reference.md) | Application paths, Docker environment variables, logging, and OpenAPI endpoints. |
+| [09. Configuration Reference](09-configuration-reference.md) | Application paths, Docker image tags, environment variables, logging, and OpenAPI endpoints. |
 | [10. Troubleshooting](10-troubleshooting.md) | Common startup, authentication, routing, SMPP, webhook, and logging issues. |
-| [11. Performance And Load Testing](11-performance-load-testing.md) | Load test topology, HTTP/SMPP test phases, DLR/MO testing, monitoring, and result reporting. |
 
 ## API Discovery
 

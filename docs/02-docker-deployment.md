@@ -37,7 +37,18 @@ The SMPP port depends on `outSms.instance.<name>.srv.port` in `smsg.properties`.
 | `./data` | `/work/data` | Local runtime data. |
 | `./logs` | `/work/logs` | Application, SMPP, and HTTP access logs. |
 
+## Docker Images
+
+Sendium publishes two Docker image variants:
+
+| Image | Runtime |
+| :--- | :--- |
+| `cytechmobile/sendium:latest` | JVM image based on Eclipse Temurin 25 JRE. |
+| `cytechmobile/sendium:latest-native` | Native executable image. |
+
 ## Run Command
+
+This command starts the default JVM image:
 
 ```bash
 docker run -d --name sendium \
@@ -52,8 +63,10 @@ docker run -d --name sendium \
   -v ./conf:/work/conf \
   -v ./data:/work/data \
   -v ./logs:/work/logs \
-  cytechmobile/sendium:latest-native
+  cytechmobile/sendium:latest
 ```
+
+To run the native image instead, use `cytechmobile/sendium:latest-native`.
 
 ## Startup Checks
 
@@ -75,7 +88,7 @@ After starting the container:
 ## Operational Notes
 
 - Keep secrets out of public issues, logs, and screenshots.
-- Use explicit Docker image tags in production instead of `latest-native`.
+- Use explicit versioned Docker image tags in production instead of floating tags such as `latest` or `latest-native`.
 - Map `logs` to persistent storage if logs are required after container replacement.
 - Review `QUARKUS_LOG_CONSOLE_ENABLE` and `QUARKUS_LOG_FILE_ENABLE` based on your logging stack.
 - When exposing SMPP externally, firewall the port and configure credential IP allowlists where possible.

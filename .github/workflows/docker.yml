@@ -1,0 +1,39 @@
+name: Build Docker JVM Image
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+
+      - name: Build Backend Application
+        run: |
+          chmod +x mvnw
+          ./mvnw -B clean package -pl sendium-app -am -DskipTests
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./sendium-app
+          file: ./sendium-app/src/main/docker/Dockerfile.jvm
+          push: true
+          tags: cytechmobile/sendium:latest
