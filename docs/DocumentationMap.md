@@ -18,6 +18,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 | Monitor runtime metrics | [08. Monitoring And Observability](08-monitoring-observability.md) |
 | Look up configuration properties | [09. Configuration Reference](09-configuration-reference.md) |
 | Diagnose common problems | [10. Troubleshooting](10-troubleshooting.md) |
+| Understand releases and publishing | [11. Release Process](11-release-process.md) |
 | Contribute code or docs | [Contributing](../.github/CONTRIBUTING.md) |
 
 ## Core Concepts
@@ -56,6 +57,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [08. Monitoring And Observability](08-monitoring-observability.md) | Prometheus metrics endpoint, Prometheus scrape configuration, Grafana setup, and troubleshooting. |
 | [09. Configuration Reference](09-configuration-reference.md) | Application paths, Docker image tags, environment variables, logging, and OpenAPI endpoints. |
 | [10. Troubleshooting](10-troubleshooting.md) | Common startup, authentication, routing, SMPP, webhook, and logging issues. |
+| [11. Release Process](11-release-process.md) | Release Please flow, Conventional Commit rules, release PR handling, GitHub Packages, and Docker publishing. |
 
 ## API Discovery
 
@@ -90,7 +92,7 @@ When Sendium is running, the HTTP API can be inspected through:
 7. Submit a test message using [HTTP API](06-http-api.md).
 8. Add delivery callbacks using [Webhooks](07-webhooks.md).
 9. Monitor the service using [Monitoring And Observability](08-monitoring-observability.md).
-10. Validate capacity using [Performance And Load Testing](11-performance-load-testing.md).
+10. Learn how releases are created and published in [Release Process](11-release-process.md).
 
 ## Documentation Gaps To Improve Next
 
