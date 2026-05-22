@@ -1,0 +1,15 @@
+{
+  "bootstrap-sha": "825875c57a43e728c503b9c432ea0c58ac2bbc69",
+  "release-type": "maven",
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "package-name": "sendium"
+    }
+  },
+  "plugins": [
+    {
+      "type": "maven-workspace"
+    }
+  ]
+}

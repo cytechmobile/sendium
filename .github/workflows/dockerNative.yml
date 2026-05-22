@@ -3,6 +3,40 @@ permissions:
   contents: read
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build. Defaults to the selected workflow ref.
+        required: false
+        type: string
+      version:
+        description: Version tag to publish, for example v0.1.0.
+        required: false
+        type: string
+      publish-latest:
+        description: Also publish the latest-native tag.
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build.
+        required: true
+        type: string
+      version:
+        description: Version tag to publish, for example v0.1.0.
+        required: true
+        type: string
+      publish-latest:
+        description: Also publish the latest-native tag.
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
 
 jobs:
   build:
@@ -10,6 +44,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Java
         id: setup_java
@@ -30,10 +66,36 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Prepare Docker tags
+        id: docker_tags
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          tags=""
+
+          if [[ -n "${version}" ]]; then
+            tags="cytechmobile/sendium:${version}-native"
+            tags="${tags}"$'\n'"cytechmobile/sendium:${version#v}-native"
+          fi
+
+          if [[ "${{ inputs.publish-latest }}" == "true" || -z "${tags}" ]]; then
+            if [[ -n "${tags}" ]]; then
+              tags="${tags}"$'\n'"cytechmobile/sendium:latest-native"
+            else
+              tags="cytechmobile/sendium:latest-native"
+            fi
+          fi
+
+          {
+            echo 'tags<<EOF'
+            echo "${tags}"
+            echo EOF
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v7
         with:
           context: ./sendium-app
           file: ./sendium-app/src/main/docker/Dockerfile.native
           push: true
-          tags: cytechmobile/sendium:latest-native
+          tags: ${{ steps.docker_tags.outputs.tags }}
