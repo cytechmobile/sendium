@@ -57,12 +57,6 @@
             </dependency>
 
             <dependency>
-                <groupId>gr.cytech</groupId>
-                <artifactId>sendium</artifactId>
-                <version>${sendium.version}</version>
-            </dependency>
-
-            <dependency>
                 <groupId>com.github.cytechmobile</groupId>
                 <artifactId>cloudhopper-smpp</artifactId>
                 <version>${cloudhopper.smpp.version}</version>
