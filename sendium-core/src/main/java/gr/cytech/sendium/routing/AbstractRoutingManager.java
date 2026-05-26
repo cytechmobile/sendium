@@ -150,6 +150,7 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
 
             if (pause) {
                 reEnqueueMessage(msg);
+                msg = null;
                 return;
             }
             RoutingLookupResult result = lookupRoutingForMessage(msg, targets.defaultTable);

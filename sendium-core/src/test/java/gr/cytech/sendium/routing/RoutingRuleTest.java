@@ -43,4 +43,66 @@ class RoutingRuleTest {
 
         assertTrue(rule.matches(msg, null));
     }
+
+    @Test
+    void copiedRoutePrefixMarksRuleAsCopiedAndStripsTargetPrefix() {
+        RoutingRule rule = new RoutingRule("+copyTarget:from:equals:sender", "copy label");
+
+        assertEquals("copyTarget", rule.getTarget());
+        assertEquals("+copyTarget:from:equals:sender", rule.toString());
+        assertEquals("copy label", rule.getLabel());
+    }
+
+    @Test
+    void multiConditionRuleRequiresEveryConditionToMatch() {
+        StandardMessage msg = new StandardMessage();
+        msg.from = "sender";
+        msg.to = "306900000000";
+
+        RoutingRule rule = new RoutingRule("target:from~~to:equals~~startsWith:sender~~3069", null);
+
+        assertTrue(rule.matches(msg, null));
+
+        msg.to = "447700000000";
+
+        assertFalse(rule.matches(msg, null));
+    }
+
+    @Test
+    void negatedStringPolicyInvertsMatch() {
+        StandardMessage msg = new StandardMessage();
+        msg.owner_id = "account-a";
+
+        RoutingRule rule = new RoutingRule("owner_id", "!equals", "account-b", "target", null);
+
+        assertTrue(rule.matches(msg, null));
+    }
+
+    @Test
+    void stringPoliciesCoverRegexPrefixSuffixAndNullChecks() {
+        StandardMessage msg = new StandardMessage();
+        msg.body = "Sendium route check";
+        msg.message_center = null;
+
+        assertTrue(new RoutingRule("body", "matches", "Sendium.*check", "target", null).matches(msg, null));
+        assertTrue(new RoutingRule("body", "startsWith", "Sendium", "target", null).matches(msg, null));
+        assertTrue(new RoutingRule("body", "endsWith", "check", "target", null).matches(msg, null));
+        assertTrue(new RoutingRule("message_center", "isNull", "", "target", null).matches(msg, null));
+    }
+
+    @Test
+    void ruleValueCanContainColonCharacters() {
+        StandardMessage msg = new StandardMessage();
+        msg.body = "https://example.test/dlr?id=1";
+
+        RoutingRule rule = new RoutingRule("target:body:equals:https://example.test/dlr?id=1", null);
+
+        assertTrue(rule.matches(msg, null));
+    }
+
+    @Test
+    void unknownFieldOrPolicyFailsFast() {
+        assertThrows(IllegalArgumentException.class, () -> new RoutingRule("unknown", "equals", "x", "target", null));
+        assertThrows(IllegalArgumentException.class, () -> new RoutingRule("body", "unknownPolicy", "x", "target", null));
+    }
 }
