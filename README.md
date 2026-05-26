@@ -29,18 +29,20 @@ With over 20 years of experience building high-performance telecommunications so
 
 | Feature | Description |
 | :--- | :--- |
-| **SMPP Server & Client** | Full TX/RX/TRX bind support for downstream clients and upstream carriers. |
-| **Granular TPS Control** | Protect your links with Transactions-Per-Second rate limiting per connection. |
-| **Advanced Routing** | Route by destination prefix, sender ID, or content with automatic failover. |
-| **Protocol Translation** | HTTP-to-SMPP for outbound; SMPP-to-HTTP webhooks for inbound (MO). |
-| **Real-time DLRs** | Normalized delivery receipt management propagated back to your originating systems. |
+| **SMPP Server & Client** | Full TX/RX/TRX bind support for downstream clients and upstream carriers, including TLS/SSL options. |
+| **HTTP & SMPP Bridging** | Kannel-compatible HTTP `/sendsms` API for outbound SMS and SMPP-to-HTTP webhooks for inbound MO traffic. |
+| **Advanced Routing** | Route by destination, sender ID, content, account, or message attributes with fallback routing chains. |
+| **Granular TPS Control** | Protect links with Transactions-Per-Second limits per worker or SMPP server account defaults. |
+| **Retry & Queue Control** | Retry and re-enqueue messages when `submit_sm` to an SMPP provider fails, with priority-aware queue support. |
+| **Delivery Receipts** | Correlate provider message IDs, normalize DLR statuses, and propagate callbacks to originating systems. |
+| **Operations & Observability** | Docker/native images, hot-reloaded configuration, operational logs, Swagger/OpenAPI, and Prometheus `/q/metrics`. |
 
 ---
 
 ## 🔄 How It Works
 
 1.  **Request:** Your application sends a message to Sendium via **HTTP** OR **SMPP**.
-2.  **Logic:** Sendium applies routing rules (Country, Prefix, Sender ID, Priority).
+2.  **Logic:** Sendium applies routing rules based on destination, sender ID, account, message attributes, and priority.
 3.  **Delivery:** Sendium delivers via one or more **SMPP** connections to upstream providers.
 4.  **Verification:** Asynchronous Delivery Receipts (DLRs) are received and normalized.
 5.  **Callback:** Sendium forwards the status back to your system via **HTTP Webhooks**.
@@ -137,7 +139,7 @@ To run the native image instead, use `cytechmobile/sendium:latest-native`.
 
 ## 💬 Documentation & Support
 
-The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, and community resources.
+The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, roadmap, and community resources.
 
 Key docs:
 
@@ -151,6 +153,7 @@ Key docs:
 8. **[Monitoring & Observability](docs/08-monitoring-observability.md):** Expose Prometheus metrics and configure Prometheus/Grafana.
 9. **[Configuration Reference](docs/09-configuration-reference.md):** Review paths, Docker environment variables, logging, and OpenAPI endpoints.
 10. **[Troubleshooting](docs/10-troubleshooting.md):** Diagnose common setup and runtime issues.
+11. **[Features & Roadmap](docs/12-features-roadmap.md):** Review current capabilities and planned roadmap phases.
 
 When Sendium is running, API discovery is available at `/swagger-ui` and `/openapi.json`.
 
