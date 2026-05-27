@@ -5,8 +5,10 @@ import com.cloudhopper.smpp.SmppSession;
 import com.cloudhopper.smpp.SmppSessionConfiguration;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.pdu.SubmitSmResp;
+import com.cloudhopper.smpp.tlv.Tlv;
 import com.cloudhopper.smpp.type.SmppProcessingException;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,6 +22,7 @@ import java.sql.Timestamp;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -77,5 +80,77 @@ class SmppServerSessionHandlerTest {
 
         SubmitSmResp capturedResp = respCaptor.getValue();
         assertThat(capturedResp.getCommandStatus()).isEqualTo(expectedErrorCode);
+    }
+
+    @Test
+    void validateShortMessage_whenShortMessageMissingAndPayloadMissing_shouldEnqueueInvalidLengthResponse() {
+        SubmitSm submitSm = new SubmitSm();
+
+        SmppServerUtil.ValidatedMessageBody result = handler.validateShortMessage(submitSm);
+
+        ArgumentCaptor<SubmitSmResp> respCaptor = ArgumentCaptor.forClass(SubmitSmResp.class);
+        verify(worker).enqueueOut(respCaptor.capture());
+        assertThat(result).isNull();
+        assertThat(respCaptor.getValue().getCommandStatus()).isEqualTo(SmppConstants.STATUS_INVMSGLEN);
+    }
+
+    @Test
+    void validateShortMessage_whenShortMessageMissingUsesMessagePayloadTlv() {
+        SubmitSm submitSm = new SubmitSm();
+        submitSm.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+        submitSm.setOptionalParameter(new Tlv(
+                SmppConstants.TAG_MESSAGE_PAYLOAD,
+                "Hello from payload".getBytes(StandardCharsets.UTF_8)));
+        when(worker.getCharsetGsm()).thenReturn(StandardCharsets.UTF_8.toString());
+
+        SmppServerUtil.ValidatedMessageBody result = handler.validateShortMessage(submitSm);
+
+        verify(worker, never()).enqueueOut(any());
+        assertThat(result.text()).isEqualTo("Hello from payload");
+        assertThat(result.udh()).isNull();
+        assertThat(result.smType()).isEqualTo(StandardMessage.MSG_TEXT);
+    }
+
+    @Test
+    void validateShortMessage_whenDataCodingUnsupported_shouldEnqueueInvalidDcsResponse() throws Exception {
+        SubmitSm submitSm = new SubmitSm();
+        submitSm.setShortMessage("Hello".getBytes(StandardCharsets.UTF_8));
+        submitSm.setDataCoding((byte) 0x7F);
+
+        SmppServerUtil.ValidatedMessageBody result = handler.validateShortMessage(submitSm);
+
+        ArgumentCaptor<SubmitSmResp> respCaptor = ArgumentCaptor.forClass(SubmitSmResp.class);
+        verify(worker).enqueueOut(respCaptor.capture());
+        assertThat(result).isNull();
+        assertThat(respCaptor.getValue().getCommandStatus()).isEqualTo(VendorSpecificConstants.STATUS_RINVDCS);
+    }
+
+    @Test
+    void validateShortMessage_whenUdhiSet_shouldStripUdhFromBody() throws Exception {
+        SubmitSm submitSm = new SubmitSm();
+        submitSm.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+        submitSm.setEsmClass(SmppConstants.ESM_CLASS_UDHI_MASK);
+        submitSm.setShortMessage(new byte[]{0x05, 0x00, 0x03, 0x01, 0x02, 0x01, 'H', 'e', 'l', 'l', 'o'});
+        when(worker.getCharsetGsm()).thenReturn(StandardCharsets.UTF_8.toString());
+
+        SmppServerUtil.ValidatedMessageBody result = handler.validateShortMessage(submitSm);
+
+        verify(worker, never()).enqueueOut(any());
+        assertThat(result.udh()).isEqualTo("050003010201");
+        assertThat(result.text()).isEqualTo("Hello");
+        assertThat(result.smType()).isEqualTo(StandardMessage.MSG_TEXT);
+    }
+
+    @Test
+    void validateScheduleDeliveryTime_whenInvalid_shouldEnqueueInvalidScheduleResponse() {
+        SubmitSm submitSm = new SubmitSm();
+        submitSm.setScheduleDeliveryTime("not-a-schedule");
+
+        Timestamp result = handler.validateScheduleDeliveryTime(submitSm);
+
+        ArgumentCaptor<SubmitSmResp> respCaptor = ArgumentCaptor.forClass(SubmitSmResp.class);
+        verify(worker).enqueueOut(respCaptor.capture());
+        assertThat(result).isNull();
+        assertThat(respCaptor.getValue().getCommandStatus()).isEqualTo(SmppConstants.STATUS_INVSCHED);
     }
 }

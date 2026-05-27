@@ -227,6 +227,11 @@ public class KannelResource {
     }
 
     public void validateKannelAuth(String username, String password) {
+        if (Strings.isNullOrEmpty(username) || Strings.isNullOrEmpty(password)) {
+            throw new WebApplicationException(Response.status(Response.Status.UNAUTHORIZED)
+                    .entity("Invalid credentials")
+                    .build());
+        }
         CredentialFileWatcher.Credential cred = credentialFileWatcher.getValidCredentials().get(username);
         if (cred == null || cred.type() != CredentialFileWatcher.CredentialType.HTTP) {
             logger.warn("No username found:{}", username);
