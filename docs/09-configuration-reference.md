@@ -52,6 +52,10 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `smppserver.log` | SMPP server bind, session, and message activity. |
 | `httpapi.log` | HTTP API access log when file logging is enabled. |
 
+`httpapi.log` records the HTTP method, request path, protocol, response status, bytes sent, response time, referer, and user agent by default. It intentionally omits the query string because the Kannel-compatible `/sendsms` API carries credentials, phone numbers, callback URLs, and message text in query parameters.
+
+If you customize `quarkus.http.access-log.pattern`, avoid `%r`, `%q`, `%{QUERY_STRING}`, and `%{q,...}` unless the resulting logs are treated as sensitive data.
+
 ## OpenAPI
 
 When the HTTP server is running, Sendium exposes:
