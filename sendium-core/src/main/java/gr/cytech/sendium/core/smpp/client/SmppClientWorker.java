@@ -110,10 +110,10 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             , {"unbind.timeout.millis", "5000"}
             , {"counters", "true"}
             , {"log.bytes", "false"}
-            , {"log.pdus", "true"}
+            , {"log.pdus", "false"}
             , {"log.pdus.exclude", SmppConstants.CMD_ID_ENQUIRE_LINK + "," + SmppConstants.CMD_ID_ENQUIRE_LINK_RESP}
-            , {"print.resps", "true"}
-            , {"print.mos", "true"}
+            , {"print.resps", "false"}
+            , {"print.mos", "false"}
             , {"systemType", ""}
             , {"addressRangeTon", ""}
             , {"addressRangeNpi", ""}
@@ -1866,4 +1866,3 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
     }
 }
-

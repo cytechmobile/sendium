@@ -27,6 +27,8 @@ Include:
 
 Default `httpapi.log` entries omit request query strings. If your deployment uses a custom HTTP access-log pattern, sanitize any `/sendsms` query parameters before sharing logs.
 
+SMPP PDU, byte, message, response, and MO diagnostic logs are opt-in because they can contain credentials, phone numbers, and message bodies. Sanitize `log.pdus`, `log.bytes`, `print.msgs`, `print.resps`, and `print.mos` output before sharing it.
+
 ## Feature Requests
 
 Use GitHub Discussions for early ideas. Open an issue when the behavior and use case are clear enough to track.

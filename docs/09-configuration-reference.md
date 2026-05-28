@@ -56,6 +56,8 @@ In the Docker image, the working directory is `/work`, so the default configurat
 
 If you customize `quarkus.http.access-log.pattern`, avoid `%r`, `%q`, `%{QUERY_STRING}`, and `%{q,...}` unless the resulting logs are treated as sensitive data.
 
+Worker diagnostic flags such as `log.pdus`, `log.bytes`, `print.msgs`, `print.resps`, and `print.mos` are disabled by default. Enabling them can write SMPP credentials, phone numbers, provider identifiers, callback URLs, and message bodies to logs.
+
 ## OpenAPI
 
 When the HTTP server is running, Sendium exposes:

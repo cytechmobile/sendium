@@ -42,7 +42,7 @@ Check:
 - The target worker name in `routingTable.conf` matches a configured worker in `smsg.properties`.
 - The SMPP client worker is enabled with `outSms.instance.<name>.enable = true`.
 - The upstream SMPP provider accepted the bind.
-- `smppclient.log` contains submit responses or connection errors.
+- `smppclient.log` contains connection errors. Submit response detail requires temporary `print.resps = true` and should be treated as sensitive.
 
 ## Routing Falls Through Unexpectedly
 
@@ -90,7 +90,7 @@ Check:
 - `forward.mo.format` is set to `JSON` or `FORM`.
 - The callback endpoint is reachable from the Sendium container or host.
 - The receiving endpoint returns an HTTP status from `200` to `399`.
-- `smppclient.log` contains incoming MO activity.
+- Full incoming MO detail requires temporary `print.mos = true` and should be treated as sensitive.
 
 ## Logs Are Missing
 
