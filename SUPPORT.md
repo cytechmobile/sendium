@@ -25,6 +25,8 @@ Include:
 - Sanitized `credentials.yml`, `smsg.properties`, or `routingTable.conf` snippets when relevant.
 - Relevant log lines from `smsg.log`, `smppclient.log`, `smppserver.log`, or `httpapi.log`.
 
+Default `httpapi.log` entries omit request query strings. If your deployment uses a custom HTTP access-log pattern, sanitize any `/sendsms` query parameters before sharing logs.
+
 ## Feature Requests
 
 Use GitHub Discussions for early ideas. Open an issue when the behavior and use case are clear enough to track.
