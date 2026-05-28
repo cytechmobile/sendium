@@ -26,6 +26,7 @@ When reporting any issue, remove:
 - Real system IDs and account IDs.
 - Private IP addresses when they are sensitive.
 - Phone numbers and message bodies.
+- Raw SMPP PDU, byte, worker message, response, and MO diagnostic logs.
 - Provider names if your agreement requires confidentiality.
 
 ## Supported Versions

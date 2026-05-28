@@ -73,10 +73,12 @@ All properties below should be prefixed with your instance path. For example, if
 
 ## 📊 Logging, Monitoring & JMX
 
+SMPP PDU and byte diagnostics are disabled by default because bind PDUs can include passwords and submit/deliver PDUs can include phone numbers and message bodies. Enable these settings only temporarily in controlled troubleshooting sessions, and treat the resulting logs as sensitive data.
+
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
-| `log.pdus` | `true` | Log all decoded SMPP Protocol Data Units (PDUs). |
-| `log.bytes` | `false` | Log raw hex bytes for troubleshooting. |
+| `log.pdus` | `false` | Opt-in logging for decoded SMPP Protocol Data Units (PDUs). May include bind passwords, phone numbers, and message bodies. |
+| `log.bytes` | `false` | Opt-in raw hex byte logging for SMPP troubleshooting. Treat as sensitive. |
 | `log.pdus.exclude` | `21,2147483669` | Comma-separated list of PDU Command IDs to suppress from logs (defaults to EnquireLink & EnquireLinkResp). |
 | `srv.printStatsPeriod` | `300` | Interval (in seconds) to dump server statistics to the logs. |
 | `srv.printRatePeriod` | `60` | Interval (in seconds) to calculate and print message rates. |
@@ -164,10 +166,12 @@ If the worker encounters severe connectivity issues, it can auto-suspend to prev
 
 ### Logging & KPIs
 
+Message printing is disabled by default because worker message objects can include phone numbers, callback URLs, and message bodies. Enable `print.msgs` only for short-lived diagnostics and sanitize logs before sharing them.
+
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
 | `debug` | `false` | Enables deep debug logging for the worker. |
-| `print.msgs` | `true` | Enables printing of message payloads to the log. |
+| `print.msgs` | `false` | Opt-in printing of full worker message objects. Treat output as sensitive. |
 | `kpi.enabled` | `false` |  (KPIs Not supported) Enables tracking of Key Performance Indicators (KPIs) for the vendor route. |
 | `kpi.period.minutes` | `60` | (KPIs Not supported) The rolling time window (in minutes, max 120) for KPI calculations. |
 | `kpi.volume` | `100` | (KPIs Not supported) The volume threshold required before KPI alerts trigger. |
@@ -265,13 +269,15 @@ The SMPP Client worker (`WorkerType: smppclient`) allows the application to conn
 
 ## 📊 Logging & Diagnostics
 
+SMPP client PDU, response, and MO diagnostics are disabled by default. These logs can include bind passwords, phone numbers, provider message IDs, callback data, and message bodies, so enable them only when the log destination is access-controlled and retention is appropriate.
+
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
-| `log.pdus` | `true` | Log all decoded SMPP Protocol Data Units (PDUs). |
-| `log.bytes` | `false` | Log raw hex bytes of the SMPP traffic. |
+| `log.pdus` | `false` | Opt-in logging for decoded SMPP Protocol Data Units (PDUs). May include bind passwords, addresses, and message bodies. |
+| `log.bytes` | `false` | Opt-in raw hex byte logging of SMPP traffic. Treat as sensitive. |
 | `log.pdus.exclude` | `21,2147483669` | Exclude specific Command IDs from PDU logs (defaults to EnquireLink/Resp). |
-| `print.resps` | `true` | Log Submit_SM responses. |
-| `print.mos` | `true` | Log incoming Mobile Originated (MO) messages. |
+| `print.resps` | `false` | Opt-in logging for Submit_SM responses with the associated message object. Treat output as sensitive. |
+| `print.mos` | `false` | Opt-in logging for incoming Mobile Originated (MO) messages. Treat output as sensitive. |
 | `counters` | `true` | Enable session monitoring and performance counters. |
 | `connection.healthcheck`| `false` | (Not supported yet) Enable strict connectivity verification before accepting messages. |
 

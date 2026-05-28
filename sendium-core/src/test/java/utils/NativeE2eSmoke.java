@@ -226,12 +226,12 @@ public class NativeE2eSmoke {
                 outSms.instance.route.tps = 0
                 outSms.instance.route.connections.transceivers = 1
                 outSms.instance.route.connection.healthcheck = true
-                outSms.instance.route.print.msgs = true
+                outSms.instance.route.print.msgs = false
 
                 outSms.instance.smpp.enable = true
                 outSms.instance.smpp.type = smppserver
                 outSms.instance.smpp.tps = 0
-                outSms.instance.smpp.print.msgs = true
+                outSms.instance.smpp.print.msgs = false
                 outSms.instance.smpp.srv.host = 0.0.0.0
                 outSms.instance.smpp.srv.port = 27777
                 outSms.instance.smpp.srv.bindTimeout = 5000

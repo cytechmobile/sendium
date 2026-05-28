@@ -78,7 +78,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public final String[] _srvMonitorThreads = {"srv.monitor.threads", "1"};
     public final String[] _srvOutThreads = {"srv.out.threads", "10"};
     public final String[] _logBytes = {"log.bytes", "false"};
-    public final String[] _logPdus = {"log.pdus", "true"};
+    public final String[] _logPdus = {"log.pdus", "false"};
 
     protected final String[] _srvEnabled = {"srv.enabled", "true"};
     protected final String[] _srvPort = {"srv.port", "0"};

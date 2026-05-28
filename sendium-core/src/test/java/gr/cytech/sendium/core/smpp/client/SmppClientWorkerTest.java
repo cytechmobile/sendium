@@ -26,6 +26,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SmppClientWorkerTest {
 
     @Test
+    void defaultsSensitiveDiagnosticLoggingOff() {
+        TestConfigurationProvider config = new TestConfigurationProvider();
+        TestSmppClientWorker worker = new TestSmppClientWorker(config, new Queue<>(), new CapturingTracker());
+
+        assertThat(worker.isPrintMsgs()).isFalse();
+        assertThat(config.getBlnPrpt(worker._logPdus)).isFalse();
+        assertThat(config.getBlnPrpt(worker._logBytes)).isFalse();
+        assertThat(config.getBlnPrpt(worker._printResps)).isFalse();
+        assertThat(config.getBlnPrpt(worker._printMos)).isFalse();
+    }
+
+    @Test
     void parseDlrAndCreateResponse_whenReceiptIsValid_enqueuesDlrWithRegisteredTlvs() throws Exception {
         TestConfigurationProvider config = new TestConfigurationProvider(Map.of(
                 "registered.tlvs.dlr", "carrier_1400"));

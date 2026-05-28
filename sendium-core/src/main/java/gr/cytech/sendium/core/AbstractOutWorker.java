@@ -51,7 +51,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
             , {"debug", "false"}
             , {"pause", "false"}
             , {"suspend", "false"}
-            , {"print.msgs", "true"}
+            , {"print.msgs", "false"}
             , {"queue.honourPriorities", "false"}
             , {"queue.name", ""}
             , {"tps", "0"} //Transactions Per Second
