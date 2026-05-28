@@ -1,6 +1,7 @@
 package gr.cytech.sendium.conf;
 
 import com.google.common.base.Strings;
+import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import io.quarkus.arc.DefaultBean;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -98,7 +99,7 @@ public class SendiumConfigurationHandler implements SendiumConfigurationProvider
         try {
             return memoryConfiguration.put(key, val);
         } catch (Exception e) {
-            logger.warn("error setting property {} to {}", key, val, e);
+            logger.warn("error setting property {} to {}", key, SensitiveLogSanitizer.maskValue(key, val), e);
             return null;
         }
     }

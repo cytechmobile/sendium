@@ -33,7 +33,7 @@ public class CredentialFileParser {
                         cred -> cred,
                         (existing, replacement) -> {
                             // Handle cases where the operator accidentally copy-pasted the same systemId or apiKey twice
-                            logger.warn("Duplicate credential key found for {}. Overwriting with the latest entry.", existing.getLookupKey());
+                            logger.warn("Duplicate credential key found. Overwriting with the latest entry.");
                             return replacement;
                         }
                 ));

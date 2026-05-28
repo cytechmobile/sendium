@@ -1,5 +1,6 @@
 package gr.cytech.sendium.conf;
 
+import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.Priority;
@@ -200,16 +201,7 @@ public class ConfFileWatcher {
 
     /** Simple helper to prevent logging cleartext passwords in production logs. */
     private String maskSecret(String key, String value) {
-        if (value == null) {
-            return "null";
-        }
-        String lowerKey = key.toLowerCase();
-        if (lowerKey.contains("password") ||
-                lowerKey.contains("secret") ||
-                lowerKey.contains("token")) {
-            return "*****";
-        }
-        return value;
+        return SensitiveLogSanitizer.maskValue(key, value);
     }
 
     private Map<String, String> loadPropertiesFromFile(File file) {

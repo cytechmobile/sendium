@@ -241,7 +241,7 @@ public class KannelResource {
         }
 
         if (!password.equals(cred.password())) {
-            logger.warn("Invalid password:{}", password);
+            logger.warn("Invalid password for username:{}", username);
             throw new WebApplicationException(Response.status(Response.Status.UNAUTHORIZED)
                     .entity("Invalid credentials")
                     .build());

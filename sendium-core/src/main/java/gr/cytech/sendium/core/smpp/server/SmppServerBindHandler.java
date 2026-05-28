@@ -36,7 +36,7 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
             SmppSessionConfiguration sessionConfiguration,
             final BaseBind bindRequest
     ) throws SmppProcessingException {
-        logger.info("new bind request: {}", bindRequest);
+        logger.info("new bind request from ip:{} systemId:{}", sessionConfiguration.getHost(), sessionConfiguration.getSystemId());
         checkIfConnectionFromIpIsOverLimit(sessionConfiguration.getHost());
         SmppSessionContext context = authProvider.authenticate(
                 sessionConfiguration.getSystemId(),
