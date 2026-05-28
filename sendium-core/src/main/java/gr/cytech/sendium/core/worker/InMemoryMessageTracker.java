@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.worker;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.util.SecurityUtils;
+import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,7 +34,10 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
 
     @Override
     public void configure(String key, String newValue, String oldValue) {
-        logger.debug("Configure: key={}, newValue={}, oldValue={}", key, newValue, oldValue);
+        logger.debug("Configure: key={}, newValue={}, oldValue={}",
+                key,
+                SensitiveLogSanitizer.maskValue(key, newValue),
+                SensitiveLogSanitizer.maskValue(key, oldValue));
     }
 
     @Override

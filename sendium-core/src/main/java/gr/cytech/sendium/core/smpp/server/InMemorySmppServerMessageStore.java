@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.smpp.server;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.worker.InMemoryDlrService;
 import gr.cytech.sendium.core.worker.MessageState;
+import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -106,7 +107,10 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
 
     @Override
     public void configure(String key, String newValue, String oldValue) {
-        logger.debug("Configure: key={}, newValue={}, oldValue={}", key, newValue, oldValue);
+        logger.debug("Configure: key={}, newValue={}, oldValue={}",
+                key,
+                SensitiveLogSanitizer.maskValue(key, newValue),
+                SensitiveLogSanitizer.maskValue(key, oldValue));
     }
 
     @Override

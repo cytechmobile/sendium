@@ -92,6 +92,7 @@ class ConfFileWatcherTest {
 
         assertThat(method.invoke(watcher, "db.password", "secret")).isEqualTo("*****");
         assertThat(method.invoke(watcher, "api.token", "token")).isEqualTo("*****");
+        assertThat(method.invoke(watcher, "http.apiKey", "api-key")).isEqualTo("*****");
         assertThat(method.invoke(watcher, "plain.key", "value")).isEqualTo("value");
         assertThat(method.invoke(watcher, "plain.key", null)).isEqualTo("null");
     }

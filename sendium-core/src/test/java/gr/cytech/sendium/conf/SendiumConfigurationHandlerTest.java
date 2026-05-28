@@ -91,6 +91,21 @@ class SendiumConfigurationHandlerTest {
     }
 
     @Test
+    void propertyChangeEventToStringMasksSensitiveValuesOnly() {
+        var sensitive = new PropertyChangeEvent("db.password", "secret", "old-secret");
+        var plain = new PropertyChangeEvent("plain.key", "value", "old-value");
+
+        assertThat(sensitive.toString())
+                .contains("\"value\":\"*****\"")
+                .contains("\"oldValue\":\"*****\"")
+                .doesNotContain("secret")
+                .doesNotContain("old-secret");
+        assertThat(plain.toString())
+                .contains("\"value\":\"value\"")
+                .contains("\"oldValue\":\"old-value\"");
+    }
+
+    @Test
     void loadDefaultParamsPrefixesKeysOnlyOnce() {
         String[][] params = {{"host", "localhost"}, {"outSms.instance.worker.port", "2775"}};
 

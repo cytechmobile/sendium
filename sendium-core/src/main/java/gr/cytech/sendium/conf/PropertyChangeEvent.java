@@ -1,5 +1,7 @@
 package gr.cytech.sendium.conf;
 
+import gr.cytech.sendium.util.SensitiveLogSanitizer;
+
 import java.util.EventObject;
 
 public class PropertyChangeEvent extends EventObject {
@@ -37,7 +39,7 @@ public class PropertyChangeEvent extends EventObject {
     @Override
     public String toString() {
         return "{\"key\":\"" + key + "\"," +
-                "\"value\":\"" + value + "\"," +
-                "\"oldValue\":\"" + oldValue + "\"}";
+                "\"value\":\"" + SensitiveLogSanitizer.maskValue(key, value) + "\"," +
+                "\"oldValue\":\"" + SensitiveLogSanitizer.maskValue(key, oldValue) + "\"}";
     }
 }
