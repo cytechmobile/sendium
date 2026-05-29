@@ -3,6 +3,8 @@ package gr.cytech.sendium.core.worker;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 
 @RegisterForReflection
 public class MessageState implements Serializable {
@@ -15,6 +17,7 @@ public class MessageState implements Serializable {
     private String destAddr;
     private String operatorMsgId;
     private String forwardDlrUrl;
+    private List<String> reassembledParts;
     private MessageStatus status;
     private long timestamp;
 
@@ -69,6 +72,10 @@ public class MessageState implements Serializable {
         return status;
     }
 
+    public List<String> getReassembledParts() {
+        return reassembledParts == null ? null : new ArrayList<>(reassembledParts);
+    }
+
     public long getTimestamp() {
         return timestamp;
     }
@@ -79,6 +86,10 @@ public class MessageState implements Serializable {
 
     public void setStatus(MessageStatus status) {
         this.status = status;
+    }
+
+    public void setReassembledParts(List<String> reassembledParts) {
+        this.reassembledParts = reassembledParts == null ? null : new ArrayList<>(reassembledParts);
     }
 
     public void setTimestamp(long timestamp) {

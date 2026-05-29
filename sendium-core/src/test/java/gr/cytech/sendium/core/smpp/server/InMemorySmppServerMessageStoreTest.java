@@ -79,6 +79,23 @@ class InMemorySmppServerMessageStoreTest {
     }
 
     @Test
+    void persistMessages_SavesReassembledPartIds() {
+        StandardMessage msg = new StandardMessage();
+        msg.serial = "gw-1";
+        msg.owner_id = "account1";
+        msg.systemId = "sys1";
+        msg.from = "from1";
+        msg.to = "to1";
+        msg.reassembledParts = new ArrayList<>(List.of("part-1", "part-2"));
+
+        messageStore.persistMessages(List.of(new InEvent<>(msg, null, 1, new Timestamp(System.currentTimeMillis()))));
+
+        ArgumentCaptor<MessageState> captor = ArgumentCaptor.forClass(MessageState.class);
+        verify(dlrService).saveInitialState(captor.capture());
+        assertEquals(List.of("part-1", "part-2"), captor.getValue().getReassembledParts());
+    }
+
+    @Test
     void persistMessages_WithNullMessage_Skips() {
         List<InEvent<StandardMessage>> events = new ArrayList<>();
 
