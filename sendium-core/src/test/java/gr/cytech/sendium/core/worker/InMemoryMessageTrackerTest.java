@@ -12,7 +12,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -104,6 +106,19 @@ class InMemoryMessageTrackerTest {
         verify(outWorker).enqueueToRouter(captor.capture());
         assertEquals("accountId", captor.getValue().owner_id);
         assertEquals("systemId", captor.getValue().systemId);
+    }
+
+    @Test
+    void createAndEnqueueDLR_KnownReassembledMessage_RestoresPartIds() throws InterruptedException {
+        MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
+        state.setReassembledParts(new ArrayList<>(List.of("part-1", "part-2")));
+        when(dlrService.resolveAndRemoveDlr("op-456", 1)).thenReturn(java.util.Optional.of(state));
+
+        tracker.createAndEnqueueDLR(1, "op-456", "gw-123", "from", "to", "test body", 1, "0", new HashMap<>());
+
+        ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
+        verify(outWorker).enqueueToRouter(captor.capture());
+        assertEquals(List.of("part-1", "part-2"), captor.getValue().reassembledParts);
     }
 
     @Test

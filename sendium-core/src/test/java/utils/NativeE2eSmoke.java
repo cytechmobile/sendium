@@ -503,11 +503,38 @@ public class NativeE2eSmoke {
         }
 
         private void start() throws Exception {
+            Exception lastFailure = null;
+            int attempt = 0;
+            long deadline = System.nanoTime() + TIMEOUT.toNanos();
+            while (System.nanoTime() < deadline) {
+                attempt++;
+                try {
+                    session = client.bind(createConfiguration(), createSessionHandler());
+                    return;
+                } catch (Exception e) {
+                    lastFailure = e;
+                    if (session != null) {
+                        session.destroy();
+                        session = null;
+                    }
+                    System.err.println("Downstream SMPP bind attempt " + attempt + " failed: "
+                            + e.getClass().getSimpleName() + ": " + e.getMessage());
+                    Thread.sleep(500);
+                }
+            }
+            throw new IllegalStateException("Downstream SMPP client could not bind after " + attempt + " attempts", lastFailure);
+        }
+
+        private SmppSessionConfiguration createConfiguration() {
             SmppSessionConfiguration configuration = new SmppSessionConfiguration(SmppBindType.TRANSCEIVER, "smpp-user", "smpp-pass");
             configuration.setHost("localhost");
             configuration.setPort(SENDIUM_SMPP_PORT);
             configuration.setWindowSize(1000);
-            session = client.bind(configuration, new DefaultSmppSessionHandler() {
+            return configuration;
+        }
+
+        private DefaultSmppSessionHandler createSessionHandler() {
+            return new DefaultSmppSessionHandler() {
                 @Override
                 public PduResponse firePduRequestReceived(PduRequest pduRequest) {
                     if (pduRequest instanceof DeliverSm receivedDeliverSm) {
@@ -516,7 +543,7 @@ public class NativeE2eSmoke {
                     }
                     return pduRequest.createResponse();
                 }
-            });
+            };
         }
 
         private SubmitSmResp sendSms(String from, String to, String text) throws SmppInvalidArgumentException, InterruptedException,

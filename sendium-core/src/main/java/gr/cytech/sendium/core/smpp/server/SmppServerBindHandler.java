@@ -14,9 +14,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 public class SmppServerBindHandler<M extends StandardMessage> implements SmppServerHandler {
     private static final Logger logger = LoggerFactory.getLogger(SmppServerBindHandler.class);
+    private static final long UNPUSHED_DLR_REPLAY_BIND_WAIT_MILLIS = 5_000;
+    private static final long UNPUSHED_DLR_REPLAY_BIND_POLL_MILLIS = 50;
     public final ServerConnections connections;
     private final SmppServerWorker<M> worker;
     private final ConcurrentHashMap<Long, SmppSessionContext> pendingSessionContexts;
@@ -84,13 +87,40 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
 
         logger.info("Session created for account ID: {}", accountId);
         session.serverReady(handler);
+        scheduleUnpushedDlrReplay(handler);
+    }
+
+    private void scheduleUnpushedDlrReplay(SmppServerSessionHandler<M> handler) {
+        if (worker.getMessageStore() == null) {
+            return;
+        }
+        Thread.ofVirtual()
+                .name("SmppServer-UnpushedDlrReplay-" + handler.getSessionId())
+                .start(() -> replayUnpushedDlrsWhenBound(handler));
+    }
+
+    private void replayUnpushedDlrsWhenBound(SmppServerSessionHandler<M> handler) {
         try {
-            if (worker.getMessageStore() != null) {
-                worker.getMessageStore().onClientConnected(handler.getSystemId());
+            if (!waitForBoundSession(handler)) {
+                logger.warn("Skipping unpushed DLR replay because session did not become bound for systemId:{}",
+                        handler.getSystemId());
+                return;
             }
+            worker.getMessageStore().onClientConnected(handler.getSystemId());
         } catch (Exception e) {
             logger.warn("Failed to process unpushed DLRs for systemId:{}", handler.getSystemId(), e);
         }
+    }
+
+    private boolean waitForBoundSession(SmppServerSessionHandler<M> handler) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(UNPUSHED_DLR_REPLAY_BIND_WAIT_MILLIS);
+        while (System.nanoTime() < deadline) {
+            if (handler.getSession() != null && handler.getSession().isBound()) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(UNPUSHED_DLR_REPLAY_BIND_POLL_MILLIS);
+        }
+        return handler.getSession() != null && handler.getSession().isBound();
     }
 
     public void sessionDestroyed(Long sessionId, SmppServerSession session) {

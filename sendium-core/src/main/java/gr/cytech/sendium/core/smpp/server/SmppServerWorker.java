@@ -626,7 +626,12 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         for (DeliverSm deliverSm : requests) {
-            deliverSm.setReferenceObject(new Object[]{handler, pMsg});
+            Object deliverMsgId = deliverSm.getReferenceObject();
+            if (deliverMsgId instanceof String msgId) {
+                deliverSm.setReferenceObject(new Object[]{handler, pMsg, msgId});
+            } else {
+                deliverSm.setReferenceObject(new Object[]{handler, pMsg});
+            }
             enqueueOut(deliverSm);
             if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_ENQUEUED)) {
                 logger.info("message.deliver.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(pMsg));
@@ -689,6 +694,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         deliverSm.setEsmClass(SmppConstants.ESM_CLASS_MT_SMSC_DELIVERY_RECEIPT);
+        deliverSm.setReferenceObject(messageId);
         return deliverSm;
     }
 
@@ -861,7 +867,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     public void reEnqueueIn(List<InEvent<M>> inEvents) {
-        inEvents.forEach(event -> enqueueNoExceptions(event.pMsg));
+        inEvents.forEach(event -> enqueueToRouterNoExceptions(event.pMsg));
         inEventQueue.addAll(inEvents);
     }
 

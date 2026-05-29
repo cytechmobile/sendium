@@ -8,6 +8,7 @@ import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -86,6 +87,8 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
             dlrMsg.errcode = errorCode != null ? errorCode : "";
             dlrMsg.systemId = msgState.getSystemId();
             dlrMsg.owner_id = msgState.getAccountId();
+            var reassembledParts = msgState.getReassembledParts();
+            dlrMsg.reassembledParts = reassembledParts == null ? null : new ArrayList<>(reassembledParts);
             dlrMsg.type = StandardMessage.MSG_DLR;
             try {
                 outWorker.enqueueToRouter(dlrMsg);

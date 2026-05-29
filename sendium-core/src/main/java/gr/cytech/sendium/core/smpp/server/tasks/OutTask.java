@@ -15,6 +15,7 @@ public class OutTask<M extends StandardMessage> implements Runnable {
     private final SmppServerWorker<M> worker;
     private final Pdu pdu;
     private M msg;
+    private String deliverMsgId;
 
     public OutTask(SmppServerWorker<M> worker, Pdu pdu) {
         this.worker = worker;
@@ -42,6 +43,7 @@ public class OutTask<M extends StandardMessage> implements Runnable {
                 Object[] arr = (Object[]) pdu.getReferenceObject();
                 SmppServerSessionHandler handler = (SmppServerSessionHandler) arr[0];
                 msg = (M) arr[1];
+                deliverMsgId = arr.length > 2 && arr[2] instanceof String id ? id : null;
                 success = handler.sendPduRequest((PduRequest) pdu);
             }
         } catch (Exception e) {
@@ -53,7 +55,8 @@ public class OutTask<M extends StandardMessage> implements Runnable {
             worker.outTaskFailed(pdu, msg);
         } else if (!pdu.isResponse() && msg != null) {
             if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_SENT)) {
-                logger.info("message.deliver.sent worker={} {}", worker.getFullName(), MessageTrace.identifiers(msg));
+                logger.info("message.deliver.sent worker={} deliverMsgId={} {}", worker.getFullName(),
+                        MessageTrace.value(deliverMsgId), MessageTrace.identifiers(msg));
             }
         }
     }
