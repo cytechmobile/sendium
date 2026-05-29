@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.worker;
 
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SecurityUtils;
 import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import org.slf4j.Logger;
@@ -45,7 +46,9 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
         smsid = pMsg.serial; //in our case no hash needed
         if (smsid != null && !smsid.isEmpty() && smscid != null && !smscid.isEmpty()) {
             outWorker.getWorkerResources().getDlrService().linkOperatorId(smsid, smscid);
-            logger.debug("Linked gatewayMsgId={} to operatorMsgId={}", smsid, smscid);
+            if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_OPERATOR_LINKED)) {
+                logger.info("message.operator.linked operatorMsgId={} {}", MessageTrace.value(smscid), MessageTrace.identifiers(pMsg));
+            }
             return 1;
         }
         logger.warn("Invalid parameters: smsid={}, smscid={}", smsid, smscid);
@@ -89,7 +92,9 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
             } catch (InterruptedException ie) {
                 outWorker.handleException(ie);
             }
-            logger.debug("DLR enqueued for gatewayMsgId: {}, status: {}", msgState.getGatewayMsgId(), state);
+            if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_DLR)) {
+                logger.info("message.dlr status={} operatorMsgId={} {}", state, MessageTrace.value(smscid), MessageTrace.identifiers(dlrMsg));
+            }
         } else {
             logger.warn("DLR received for unknown/expired message: smsid={}", smsid);
         }

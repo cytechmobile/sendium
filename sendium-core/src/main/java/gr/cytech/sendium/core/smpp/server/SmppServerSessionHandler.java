@@ -22,6 +22,7 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.smpp.SmsgSmppSessionHandler;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import gr.cytech.sendium.util.Constants;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.MessageUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -98,7 +99,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
                 try {
                     handleSubmitSm(submitSm);
                 } catch (Exception e) {
-                    logger.error("{}: handling of submit sm caused exception: {}", this, pduRequest, e);
+                    logger.error("{}: handling of submit sm caused exception {}", this, MessageTrace.pdu(pduRequest), e);
                     resp = SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_SYSERR, null);
                     worker.enqueueOut(resp);
                 }
@@ -130,7 +131,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
      * @param pduRequest The request PDU received on this session
      */
     public void firePduRequestExpired(PduRequest pduRequest) {
-        logger.info("{}: received expired request PDU: {}", this, pduRequest);
+        logger.info("{}: received expired request PDU {}", this, MessageTrace.pdu(pduRequest));
 
         if (pduRequest.getCommandId() == SmppConstants.CMD_ID_DELIVER_SM) {
             try {
@@ -139,7 +140,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
 
                 worker.markAsUnpushed(original);
             } catch (Exception e) {
-                logger.warn("{}: error while handling expired pdu request {}", this, pduRequest, e);
+                logger.warn("{}: error while handling expired pdu request {}", this, MessageTrace.pdu(pduRequest), e);
             }
         }
     }
@@ -177,7 +178,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
          * be returned by the remote endpoint in response to a PDU.
          */
         if (pduAsyncResponse.getResponse().getCommandStatus() != SmppConstants.STATUS_OK) {
-            logger.warn("{}: pdu response with error status received: {}", this, pduAsyncResponse.getResponse());
+            logger.warn("{}: pdu response with error status received {}", this, MessageTrace.pdu(pduAsyncResponse.getResponse()));
         }
     }
 
@@ -192,7 +193,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
      * @param pduResponse The "unexpected" response PDU received on this session
      */
     public void fireUnexpectedPduResponseReceived(PduResponse pduResponse) {
-        logger.warn("{}: received unexpected response PDU: {}", this, pduResponse);
+        logger.warn("{}: received unexpected response PDU {}", this, MessageTrace.pdu(pduResponse));
     }
 
     /**
@@ -219,7 +220,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
     public void fireRecoverablePduException(RecoverablePduException e) {
         PartialPdu partialPdu = (PartialPdu) e.getPartialPdu();
 
-        logger.warn("{}: received: {}", this, partialPdu, e);
+        logger.warn("{}: received malformed partial PDU", this, e);
 
         if (partialPdu.getReferenceObject() == null) {
             partialPdu.setReferenceObject(new Object[]{this, System.currentTimeMillis()});
@@ -292,7 +293,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
         ) {
             if (!rateController.tryAcquire()) {
                 pdu.setReferenceObject(new Object[]{this, System.currentTimeMillis()});
-                logger.warn("{}: PDU throttled (rate={}): {}", this, rateController.getRate(), pdu);
+                logger.warn("{}: PDU throttled rate={} {}", this, rateController.getRate(), MessageTrace.pdu(pdu));
                 GenericNack nack = SmppServerUtil.createGenericNack((PduRequest<?>) pdu, SmppConstants.STATUS_THROTTLED);
                 worker.enqueueOut(nack);
                 return false;
@@ -389,11 +390,11 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
             InEvent<M> ine = submitProcessor.processSubmitSm(submitSm, sessionContext, validatedMessageBody, tstamp);
             worker.enqueueIn(ine);
         } catch (SmppProcessingException e) {
-            logger.warn("{} error processing submit sm: {}", this, submitSm, e);
+            logger.warn("{} error processing submit sm {}", this, MessageTrace.pdu(submitSm), e);
             SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, e.getErrorCode(), null);
             worker.enqueueOut(resp);
         } catch (Exception e) {
-            logger.error("{}: unexpected error processing submit sm: {}", this, submitSm, e);
+            logger.error("{}: unexpected error processing submit sm {}", this, MessageTrace.pdu(submitSm), e);
             SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_SYSERR, null);
             worker.enqueueOut(resp);
         }

@@ -29,6 +29,8 @@ Default `httpapi.log` entries omit request query strings. If your deployment use
 
 SMPP PDU, byte, message, response, and MO diagnostic logs are opt-in because they can contain credentials, phone numbers, and message bodies. Sanitize `log.pdus`, `log.bytes`, `print.msgs`, `print.resps`, and `print.mos` output before sharing it.
 
+For message-path investigations, prefer `message.*` lifecycle trace lines. `message.trace.mode = necessary` is the default and keeps only `message.accepted`, `message.submitted`, `message.dlr`, and `message.deliver.sent`; use `message.trace.mode = all` when route/enqueue/response detail is needed. These logs include IDs, message type, account/system context, and delivery state without including phone numbers or message bodies.
+
 ## Feature Requests
 
 Use GitHub Discussions for early ideas. Open an issue when the behavior and use case are clear enough to track.

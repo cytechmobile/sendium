@@ -18,6 +18,7 @@ import gr.cytech.sendium.external.NoOpVendorKpiHandler;
 import gr.cytech.sendium.external.VendorKpiHandler;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.Sleeper;
 import gr.cytech.sendium.util.StatsKeeper;
 import gr.cytech.sendium.util.TimeUtils;
@@ -530,9 +531,12 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
             return;
         }
         if (!this.keepOnRunning) {
-            throw new IllegalStateException("Worker:" + getFullName() + " is stopped, cannot enqueue msg:" + pMsg);
+            throw new IllegalStateException("Worker:" + getFullName() + " is stopped, cannot enqueue " + MessageTrace.identifiers(pMsg));
         }
         pMsg.outgateway = getFullName();
+        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ENQUEUED)) {
+            logger.info("message.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(pMsg));
+        }
         msgQ.enqueue(pMsg);
     }
 
@@ -689,15 +693,18 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
      */
     public final void enqueueToRouter(M msg) throws InterruptedException {
         routerQueue.enqueue(msg);
+        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ENQUEUED)) {
+            logger.info("message.enqueued destination=router {}", MessageTrace.identifiers(msg));
+        }
     }
 
     public void enqueueToRouterNoExceptions(M msg) {
         while (true) {
             try {
-                routerQueue.enqueue(msg);
+                enqueueToRouter(msg);
                 return;
             } catch (Exception e) {
-                logger.warn("exception re-enqueuing to router, will retry:{}", msg, e);
+                logger.warn("exception re-enqueuing to router, will retry {}", MessageTrace.identifiers(msg), e);
                 TimeUtils.sleep(100, TimeUnit.MILLISECONDS);
             }
         }
@@ -1102,7 +1109,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
 
         if (!shouldAttemptWorkerRetry || m != msg || (internalTries >= getMaxRetries() && getMaxRetries() != 0)) {
             if (m != null) {
-                logger.info("async: failed ({} times) to deliver: {}", internalTries, msg);
+                if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_FAILED)) {
+                    logger.info("message.delivery.failed mode=async tries={} {}", internalTries, MessageTrace.identifiers(msg));
+                }
                 handleMessageFailInWorker("async", m, enqueueInstead);
             }
             return;
@@ -1110,7 +1119,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
 
         failedMsgCounter.put(m.msgId, internalTries);
 
-        logger.info("async: failed ({} times) to deliver: {}", internalTries, msg);
+        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_RETRY)) {
+            logger.info("message.delivery.retry mode=async tries={} {}", internalTries, MessageTrace.identifiers(msg));
+        }
 
         m = doFailDelayWorkerRetryPolicyAction(m, internalTries);
 
@@ -1125,7 +1136,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
             checkAfterDoMessageSuccessFilters(msg);
         } catch (FilterException fe) {
             //after message success, we do not expect to handle any filter exception
-            logger.warn("unexpected filter exception onMessageSuccess for msg:{}", msg, fe);
+            logger.warn("unexpected filter exception onMessageSuccess {}", MessageTrace.identifiers(msg), fe);
         }
     }
 
@@ -1480,7 +1491,10 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                 }
                 if (m == null || m != msg || (internalTries >= getMaxRetries() && getMaxRetries() != 0)) {
                     if (m != null && !enqueueInstead) {
-                        logger.info("{}: failed ({} times) to deliver: {}", id, internalTries, msg);
+                        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_FAILED)) {
+                            logger.info("message.delivery.failed workerThread={} tries={} {}", id, internalTries,
+                                    MessageTrace.identifiers(msg));
+                        }
                     }
                     break; //Stop trying in the worker
                 }
@@ -1494,7 +1508,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                     failedMsgCounter.put(m.msgId, tries);
                 } //else we use the current tries
 
-                logger.info("{}: failed ({} times) to deliver: {}", id, tries, msg);
+                if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_RETRY)) {
+                    logger.info("message.delivery.retry workerThread={} tries={} {}", id, tries, MessageTrace.identifiers(msg));
+                }
 
                 if (tries >= getMaxRetries() && getMaxRetries() != 0) {
                     //Current retries + previous ones enforce us to break the loop

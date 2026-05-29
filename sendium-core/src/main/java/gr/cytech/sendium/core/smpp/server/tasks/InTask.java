@@ -6,6 +6,7 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.smpp.server.InEvent;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.TimeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -87,7 +88,7 @@ public class InTask<M extends StandardMessage> implements Runnable {
                     currentBatchSize++;
                 }
             } catch (InterruptedException e) {
-                logger.warn("Exception caught while waiting for in event {}", ine, e);
+                logger.warn("Exception caught while waiting for in event {}", MessageTrace.identifiers(ine == null ? null : ine.pMsg), e);
             }
         } while (currentBatchSize < maxBatchSize && remainingTime >= 0);
 

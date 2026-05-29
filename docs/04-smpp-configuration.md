@@ -75,8 +75,11 @@ All properties below should be prefixed with your instance path. For example, if
 
 SMPP PDU and byte diagnostics are disabled by default because bind PDUs can include passwords and submit/deliver PDUs can include phone numbers and message bodies. Enable these settings only temporarily in controlled troubleshooting sessions, and treat the resulting logs as sensitive data.
 
+Safe lifecycle trace logs are controlled by global `message.trace.mode`. The default `necessary` mode logs only `message.accepted`, `message.submitted`, `message.dlr`, and `message.deliver.sent`; set it to `off` to disable message-flow logs or `all` to include route/enqueue/response/retry detail.
+
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
+| `message.trace.mode` | `necessary` | Global `message.*` lifecycle trace mode: `off`, `necessary`, or `all`. |
 | `log.pdus` | `false` | Opt-in logging for decoded SMPP Protocol Data Units (PDUs). May include bind passwords, phone numbers, and message bodies. |
 | `log.bytes` | `false` | Opt-in raw hex byte logging for SMPP troubleshooting. Treat as sensitive. |
 | `log.pdus.exclude` | `21,2147483669` | Comma-separated list of PDU Command IDs to suppress from logs (defaults to EnquireLink & EnquireLinkResp). |
@@ -166,7 +169,7 @@ If the worker encounters severe connectivity issues, it can auto-suspend to prev
 
 ### Logging & KPIs
 
-Message printing is disabled by default because worker message objects can include phone numbers, callback URLs, and message bodies. Enable `print.msgs` only for short-lived diagnostics and sanitize logs before sharing them.
+Message printing is disabled by default because worker message objects can include phone numbers, callback URLs, and message bodies. Enable `print.msgs` only for short-lived diagnostics and sanitize logs before sharing them. Use `message.trace.mode` for day-to-day support tracing by IDs, message type, account/system context, and routing state.
 
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
@@ -269,7 +272,7 @@ The SMPP Client worker (`WorkerType: smppclient`) allows the application to conn
 
 ## 📊 Logging & Diagnostics
 
-SMPP client PDU, response, and MO diagnostics are disabled by default. These logs can include bind passwords, phone numbers, provider message IDs, callback data, and message bodies, so enable them only when the log destination is access-controlled and retention is appropriate.
+SMPP client PDU, response, and MO diagnostics are disabled by default. These logs can include bind passwords, phone numbers, provider message IDs, callback data, and message bodies, so enable them only when the log destination is access-controlled and retention is appropriate. Default `message.trace.mode = necessary` preserves submit and DLR milestones without logging payloads; use `all` for submit-response and operator-link details.
 
 | Property | Default Value | Description |
 | :--- | :--- | :--- |

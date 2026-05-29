@@ -5,6 +5,7 @@ import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.TimeUtils;
 import io.quarkus.arc.Arc;
 import org.slf4j.Logger;
@@ -57,6 +58,8 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
     protected abstract boolean getConfigBoolean(String[] prop);
 
     protected abstract int getConfigInt(String[] prop);
+
+    protected abstract String getConfigString(String[] prop);
 
     @Override
     public void propertyChange(PropertyChangeEvent evt) {
@@ -158,15 +161,20 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
             if (sent) {
                 msg = null; //Avoid further handling in finally block;
             } else {
-                logger.warn("No route for: ({}), requeuing it", msg);
+                if (MessageTrace.shouldLog(getConfigString(MessageTrace.TRACE_MODE), MessageTrace.EVENT_ROUTING_MISS)) {
+                    logger.warn("message.routing.miss action=requeue {}", MessageTrace.identifiers(msg));
+                }
                 TimeUtils.sleep(100, TimeUnit.MILLISECONDS);
             }
         } catch (InterruptedException ie) {
-            logger.warn("Interrupted while processing msg:{}", msg, ie);
+            logger.warn("Interrupted while processing message {}", MessageTrace.identifiers(msg), ie);
         } catch (FilterException fe) {
             switch (fe.getStatusCode()) {
                 case DROP:
-                    logger.info("DROP {} {} {}", fe.getFilter().getFullName(), fe.getMessage(), msg);
+                    if (MessageTrace.shouldLog(getConfigString(MessageTrace.TRACE_MODE), MessageTrace.EVENT_DROPPED)) {
+                        logger.info("message.dropped filter={} reason={} {}", fe.getFilter().getFullName(), fe.getMessage(),
+                                MessageTrace.identifiers(msg));
+                    }
                     msg = null;
                     break;
                 case RESCHEDULE:
@@ -208,6 +216,9 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
                     logger.info("Message: ({}) has target: ({})", msg, target);
                 }
                 // Suppressing unchecked cast since we know workers take StandardMessage
+                if (MessageTrace.shouldLog(getConfigString(MessageTrace.TRACE_MODE), MessageTrace.EVENT_ROUTED)) {
+                    logger.info("message.routed target={} {}", target.getFullName(), MessageTrace.identifiers(msg));
+                }
                 ((AbstractOutWorker<M>) target).enqueue(msg);
             }
             return true;
@@ -222,7 +233,7 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
             }
             msg.rtxCnt++;
         }
-        logger.error("Error processing msg {}", msg, e);
+        logger.error("Error processing message {}", MessageTrace.identifiers(msg), e);
     }
 
     public static class RoutingTargets {

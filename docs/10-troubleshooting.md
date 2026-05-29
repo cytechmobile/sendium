@@ -42,6 +42,7 @@ Check:
 - The target worker name in `routingTable.conf` matches a configured worker in `smsg.properties`.
 - The SMPP client worker is enabled with `outSms.instance.<name>.enable = true`.
 - The upstream SMPP provider accepted the bind.
+- Default `message.trace.mode = necessary` logs `message.accepted`, `message.submitted`, `message.dlr`, and `message.deliver.sent` without exposing addresses or message content. Temporarily set `message.trace.mode = all` to include route/enqueue/submit-response detail.
 - `smppclient.log` contains connection errors. Submit response detail requires temporary `print.resps = true` and should be treated as sensitive.
 
 ## Routing Falls Through Unexpectedly

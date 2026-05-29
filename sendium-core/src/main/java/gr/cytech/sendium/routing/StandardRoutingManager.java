@@ -6,6 +6,7 @@ import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.TimeUtils;
 import io.quarkus.arc.DefaultBean;
 import io.quarkus.runtime.StartupEvent;
@@ -71,6 +72,11 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
     @Override
     protected int getConfigInt(String[] prop) {
         return sendiumConfigurationHandler.getIntPrpt(prop);
+    }
+
+    @Override
+    protected String getConfigString(String[] prop) {
+        return sendiumConfigurationHandler.getPrpt(prop);
     }
 
     public void beforeWorkerStop(AbstractOutWorker worker) {
@@ -172,7 +178,7 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
             }
             msg.rtxCnt++;
         }
-        logger.error("Error processing msg {}", msg, e);
+        logger.error("Error processing message {}", MessageTrace.identifiers(msg), e);
     }
 
     @Override
@@ -184,7 +190,7 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
                             "Adding it to failed queue! " +
                             "You must address the error and then re-enqueue the messages, " +
                             "by setting the property: {} equal to true!",
-                    msg, e, _enqueueFailedRouting[0]);
+                    MessageTrace.identifiers(msg), e, _enqueueFailedRouting[0]);
             //sent error to external system ideally
         }
     }
@@ -211,7 +217,8 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
 
             if (result.hasReachedLast()) {
                 if (pMsg.rtxCnt == 0 && !Strings.isNullOrEmpty(pMsg.nextTarget) && pMsg.nextTarget.equals(Strings.nullToEmpty(originalNextTarget))) {
-                    logger.warn("Message has exact same next target as before routing. Switching it to noMoreTargets to avoid possible looping: {}", pMsg);
+                    logger.warn("Message has exact same next target as before routing. Switching it to noMoreTargets {}",
+                            MessageTrace.identifiers(pMsg));
                     pMsg.nextTarget = NO_MORE_TARGETS;
                 }
                 return result;

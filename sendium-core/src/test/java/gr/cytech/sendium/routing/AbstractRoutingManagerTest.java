@@ -164,5 +164,10 @@ class AbstractRoutingManagerTest {
         protected int getConfigInt(String[] prop) {
             return 1;
         }
+
+        @Override
+        protected String getConfigString(String[] prop) {
+            return prop[1];
+        }
     }
 }

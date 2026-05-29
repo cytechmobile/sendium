@@ -431,6 +431,7 @@ public class StandardMessage implements Comparable<StandardMessage>, CoreMessage
             case MSG_HLR: return MSG_TYPE_HLR;
             case MSG_HLR_RSP: return MSG_TYPE_HLR_RSP;
             case MSG_MMS: return MSG_TYPE_MMS;
+            case MSG_VIBER: return MSG_TYPE_VIBER;
             case MSG_DCB: return MSG_TYPE_DCB;
             default: return MSG_TYPE_CUSTOM;
         }
