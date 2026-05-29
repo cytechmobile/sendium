@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.1](https://github.com/cytechmobile/sendium/compare/v0.2.0...v0.2.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* **smpp:** route UDH multipart SMS ([445beb3](https://github.com/cytechmobile/sendium/commit/445beb3bd45c37a698b2dbde435f982a294a0882))
+
+
+### Documentation
+
+* **features:** Added a clear Current Features section ([7589134](https://github.com/cytechmobile/sendium/commit/75891349a8f61b06165202fa23a861a2efc090da))
+
 ## [0.2.0](https://github.com/cytechmobile/sendium/compare/v0.1.0...v0.2.0) (2026-05-25)
 
 
