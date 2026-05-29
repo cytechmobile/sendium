@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.smpp.server;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.worker.InMemoryDlrService;
 import gr.cytech.sendium.core.worker.MessageState;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -63,11 +64,11 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
         try {
             boolean saved = getDlrService().saveUnpushedDlr(msg);
             if (!saved) {
-                logger.warn("Failed to save unpushed DLR: {}", msg);
+                logger.warn("Failed to save unpushed DLR {}", MessageTrace.identifiers(msg));
             }
             return saved;
         } catch (Exception e) {
-            logger.warn("Exception while saving unpushed DLR: {}", msg, e);
+            logger.warn("Exception while saving unpushed DLR {}", MessageTrace.identifiers(msg), e);
             return false;
         }
     }
@@ -91,7 +92,7 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
                 }
             } catch (Exception e) {
                 dlrService.releaseUnpushedDlrClaim(msg);
-                logger.warn("Failed to re-enqueue unpushed DLR: {}", msg, e);
+                logger.warn("Failed to re-enqueue unpushed DLR {}", MessageTrace.identifiers(msg), e);
             }
         }
     }

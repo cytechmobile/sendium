@@ -2,10 +2,12 @@ package gr.cytech.sendium.core.http;
 
 import com.google.common.base.Strings;
 import gr.cytech.sendium.auth.CredentialFileWatcher;
+import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.worker.InMemoryDlrService;
 import gr.cytech.sendium.core.worker.MessageState;
+import gr.cytech.sendium.util.MessageTrace;
 import jakarta.annotation.security.PermitAll;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -43,6 +45,9 @@ public class KannelResource {
 
     @Inject
     InMemoryDlrService dlrService;
+
+    @Inject
+    SendiumConfigurationHandler configurationHandler;
 
     @Operation(
             operationId = "sendSms",
@@ -205,6 +210,9 @@ public class KannelResource {
             }
             msg.acked = true;
             msg.serial = UUID.randomUUID().toString();
+            if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
+                logger.info("message.accepted ingress=http {}", MessageTrace.identifiers(msg));
+            }
             queueProvider.getRouterQueue().enqueue(msg);
             MessageState state = new MessageState(msg.serial, usr, msg.from, msg.to, dlrUrl);
             dlrService.saveInitialState(state);

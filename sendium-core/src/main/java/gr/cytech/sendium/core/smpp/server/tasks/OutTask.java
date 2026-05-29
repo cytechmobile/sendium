@@ -6,6 +6,7 @@ import com.cloudhopper.smpp.pdu.PduResponse;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.smpp.server.SmppServerSessionHandler;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
+import gr.cytech.sendium.util.MessageTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,6 +51,10 @@ public class OutTask<M extends StandardMessage> implements Runnable {
 
         if (!success) {
             worker.outTaskFailed(pdu, msg);
+        } else if (!pdu.isResponse() && msg != null) {
+            if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_SENT)) {
+                logger.info("message.deliver.sent worker={} {}", worker.getFullName(), MessageTrace.identifiers(msg));
+            }
         }
     }
 

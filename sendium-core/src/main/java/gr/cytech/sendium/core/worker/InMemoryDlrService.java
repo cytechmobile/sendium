@@ -168,7 +168,6 @@ public class InMemoryDlrService {
                 String json = mapper.writeValueAsString(context);
                 primaryStore.put(context.getGatewayMsgId(), json);
                 primaryTimestamps.put(context.getGatewayMsgId(), System.currentTimeMillis());
-                logger.info("Saved initial state on primaryStore for gatewayMsgId: {}", context.getGatewayMsgId());
             } catch (JsonProcessingException e) {
                 logger.error("Failed to serialize MessageState for gatewayMsgId: {}", context.getGatewayMsgId(), e);
             }
@@ -215,7 +214,6 @@ public class InMemoryDlrService {
                 primaryStore.put(gatewayMsgId, mapper.writeValueAsString(state));
                 correlationIndex.put(operatorMsgId, gatewayMsgId);
                 correlationTimestamps.put(operatorMsgId, System.currentTimeMillis());
-                logger.warn("Linked operatorMsgId: {} to gatewayMsgId: {}", operatorMsgId, gatewayMsgId);
             } catch (JsonProcessingException e) {
                 logger.error("Failed to serialize updated MessageState", e);
             }

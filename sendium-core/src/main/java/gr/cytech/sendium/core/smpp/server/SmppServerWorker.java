@@ -32,6 +32,7 @@ import gr.cytech.sendium.core.worker.WorkerType;
 import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.external.filter.FilterStatusCodes;
 import gr.cytech.sendium.external.filter.InMessageFiltering;
+import gr.cytech.sendium.util.MessageTrace;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollEventLoopGroup;
@@ -616,7 +617,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         try {
             requests = isDlr ? generateDeliverSmForDLR(pMsg) : generateDeliverSmForMO(pMsg);
         } catch (Exception e) {
-            logger.warn("Caught exception while generating SMPP request(s) for msg:{}", pMsg, e);
+            logger.warn("Caught exception while generating SMPP request(s) {}", MessageTrace.identifiers(pMsg), e);
             return isDlr ? null : pMsg;
         }
 
@@ -627,6 +628,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         for (DeliverSm deliverSm : requests) {
             deliverSm.setReferenceObject(new Object[]{handler, pMsg});
             enqueueOut(deliverSm);
+            if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_ENQUEUED)) {
+                logger.info("message.deliver.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(pMsg));
+            }
         }
         return null;
     }
@@ -800,8 +804,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public void outTaskFailed(Pdu pdu, M message) {
         if (pdu != null && pdu.isRequest() && pdu.getCommandId() == SmppConstants.CMD_ID_DELIVER_SM) {
             if (message == null) {
-                logger.warn("no message found for the failed out pdu:{}", pdu);
+                logger.warn("no message found for the failed out pdu {}", MessageTrace.pdu(pdu));
                 return;
+            }
+            if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_FAILED)) {
+                logger.warn("message.deliver.failed worker={} {}", getFullName(), MessageTrace.identifiers(message));
             }
             if (!markAsUnpushed(message)) {
                 enqueueNoExceptions(message);
@@ -821,6 +828,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             return;
         }
         filtered.pMsg.serial = UUID.randomUUID().toString();
+        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
+            logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(), MessageTrace.identifiers(filtered.pMsg));
+        }
         filtered.waitingForResponse = false;
         filtered.pMsg.ctstamp = ine.localTimestamp.getTime();
         filtered.pMsg.onetwork = ine.mpid;
@@ -866,13 +876,13 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                 filter.doFilter(FilterLifecyclePhase.BEFORE_INSERT, ine.pMsg);
             } catch (FilterException fe) {
                 if (fe.getStatusCode() == FilterStatusCodes.DROP) {
-                    logger.debug("Dropping message {} after filtering (before insert)", ine);
+                    logger.debug("Dropping message after filtering (before insert) {}", MessageTrace.identifiers(ine.pMsg));
                     enqueueOut(SmppServerUtil.createSubmitRsp(ine.submitSm, VendorSpecificConstants.STATUS_NUMBLOCKED, null));
                     return null;
                 }
             } catch (Exception e) {
                 logger.warn("exception caught while trying to apply filter:{} before inserting message {}. " +
-                        "ignoring filter and continuing", filter.getFullName(), ine, e);
+                        "ignoring filter and continuing", filter.getFullName(), MessageTrace.identifiers(ine.pMsg), e);
             }
         }
 

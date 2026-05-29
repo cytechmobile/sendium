@@ -18,6 +18,7 @@ import com.google.common.base.Strings;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.smpp.SmsgSmppSessionHandler;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
+import gr.cytech.sendium.util.MessageTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -125,7 +126,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                 //removeConnectionAndReconnect(this);
                 resp = pduRequest.createResponse();
                 resp.setReferenceObject(this);
-                logger.info("responding to unbind request:{} with resp:{}", pduRequest, resp);
+                logger.info("responding to unbind request {} with resp {}", MessageTrace.pdu(pduRequest), MessageTrace.pdu(resp));
                 break;
             default:
                 logger.debug("{}: received (invalid/not handled) pdu request: {}", this, pduRequest);
@@ -144,7 +145,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
      * @param pduRequest The request PDU received on this session
      */
     public void firePduRequestExpired(PduRequest pduRequest) {
-        logger.info("{}: received expired request PDU: {}", this, pduRequest);
+        logger.info("{}: received expired request PDU {}", this, MessageTrace.pdu(pduRequest));
 
         switch (pduRequest.getCommandId()) {
             case SmppConstants.CMD_ID_SUBMIT_SM:
@@ -155,7 +156,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                     smppClientWorker.handleResponse(this, SmppConstants.STATUS_DELIVERYFAILURE, null, msg);
 
                 } else {
-                    logger.warn("Pdu response with no object reference received, do nothing: {}", pduRequest);
+                    logger.warn("Pdu response with no object reference received, do nothing {}", MessageTrace.pdu(pduRequest));
                     return;
                 }
                 break;
@@ -209,7 +210,8 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                 // ask worker to handle response
                 String respMessageId = resp.getMessageId();
                 if (msg == null) {
-                    logger.warn("{} no attached message for submit: {} with response:{}", this, submit, resp);
+                    logger.warn("{} no attached message for submit {} with response {}", this,
+                            MessageTrace.pdu(submit), MessageTrace.pdu(resp));
                     return;
                 }
                 smppClientWorker.handleResponse(this, statusCode, respMessageId, msg);
@@ -240,7 +242,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
      * @param pduResponse The "unexpected" response PDU received on this session
      */
     public void fireUnexpectedPduResponseReceived(PduResponse pduResponse) {
-        logger.warn("{}: received unexpected response PDU (it will be ignored): {}", this, pduResponse);
+        logger.warn("{}: received unexpected response PDU (it will be ignored) {}", this, MessageTrace.pdu(pduResponse));
     }
 
     /**
@@ -284,7 +286,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
             try {
                 this.session.sendResponsePdu(resp);
             } catch (Exception ex) {
-                logger.warn("received further exception while trying to send back generic nack for request:{}", partialPdu, ex);
+                logger.warn("received further exception while trying to send back generic nack for partial PDU", ex);
             }
         }
     }

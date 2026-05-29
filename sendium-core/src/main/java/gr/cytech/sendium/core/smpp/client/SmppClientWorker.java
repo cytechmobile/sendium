@@ -38,6 +38,7 @@ import gr.cytech.sendium.core.worker.WorkerType;
 import gr.cytech.sendium.external.HealthCheckReport;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import gr.cytech.sendium.util.MessageFlexValue;
+import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SecurityUtils;
 import gr.cytech.sendium.util.TimeUtils;
 import jakarta.enterprise.context.Dependent;
@@ -502,7 +503,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         try {
             requests = generateSubmitRequest(pMsg);
         } catch (Exception e) {
-            logger.warn("Caught exception while generating SMPP request(s) for msg:{}", pMsg, e);
+            logger.warn("Caught exception while generating SMPP request(s) {}", MessageTrace.identifiers(pMsg), e);
             return pMsg;
         }
         SmppClientSessionHandler handler = getAvailableHandlerForSending();
@@ -510,15 +511,21 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             SubmitSm submitSm = requests.get(i);
             try {
                 handler.getSession().sendRequestPdu(submitSm, configurationProvider.getLongPrpt(_requestTout), false);
+                StandardMessage submittedMsg = submitSm.getReferenceObject() instanceof StandardMessage ?
+                        (StandardMessage) submitSm.getReferenceObject() : pMsg;
+                if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_SUBMITTED)) {
+                    logger.info("message.submitted worker={} part={}/{} {}", getFullName(), i + 1, requests.size(),
+                            MessageTrace.identifiers(submittedMsg));
+                }
             } catch (Exception e) {
                 if (i == 0) {
-                    logger.warn("Caught exception while sending 1st of {} parts for msg. Cancelling msg to be retried: {}",
-                            requests.size(), pMsg);
+                    logger.warn("Caught exception while sending 1st of {} parts. Cancelling message to be retried {}",
+                            requests.size(), MessageTrace.identifiers(pMsg), e);
                     return pMsg;
                 } else {
                     StandardMessage msgPart = (StandardMessage) submitSm.getReferenceObject();
-                    logger.warn("Caught exception while sending {} of {} parts for msg. It is re-enqueued as: {}",
-                            i, requests.size(), msgPart);
+                    logger.warn("Caught exception while sending {} of {} parts. Part is re-enqueued {}",
+                            i, requests.size(), MessageTrace.identifiers(msgPart), e);
                     enqueueNoExceptions((M) msgPart);
                 }
             }
@@ -965,7 +972,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                         dlrBody = gsmBody;
                     }
                 } catch (Exception e) {
-                    logger.warn("error trying to re-parse dlr with gsm charset: {}", deliverSm, e);
+                    logger.warn("error trying to re-parse dlr with gsm charset {}", MessageTrace.pdu(deliverSm), e);
                 }
             }
             if (Strings.isNullOrEmpty(dlrBody)) {
@@ -983,7 +990,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             }
             String smscid = decodeMessageID(true, receipt.getMessageId());
             if (Strings.isNullOrEmpty(smscid)) {
-                logger.warn("Invalid smscid: null or empty, skipping unknown dlr: {}", deliverSm);
+                logger.warn("Invalid smscid: null or empty, skipping unknown dlr {}", MessageTrace.pdu(deliverSm));
                 return deliverSm.createGenericNack(SmppConstants.STATUS_SYSERR);
             }
             HashMap<String, String> tlvs = extractTlvs(this.tlvsDlrs, deliverSm);
@@ -991,7 +998,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         } catch (Exception e) {
             //our own extended delivery receipt parsing method will not throw exception for dlr field validation
             //so this means that something else went really wrong
-            logger.warn("caught exception while parsing dlr: {}", deliverSm, e);
+            logger.warn("caught exception while parsing dlr {}", MessageTrace.pdu(deliverSm), e);
             PduResponse resp = deliverSm.createResponse();
             resp.setCommandStatus(SmppConstants.STATUS_SYSERR);
             return resp;
@@ -1125,6 +1132,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
 
         switch (policy) {
             case RETRY_WORKER:
+                logSubmitResponse(statusCode, respMessageId, msg);
                 onMessageTemporaryFailed(msg);
                 break;
             case RETRY_ROUTER:
@@ -1134,6 +1142,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                         msg.outgateway = "";
                     }
                 }
+                logSubmitResponse(statusCode, respMessageId, msg);
                 onMessageFailed(msg);
                 break;
             case FAIL:
@@ -1158,11 +1167,12 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     protected void successMessage(String respMessageId, M msg) {
-        updateSendStatusAndSmscId(respMessageId, msg);
+        String smscid = updateSendStatusAndSmscId(respMessageId, msg);
+        logSubmitResponse(SmppConstants.STATUS_OK, smscid, msg);
         try {
             onMessageSuccess(msg);
         } catch (Exception e) {
-            logger.warn("exception on message success callback for msg:{}", msg, e);
+            logger.warn("exception on message success callback {}", MessageTrace.identifiers(msg), e);
         }
     }
 
@@ -1173,6 +1183,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         String smscid = updateSendStatusAndSmscId(respMessageId, msg);
+        logSubmitResponse(commandStatus, smscid, msg);
         String smsid = getHashedMessageID(smscid);
 
         String errorCode;
@@ -1185,6 +1196,13 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
 
         messageTracker.createAndEnqueueDLR(msg.msgId, smscid, smsid, msg.from, msg.to, "" + commandStatus,
                 StandardMessage.DLR_STAT_FAILED, errorCode, null);
+    }
+
+    protected void logSubmitResponse(int statusCode, String operatorMsgId, M msg) {
+        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_SUBMIT_RESPONSE)) {
+            logger.info("message.submit.response worker={} status={} operatorMsgId={} {}", getFullName(), statusCode,
+                    MessageTrace.value(operatorMsgId), MessageTrace.identifiers(msg));
+        }
     }
 
     public String updateSendStatusAndSmscId(String respMessageId, M msg) {
