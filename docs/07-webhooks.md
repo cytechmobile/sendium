@@ -11,7 +11,7 @@ Example HTTP submission:
 ```bash
 curl -G http://localhost:8080/sendsms \
   --data-urlencode "username=myuser" \
-  --data-urlencode "password=mypassword" \
+  --data-urlencode "password=example-password" \
   --data-urlencode "from=Sendium" \
   --data-urlencode "to=306912345678" \
   --data-urlencode "text=Hello from Sendium" \

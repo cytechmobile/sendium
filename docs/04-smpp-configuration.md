@@ -306,8 +306,8 @@ outSms.instance.testRoute.fail.action.worker.sleep = 2000
 # SMPP Client Specific Bind Details
 outSms.instance.testRoute.host = smpp.test.com
 outSms.instance.testRoute.port = 2775
-outSms.instance.testRoute.username = testSystemId
-outSms.instance.testRoute.password = testPass
+outSms.instance.testRoute.username = upstream-system-id
+outSms.instance.testRoute.password = upstream-password
 outSms.instance.testRoute.connections.transceivers = 1
 ```
 

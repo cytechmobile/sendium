@@ -11,7 +11,7 @@ This document outlines the process for setting up your local environment and sub
 Before you begin, ensure you have the following installed on your local machine:
 
 * **Java:** JDK 25
-* **Maven:** (We recommend using the provided Maven wrapper `./mvnw` if available, or your local Maven installation)
+* **Maven:** Use the provided Maven wrapper (`./mvnw`, or `.\mvnw.cmd` on Windows)
 * **Git:** For version control
 
 ---
@@ -22,14 +22,16 @@ Sendium is built on Quarkus, which makes local development incredibly fast and f
 
 **1. Clone the repository:**
 ```bash
-git clone [https://github.com/cytechmobile/sendium.git](https://github.com/cytechmobile/sendium.git)
+git clone https://github.com/cytechmobile/sendium.git
 cd sendium
 ```
 **2. Start the application in development mode:**
 ```bash
-mvn quarkus:dev
+./mvnw -pl sendium-app -am quarkus:dev
 ```
 Note: This will start the server with live reload enabled. Any changes you make to the Java code will automatically trigger a compilation and reload.
+
+On Windows PowerShell, replace `./mvnw` with `.\mvnw.cmd`.
 
 **3. 🧪 Testing**
 
@@ -37,7 +39,7 @@ We value reliability. Before submitting any changes, please ensure all tests pas
 
 You do not need Docker running locally to execute the test suite. Simply run the following command to execute all unit and integration tests:
 ```bash
-mvn verify
+./mvnw verify
 ```
 **4. 💅 Code Style & Linting**
 
@@ -47,7 +49,7 @@ Please ensure your IDE is configured to format code according to standard Java c
 
 If your code violates the Checkstyle rules, the build will issue warnings or fail. You can manually check your code before committing by running:
 ```bash
-mvn checkstyle:check
+./mvnw -pl sendium-core checkstyle:check
 ```
 **5. 🚀 Pull Request Process**
 
@@ -69,6 +71,6 @@ If you are adding a new feature or fixing a bug, please include tests that prove
 
 d. Pass the Build:
 
-Ensure mvn verify passes locally and all GitHub Actions (CI) checks pass after opening your PR.
+Ensure `./mvnw verify` passes locally and all GitHub Actions (CI) checks pass after opening your PR.
 
 We look forward to reviewing your contributions!

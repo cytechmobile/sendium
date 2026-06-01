@@ -8,7 +8,7 @@ The release workflow is defined in `.github/workflows/release-please.yml` and ru
 
 On each run, the workflow:
 
-1. Starts the `googleapis/release-please-action@v4` action.
+1. Starts the `googleapis/release-please-action@v5` action.
 2. Reads `release-please-config.json` for the Maven release configuration.
 3. Reads `.release-please-manifest.json` for the current released version.
 4. Creates or updates a release pull request when releasable changes exist.
@@ -60,6 +60,8 @@ Review the release PR like any other PR. Confirm the changelog entries and versi
 
 Do not manually edit `CHANGELOG.md`, Maven version fields, or `.release-please-manifest.json` during normal feature work. Those files are owned by Release Please unless the release state needs an intentional repair.
 
+It is normal for `.release-please-manifest.json` to show the latest released version while the Maven POMs on `main` have already moved to the next `-SNAPSHOT` development version. Do not force those values to match.
+
 ## Maven Publishing
 
 After the release PR is merged, Release Please creates the GitHub release and sets `release_created=true`. The workflow then runs the publishing steps.
@@ -83,12 +85,12 @@ After Maven publishing succeeds, the release workflow calls both Docker workflow
 
 Both workflows can still be started manually with `workflow_dispatch`, but they also support `workflow_call` so the release workflow can reuse the same build logic.
 
-Release builds use the exact commit SHA reported by Release Please. The `version` input is expected to be the Release Please tag, such as `v0.1.0`. For that release, the workflows publish:
+Release builds use the exact commit SHA reported by Release Please. The `version` input is expected to be the Release Please tag, such as `v0.2.1`. For that release, the workflows publish:
 
 | Image Type | Tags |
 | :--- | :--- |
-| JVM | `cytechmobile/sendium:v0.1.0`, `cytechmobile/sendium:0.1.0`, `cytechmobile/sendium:latest` |
-| Native | `cytechmobile/sendium:v0.1.0-native`, `cytechmobile/sendium:0.1.0-native`, `cytechmobile/sendium:latest-native` |
+| JVM | `cytechmobile/sendium:v0.2.1`, `cytechmobile/sendium:0.2.1`, `cytechmobile/sendium:latest` |
+| Native | `cytechmobile/sendium:v0.2.1-native`, `cytechmobile/sendium:0.2.1-native`, `cytechmobile/sendium:latest-native` |
 
 Manual Docker workflow runs without a version input publish only the moving `latest` or `latest-native` tag.
 

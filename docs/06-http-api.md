@@ -25,7 +25,7 @@ All parameters must be passed in the query string.
 | Parameter | Description | Example |
 | :--- | :--- | :--- |
 | `username` (or `user`) | The username/system ID for authentication. | `my_api_user` |
-| `password` (or `pass`) | The password for authentication. | `secret123` |
+| `password` (or `pass`) | The password for authentication. | `example-password` |
 | `from` | The Sender ID (can be a phone number or alphanumeric string). | `MyBrand` |
 | `to` | The recipient's phone number. | `306910000000` |
 | `text` | The message payload. **Must be URL-encoded.** | `Hello%20World` |
@@ -67,10 +67,15 @@ The API returns standard HTTP status codes along with a plain-text response body
 
 ## 📖 Example Request
 
-Here is an example of submitting a standard text message using `cURL`:
+Here is an example of submitting a standard text message using `curl`:
 
 ```bash
-curl -X GET http://your-server.com/sendsms?username=myuser&password=mypassword&from=Sendium&to=306912345678&text=Hello%20from%20Sendium%21
+curl -G http://localhost:8080/sendsms \
+  --data-urlencode "username=myuser" \
+  --data-urlencode "password=example-password" \
+  --data-urlencode "from=Sendium" \
+  --data-urlencode "to=306910000000" \
+  --data-urlencode "text=Hello from Sendium!"
 ```
 
 **Example Successful Response (`202 Accepted`):**

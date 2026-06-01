@@ -22,7 +22,7 @@ Eliminate vendor lock-in, manage your own routing logic, and scale your messagin
 
 **Sendium** is proudly created and maintained by **[Cytech](https://www.cytechmobile.com/)**.
 
-With over 20 years of experience building high-performance telecommunications software, we open-sourced Sendium to provide the community with a modern, reliable Kannel alternative. Sendium is also the underlying routing engine that powers **[mcore](https://www.cytechmobile.com/mobile/mcore-a2p-wholesale-platform/)**, our complete enterprise business platform.
+With over 20 years of experience building high-performance telecommunications software, we open-sourced Sendium to provide the community with a modern, reliable Kannel alternative. Sendium is also the underlying routing engine that powers **[mCore](https://www.cytechmobile.com/mobile/mcore-a2p-wholesale-platform/)**, our complete enterprise business platform.
 
 ---
 ## 🛠 Core Capabilities
@@ -41,7 +41,7 @@ With over 20 years of experience building high-performance telecommunications so
 
 ## 🔄 How It Works
 
-1.  **Request:** Your application sends a message to Sendium via **HTTP** OR **SMPP**.
+1.  **Request:** Your application sends a message to Sendium via **HTTP** or **SMPP**.
 2.  **Logic:** Sendium applies routing rules based on destination, sender ID, account, message attributes, and priority.
 3.  **Delivery:** Sendium delivers via one or more **SMPP** connections to upstream providers.
 4.  **Verification:** Asynchronous Delivery Receipts (DLRs) are received and normalized.
@@ -54,20 +54,20 @@ With over 20 years of experience building high-performance telecommunications so
 ### Prerequisites
 * Docker installed on your host machine.
 * Create three empty directories in your current working folder: `./conf`, `./data`, and `./logs`.
-* Before starting the container, Sendium requires three configuration files inside your newly created ./conf directory. These files control your binds, authentication, and routing logic.
+* Before starting the container, Sendium requires three configuration files inside `./conf`. These files control your binds, authentication, and routing logic.
 
-Create the following three files inside ./conf and paste the sample configurations:
+Create the following three files inside `./conf` and adapt the sample configurations:
 #### 1. credentials.yml
 - Setting smpp and http credentials on sendium
 
 ```yml
 credentials:
   - type: SMPP
-    systemId: "test1"
-    password: "test1"
+    systemId: "sendium-smpp-user"
+    password: "change-me-smpp"
   - type: HTTP
-    systemId: "test2"
-    password: "test2"
+    systemId: "sendium-http-user"
+    password: "change-me-http"
 ```
 #### 2. smsg.properties
 - Setting a smpp client connection and the smpp server.
@@ -75,8 +75,8 @@ credentials:
 # sample smpp client worker
 outSms.instance.testRoute.enable = true
 outSms.instance.testRoute.type = smppclient
-outSms.instance.testRoute.username = testSystemId
-outSms.instance.testRoute.password = testPass
+outSms.instance.testRoute.username = upstream-system-id
+outSms.instance.testRoute.password = upstream-password
 outSms.instance.testRoute.host = smpp.test.com
 outSms.instance.testRoute.port = 2775
 outSms.instance.testRoute.tps = 0
@@ -94,7 +94,7 @@ outSms.instance.smpp.conf.maxConnectionsPerUser.default = 4
 outSms.instance.smpp.conf.maxRate.default = 0
 ```
 #### 3. routingTable.conf
-- Routing configuration for sending all the traffic by default on the smpp client named testRoute
+- Routing configuration for sending all traffic by default through the SMPP client named `testRoute`
 
 ```conf
 [default]
@@ -153,7 +153,8 @@ Key docs:
 8. **[Monitoring & Observability](docs/08-monitoring-observability.md):** Expose Prometheus metrics and configure Prometheus/Grafana.
 9. **[Configuration Reference](docs/09-configuration-reference.md):** Review paths, Docker environment variables, logging, and OpenAPI endpoints.
 10. **[Troubleshooting](docs/10-troubleshooting.md):** Diagnose common setup and runtime issues.
-11. **[Features & Roadmap](docs/12-features-roadmap.md):** Review current capabilities and planned roadmap phases.
+11. **[Release Process](docs/11-release-process.md):** Understand Release Please, Maven publishing, and Docker image publishing.
+12. **[Features & Roadmap](docs/12-features-roadmap.md):** Review current capabilities and planned roadmap phases.
 
 When Sendium is running, API discovery is available at `/swagger-ui` and `/openapi.json`.
 
