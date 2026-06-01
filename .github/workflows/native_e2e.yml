@@ -3,10 +3,13 @@ name: Native E2E Tests
 on:
   pull_request:
     paths:
-      - 'sendium-core/**'
-      - 'sendium-app/**'
-      - 'pom.xml'
-      - '.github/workflows/native_e2e.yml'
+      - "sendium-core/**"
+      - "sendium-app/**"
+      - "pom.xml"
+      - ".mvn/**"
+      - "mvnw"
+      - "mvnw.cmd"
+      - ".github/workflows/native_e2e.yml"
   workflow_dispatch:
 
 concurrency:
@@ -18,6 +21,7 @@ permissions:
 
 jobs:
   native-e2e:
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

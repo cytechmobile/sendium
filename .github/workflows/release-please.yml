@@ -6,10 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  packages: write
+  contents: read
 
 concurrency:
   group: ReleasePlease-${{ github.ref }}
@@ -18,6 +15,9 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       sha: ${{ steps.release.outputs.sha }}
@@ -29,6 +29,9 @@ jobs:
         with:
           app-id: ${{ vars.APP_ID || secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
       - name: Create or update release PR
         id: release
         uses: googleapis/release-please-action@v5
@@ -45,8 +48,8 @@ jobs:
         if: ${{ steps.release.outputs.release_created == 'true' }}
         uses: actions/setup-java@v5
         with:
-          java-version: '25'
-          distribution: 'graalvm'
+          java-version: "25"
+          distribution: "graalvm"
           server-id: github
       - name: Publish to GitHub Packages
         if: ${{ steps.release.outputs.release_created == 'true' }}
