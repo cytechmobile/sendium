@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/cytechmobile/sendium/compare/v0.2.2...v0.2.3) (2026-06-01)
+
+
+### Bug Fixes
+
+* **release:** keep sendium-core dependencyManagement version in lockstep on release ([2dd8eba](https://github.com/cytechmobile/sendium/commit/2dd8eba765afbf9a9667c1152e5d9c06faf1c365))
+
 ## [0.2.2](https://github.com/cytechmobile/sendium/compare/v0.2.1...v0.2.2) (2026-06-01)
 
 
