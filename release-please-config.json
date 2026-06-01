@@ -4,7 +4,13 @@
   "include-component-in-tag": false,
   "packages": {
     ".": {
-      "package-name": "sendium"
+      "package-name": "sendium",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "pom.xml"
+        }
+      ]
     }
   },
   "plugins": [
