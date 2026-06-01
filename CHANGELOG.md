@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/cytechmobile/sendium/compare/v0.2.1...v0.2.2) (2026-06-01)
+
+
+### Documentation
+
+* Polish public docs and metadata ([5651af4](https://github.com/cytechmobile/sendium/commit/5651af427b31c1ee99aec325290581b016a702a0))
+
 ## [0.2.1](https://github.com/cytechmobile/sendium/compare/v0.2.0...v0.2.1) (2026-05-29)
 
 
