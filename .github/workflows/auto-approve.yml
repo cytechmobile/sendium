@@ -12,3 +12,43 @@ jobs:
       - uses: hmarr/auto-approve-action@v4
         with:
           github-token: ${{ secrets.GH_AUTO_APPROVE }}
+
+  auto-merge-release-snapshot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    if: >-
+      github.actor == 'cytech-release-bot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'release-please--') &&
+      contains(github.event.pull_request.title, '-SNAPSHOT')
+    steps:
+      - name: Validate snapshot release PR files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          changed_files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')
+          unexpected_files=""
+
+          while IFS= read -r file; do
+            case "$file" in
+              pom.xml|sendium-app/pom.xml|sendium-core/pom.xml) ;;
+              *) unexpected_files+="${file}"$'\n' ;;
+            esac
+          done <<< "$changed_files"
+
+          if [ -n "$unexpected_files" ]; then
+            echo "Snapshot release PR changed unexpected files:"
+            printf '%s' "$unexpected_files"
+            exit 1
+          fi
+      - uses: hmarr/auto-approve-action@v4
+        with:
+          github-token: ${{ secrets.GH_AUTO_APPROVE }}
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTO_APPROVE }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge "$PR_URL" --auto --rebase
