@@ -18,17 +18,25 @@ jobs:
           java-version: 25
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Cache Dependency-Check data
-        uses: actions/cache@v4
+      - name: Restore Dependency-Check data
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.m2/repository/org/owasp/dependency-check-data
-          key: dependency-check-data-${{ runner.os }}
+          path: ~/.cache/dependency-check-data
+          key: dependency-check-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            dependency-check-data-${{ runner.os }}
+            dependency-check-data-${{ runner.os }}-
       - name: Check Gateway Dependencies
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
+          DEPENDENCY_CHECK_DATA="${HOME}/.cache/dependency-check-data"
+          mkdir -p "${DEPENDENCY_CHECK_DATA}"
           MVN_OPTS="-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true --batch-mode --fail-at-end --show-version"
           OWASP_VERSION=$(curl -fsSL https://dependency-check.github.io/DependencyCheck/current.txt | head -1)
-          ./mvnw "org.owasp:dependency-check-maven:${OWASP_VERSION}":check -DfailBuildOnCVSS=7 -DnvdApiKeyEnvironmentVariable=NVD_API_KEY -DsuppressionFile=dependency-check-suppressions.xml ${MVN_OPTS}
+          ./mvnw "org.owasp:dependency-check-maven:${OWASP_VERSION}":aggregate -DfailBuildOnCVSS=7 -DnvdApiKeyEnvironmentVariable=NVD_API_KEY -DsuppressionFile=dependency-check-suppressions.xml -DdataDirectory="${DEPENDENCY_CHECK_DATA}" -DnvdValidForHours=24 ${MVN_OPTS}
+      - name: Save Dependency-Check data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/dependency-check-data
+          key: dependency-check-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
