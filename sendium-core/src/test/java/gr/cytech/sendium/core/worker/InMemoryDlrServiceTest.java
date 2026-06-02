@@ -33,7 +33,7 @@ class InMemoryDlrServiceTest {
     @AfterEach
     void tearDown() throws Exception {
         if (dlrService != null) {
-            dlrService.onStop(null);
+            dlrService.onStop();
         }
         if (oldDbPath == null) {
             System.clearProperty("sendium.dlr.db.path");
@@ -230,7 +230,7 @@ class InMemoryDlrServiceTest {
         StandardMessage dlr = createDlr("account-restart", "sys-restart");
 
         assertTrue(dlrService.saveUnpushedDlr(dlr));
-        dlrService.onStop(null);
+        dlrService.onStop();
 
         dlrService = new InMemoryDlrService();
         dlrService.init();
