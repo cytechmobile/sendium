@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/cytechmobile/sendium/compare/v0.2.3...v0.2.4) (2026-06-02)
+
+
+### Bug Fixes
+
+* **DLR:** Avoid creating the MVStore when the service is unused ([a57fa55](https://github.com/cytechmobile/sendium/commit/a57fa55afcb76fa42d410cfede20b20c2c5cc480))
+
 ## [0.2.3](https://github.com/cytechmobile/sendium/compare/v0.2.2...v0.2.3) (2026-06-01)
 
 
