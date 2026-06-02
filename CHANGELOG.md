@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/cytechmobile/sendium/compare/v0.2.4...v0.2.5) (2026-06-02)
+
+
+### Reverts
+
+* **ci:** revert auto-merge-release-snapshot ([cf29ba8](https://github.com/cytechmobile/sendium/commit/cf29ba885f3922b4bbf92b4eea0a67f9f3b8d27e))
+
 ## [0.2.4](https://github.com/cytechmobile/sendium/compare/v0.2.3...v0.2.4) (2026-06-02)
 
 
