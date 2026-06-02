@@ -35,6 +35,12 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.prometheus</groupId>
+                    <artifactId>simpleclient_tracer_otel_agent</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>com.google.guava</groupId>
