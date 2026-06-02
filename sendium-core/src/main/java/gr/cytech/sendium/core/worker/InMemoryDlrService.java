@@ -5,10 +5,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.StandardMessage;
-import io.quarkus.runtime.ShutdownEvent;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.h2.mvstore.MVStore;
 import org.slf4j.Logger;
@@ -139,7 +138,8 @@ public class InMemoryDlrService {
         logger.info("Using in-memory mode (no persistence)");
     }
 
-    void onStop(@Observes ShutdownEvent ev) {
+    @PreDestroy
+    void onStop() {
         logger.info("InMemoryDlrService shutting down");
         saveAndClose();
     }
