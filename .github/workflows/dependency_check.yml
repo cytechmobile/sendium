@@ -18,8 +18,17 @@ jobs:
           java-version: 25
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cache Dependency-Check data
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: dependency-check-data-${{ runner.os }}
+          restore-keys: |
+            dependency-check-data-${{ runner.os }}
       - name: Check Gateway Dependencies
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           MVN_OPTS="-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true --batch-mode --fail-at-end --show-version"
-          OWASP_VERSION=$(curl -s https://dependency-check.github.io/DependencyCheck/current.txt | head -1)
-          ./mvnw "org.owasp:dependency-check-maven:${OWASP_VERSION}":check -DfailBuildOnCVSS=7 ${MVN_OPTS}
+          OWASP_VERSION=$(curl -fsSL https://dependency-check.github.io/DependencyCheck/current.txt | head -1)
+          ./mvnw "org.owasp:dependency-check-maven:${OWASP_VERSION}":check -DfailBuildOnCVSS=7 -DnvdApiKey="${NVD_API_KEY}" ${MVN_OPTS}
