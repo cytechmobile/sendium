@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+    <suppress>
+        <notes><![CDATA[
+        False positive from the NVD CPE mapping. CVE-2026-42582 affects Netty HTTP/3
+        QPACK decoding in io.netty:netty-codec-http3 versions >= 4.2.0.Final and <= 4.2.12.Final.
+        Quarkus 3.36.0 currently pulls Netty 4.1.x artifacts, which are outside the affected range.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/io\.netty/netty-.*@4\.1\..*$</packageUrl>
+        <cve>CVE-2026-42582</cve>
+    </suppress>
+</suppressions>
