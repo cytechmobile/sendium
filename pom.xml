@@ -4,7 +4,7 @@
 
     <groupId>gr.cytech</groupId>
     <artifactId>sendium</artifactId>
-    <version>0.2.6</version>
+    <version>0.2.7-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
@@ -58,7 +58,7 @@
                 <groupId>gr.cytech</groupId>
                 <artifactId>sendium-core</artifactId>
                 <!-- release-please bumps this via the generic extra-files updater; the maven release-type does NOT rewrite dependencyManagement versions -->
-                <version>0.2.6</version> <!-- x-release-please-version -->
+                <version>0.2.7-SNAPSHOT</version> <!-- x-release-please-version -->
             </dependency>
 
             <dependency>
