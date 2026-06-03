@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
   automerge-dependabot:
     needs: tests
-    if: success() && github.actor == 'dependabot[bot]' && github.ref != 'refs/heads/main'
+    if: success() && github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -67,4 +67,4 @@ jobs:
           GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
         run: |
           echo "found successful dependabot PR, merging it"
-          gh pr merge --auto --rebase
+          gh pr merge "${{ github.event.pull_request.number }}" --auto --rebase
