@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/cytechmobile/sendium/compare/v0.2.5...v0.2.6) (2026-06-03)
+
+
+### Bug Fixes
+
+* **ci:** merge dependabot PR by explicit number ([ba1793c](https://github.com/cytechmobile/sendium/commit/ba1793c86f47457eb9309b84f547f19fb54a54ba))
+
 ## [0.2.5](https://github.com/cytechmobile/sendium/compare/v0.2.4...v0.2.5) (2026-06-02)
 
 
