@@ -141,6 +141,8 @@ To run the native image instead, use `cytechmobile/sendium:latest-native`.
 
 The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, roadmap, and community resources.
 
+Migrating from Kannel? Use the browser-only **[Kannel migration converter](https://cytechmobile.github.io/sendium/)** to paste a legacy `kannel.conf` and generate Sendium starter files locally in your browser.
+
 Key docs:
 
 1. **[Architecture Overview](docs/01-architecture.md):** Understand runtime components, queues, routing flow, workers, DLRs with diagrams.

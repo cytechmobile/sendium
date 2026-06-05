@@ -18,6 +18,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 | Monitor runtime metrics | [08. Monitoring And Observability](08-monitoring-observability.md) |
 | Look up configuration properties | [09. Configuration Reference](09-configuration-reference.md) |
 | Diagnose common problems | [10. Troubleshooting](10-troubleshooting.md) |
+| Start migrating from Kannel config | [Kannel migration converter](https://cytechmobile.github.io/sendium/) |
 | Understand releases and publishing | [11. Release Process](11-release-process.md) |
 | Review current features and roadmap | [12. Features And Roadmap](12-features-roadmap.md) |
 | Contribute code or docs | [Contributing](../.github/CONTRIBUTING.md) |
@@ -60,6 +61,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [10. Troubleshooting](10-troubleshooting.md) | Common startup, authentication, routing, SMPP, webhook, and logging issues. |
 | [11. Release Process](11-release-process.md) | Release Please flow, Conventional Commit rules, release PR handling, GitHub Packages, and Docker publishing. |
 | [12. Features And Roadmap](12-features-roadmap.md) | Current product capabilities, planned roadmap phases, and related feature documentation. |
+| [Kannel migration converter](https://cytechmobile.github.io/sendium/) | Browser-only helper for turning a legacy `kannel.conf` into Sendium starter files. |
 
 ## API Discovery
 
