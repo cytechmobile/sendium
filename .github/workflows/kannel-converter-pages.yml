@@ -1,0 +1,59 @@
+name: Publish Kannel Converter
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kannel-converter-pages.yml'
+      - 'sendium-kannel-converter/**'
+  workflow_dispatch:
+
+concurrency:
+  group: kannel-converter-pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sendium-kannel-converter/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sendium-kannel-converter
+        run: npm ci
+
+      - name: Test and build converter
+        working-directory: sendium-kannel-converter
+        run: npm run check
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: sendium-kannel-converter/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
