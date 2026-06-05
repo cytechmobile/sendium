@@ -1,0 +1,23 @@
+{
+  "name": "sendium-kannel-converter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node test/converter.test.js",
+    "check": "npm run test && vite build"
+  },
+  "dependencies": {
+    "@mdi/js": "^7.4.47",
+    "fflate": "^0.8.2",
+    "vue": "^3.5.13",
+    "vuetify": "^3.7.6"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}
