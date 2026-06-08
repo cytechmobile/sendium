@@ -30,7 +30,6 @@ defineEmits(['copy-active', 'download-active', 'download-bundle']);
         <h2>{{ activeFile }}</h2>
       </div>
       <div class="output-actions">
-        <v-chip color="secondary" variant="tonal">Best effort</v-chip>
         <v-btn variant="tonal" color="secondary" :prepend-icon="mdiContentCopy" @click="$emit('copy-active')">
           Copy
         </v-btn>
@@ -46,7 +45,7 @@ defineEmits(['copy-active', 'download-active', 'download-bundle']);
     <SummaryMetrics :summary="summary" />
 
     <v-tabs v-model="activeFile" color="primary" density="comfortable" class="file-tabs">
-      <v-tab v-for="fileName in fileNames" :key="fileName" :value="fileName">
+      <v-tab v-for="fileName in fileNames" :key="fileName" :value="fileName" :aria-label="`Generated file ${fileName}`">
         {{ fileName }}
       </v-tab>
     </v-tabs>

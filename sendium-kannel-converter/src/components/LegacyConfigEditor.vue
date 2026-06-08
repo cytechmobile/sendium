@@ -117,6 +117,7 @@ function scrollToLine(line) {
       class="legacy-textarea"
       :rows="rows"
       :placeholder="placeholder"
+      :aria-label="`${sourceName} editor`"
       spellcheck="false"
       wrap="off"
       @scroll="syncGutterScroll"

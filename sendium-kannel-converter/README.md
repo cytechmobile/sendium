@@ -13,6 +13,8 @@ npm run dev
 
 ```bash
 npm test
+npx playwright install chromium
+npm run test:e2e
 npm run check
 ```
 
