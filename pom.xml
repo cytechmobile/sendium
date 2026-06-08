@@ -32,7 +32,7 @@
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
         <checkstyle-tools.version>13.5.0</checkstyle-tools.version>
         <surefire-plugin.version>3.5.6</surefire-plugin.version>
-        <jacoco-plugin.version>0.8.14</jacoco-plugin.version>
+        <jacoco-plugin.version>0.8.15</jacoco-plugin.version>
 
         <skipTests>false</skipTests>
         <skipUT>${skipTests}</skipUT>
