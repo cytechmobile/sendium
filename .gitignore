@@ -46,6 +46,9 @@ nb-configuration.xml
 node_modules/
 dist/
 .vite/
+playwright-report/
+test-results/
+blob-report/
 
 conf/
 sendium-app/conf

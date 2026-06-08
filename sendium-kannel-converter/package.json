@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node test/converter.test.js",
+    "test:e2e": "playwright test",
     "check": "npm run test && vite build"
   },
   "dependencies": {
@@ -17,6 +18,7 @@
     "vuetify": "^3.7.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@vitejs/plugin-vue": "^5.2.1",
     "vite": "^6.0.7"
   }
