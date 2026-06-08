@@ -1,18 +1,64 @@
 <script setup>
+import { computed } from 'vue';
+import { useTheme } from 'vuetify';
 import HeroSection from './components/HeroSection.vue';
 import ConverterWorkspace from './components/ConverterWorkspace.vue';
 import DiagnosticsPanel from './components/DiagnosticsPanel.vue';
 import MigrationChecklist from './components/MigrationChecklist.vue';
 import { useConverterUi } from './composables/useConverterUi';
 
+const THEME_STORAGE_KEY = 'sendium-kannel-converter-theme';
+const DARK_THEME = 'sendiumDark';
+const LIGHT_THEME = 'sendiumLight';
+
 const ui = useConverterUi();
+const theme = useTheme();
+setTheme(getInitialTheme());
+
+const isLightTheme = computed(() => theme.global.name.value === LIGHT_THEME);
+
+function toggleAppearance() {
+  const nextTheme = isLightTheme.value ? DARK_THEME : LIGHT_THEME;
+  setTheme(nextTheme);
+
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  } catch {
+    // Theme persistence is optional; conversion stays fully local either way.
+  }
+}
+
+function setTheme(nextTheme) {
+  theme.global.name.value = nextTheme;
+
+  if (typeof document !== 'undefined') {
+    document.documentElement.dataset.appearance = nextTheme === LIGHT_THEME ? 'light' : 'dark';
+  }
+}
+
+function getInitialTheme() {
+  if (typeof window === 'undefined') {
+    return DARK_THEME;
+  }
+
+  try {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if ([DARK_THEME, LIGHT_THEME].includes(storedTheme)) {
+      return storedTheme;
+    }
+  } catch {
+    return DARK_THEME;
+  }
+
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? LIGHT_THEME : DARK_THEME;
+}
 </script>
 
 <template>
   <v-app>
     <v-main class="app-shell">
       <v-container fluid class="content-wrap">
-        <HeroSection />
+        <HeroSection :is-light-theme="isLightTheme" @toggle-appearance="toggleAppearance" />
 
         <section class="workspace-section">
           <ConverterWorkspace

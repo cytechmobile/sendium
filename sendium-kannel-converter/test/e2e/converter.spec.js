@@ -79,6 +79,34 @@ test('diagnostics navigate to the legacy source that needs review', async ({ pag
   await expect(page.getByLabel('smppbox.conf editor')).toBeFocused();
 });
 
+test('toggles and persists light appearance', async ({ page }) => {
+  await page.evaluate(() => localStorage.setItem('sendium-kannel-converter-theme', 'sendiumDark'));
+  await page.reload();
+
+  const app = page.locator('.v-application');
+  const shell = page.locator('.app-shell');
+  await expect(app).toHaveClass(/v-theme--sendiumDark/);
+  await expect(page.locator('html')).toHaveAttribute('data-appearance', 'dark');
+  await expect.poll(() => shell.evaluate((element) => getComputedStyle(element).getPropertyValue('--app-bg').trim())).toBe('#08111f');
+
+  await page.getByRole('button', { name: 'Switch to light mode' }).click();
+
+  await expect(app).toHaveClass(/v-theme--sendiumLight/);
+  await expect(page.locator('html')).toHaveAttribute('data-appearance', 'light');
+  await expect.poll(() => shell.evaluate((element) => getComputedStyle(element).getPropertyValue('--app-bg').trim())).toBe('#f6f2e9');
+  await expect(page.getByLabel('kannel.conf editor')).toBeVisible();
+  await expect(page.getByLabel('Generated Sendium file preview')).toBeVisible();
+
+  await page.reload();
+
+  await expect(app).toHaveClass(/v-theme--sendiumLight/);
+  await expect(page.locator('html')).toHaveAttribute('data-appearance', 'light');
+
+  await page.getByRole('button', { name: 'Switch to dark mode' }).click();
+  await expect(app).toHaveClass(/v-theme--sendiumDark/);
+  await expect(page.locator('html')).toHaveAttribute('data-appearance', 'dark');
+});
+
 test('downloads the active generated file and bundle', async ({ page }) => {
   const fileDownload = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download' }).click();
