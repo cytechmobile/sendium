@@ -1,11 +1,90 @@
 :root {
-  color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #08111f;
+  background: var(--app-bg, #08111f);
+}
+
+:root[data-appearance="dark"],
+:root:not([data-appearance]) {
+  color-scheme: dark;
+  --accent-primary: #ff8a3d;
+  --accent-secondary: #58d5c9;
+  --app-bg: #08111f;
+  --app-bg-soft: #0c1524;
+  --app-radial-primary: rgba(255, 138, 61, 0.26);
+  --app-radial-secondary: rgba(88, 213, 201, 0.18);
+  --code-accent: #ffd166;
+  --diagnostic-bg: rgba(5, 12, 24, 0.44);
+  --diagnostic-guidance-bg: rgba(255, 255, 255, 0.04);
+  --diagnostic-guidance-text: #d8e3f4;
+  --diagnostic-warning-bg: rgba(255, 209, 102, 0.12);
+  --diagnostic-warning-border: rgba(255, 209, 102, 0.32);
+  --diagnostic-error-bg: rgba(255, 102, 120, 0.14);
+  --diagnostic-error-border: rgba(255, 102, 120, 0.42);
+  --editor-bg: rgba(5, 12, 24, 0.82);
+  --editor-bg-strong: rgba(5, 12, 24, 0.86);
+  --editor-text: #d8f7f2;
+  --error-bg: rgba(255, 102, 120, 0.18);
+  --error-text: #ff8d9b;
+  --gutter-bg: rgba(255, 255, 255, 0.025);
+  --gutter-text: rgba(185, 197, 216, 0.62);
+  --line-number: rgba(185, 197, 216, 0.54);
+  --metric-strong: #fff;
+  --nav-hover-border: rgba(88, 213, 201, 0.42);
+  --output-border: rgba(88, 213, 201, 0.22);
+  --panel-bg: rgba(16, 28, 47, 0.82);
+  --panel-bg-soft: rgba(16, 28, 47, 0.58);
+  --panel-border: rgba(255, 255, 255, 0.09);
+  --reference-border: rgba(88, 213, 201, 0.24);
+  --reference-hover-border: rgba(255, 138, 61, 0.6);
+  --subtle-border: rgba(255, 255, 255, 0.08);
+  --text-main: #ffffff;
+  --text-muted: #b9c5d8;
+  --warning-bg: rgba(255, 209, 102, 0.16);
+  --warning-text: #ffd166;
+}
+
+:root[data-appearance="light"] {
+  color-scheme: light;
+  --accent-primary: #c95d22;
+  --accent-secondary: #087a72;
+  --app-bg: #f6f2e9;
+  --app-bg-soft: #eef8f6;
+  --app-radial-primary: rgba(255, 138, 61, 0.22);
+  --app-radial-secondary: rgba(8, 122, 114, 0.16);
+  --code-accent: #9a5200;
+  --diagnostic-bg: rgba(255, 255, 255, 0.72);
+  --diagnostic-guidance-bg: rgba(8, 17, 31, 0.04);
+  --diagnostic-guidance-text: #25364a;
+  --diagnostic-warning-bg: rgba(138, 90, 0, 0.12);
+  --diagnostic-warning-border: rgba(138, 90, 0, 0.32);
+  --diagnostic-error-bg: rgba(179, 38, 30, 0.1);
+  --diagnostic-error-border: rgba(179, 38, 30, 0.3);
+  --editor-bg: rgba(255, 255, 255, 0.86);
+  --editor-bg-strong: rgba(255, 255, 255, 0.92);
+  --editor-text: #182333;
+  --error-bg: rgba(179, 38, 30, 0.12);
+  --error-text: #9f231c;
+  --gutter-bg: rgba(8, 17, 31, 0.035);
+  --gutter-text: rgba(42, 56, 72, 0.66);
+  --line-number: rgba(42, 56, 72, 0.58);
+  --metric-strong: #182333;
+  --nav-hover-border: rgba(8, 122, 114, 0.36);
+  --output-border: rgba(8, 122, 114, 0.28);
+  --panel-bg: rgba(255, 255, 255, 0.84);
+  --panel-bg-soft: rgba(255, 255, 255, 0.62);
+  --panel-border: rgba(24, 35, 51, 0.12);
+  --reference-border: rgba(8, 122, 114, 0.24);
+  --reference-hover-border: rgba(201, 93, 34, 0.52);
+  --subtle-border: rgba(24, 35, 51, 0.1);
+  --text-main: #182333;
+  --text-muted: #526070;
+  --warning-bg: rgba(138, 90, 0, 0.13);
+  --warning-text: #8a5a00;
 }
 
 body {
   margin: 0;
+  background: var(--app-bg);
 }
 
 code,
@@ -16,10 +95,11 @@ textarea {
 
 .app-shell {
   min-height: 100vh;
+  color: var(--text-main);
   background:
-    radial-gradient(circle at 12% 8%, rgba(255, 138, 61, 0.26), transparent 28rem),
-    radial-gradient(circle at 88% 0%, rgba(88, 213, 201, 0.18), transparent 26rem),
-    linear-gradient(135deg, #08111f 0%, #0c1524 48%, #08111f 100%);
+    radial-gradient(circle at 12% 8%, var(--app-radial-primary), transparent 28rem),
+    radial-gradient(circle at 88% 0%, var(--app-radial-secondary), transparent 26rem),
+    linear-gradient(135deg, var(--app-bg) 0%, var(--app-bg-soft) 48%, var(--app-bg) 100%);
 }
 
 .content-wrap {
@@ -37,7 +117,7 @@ textarea {
 
 .eyebrow,
 .panel-kicker {
-  color: #58d5c9;
+  color: var(--accent-secondary);
   font-size: 0.78rem;
   font-weight: 800;
   letter-spacing: 0.18em;
@@ -62,7 +142,7 @@ h2 {
 }
 
 .hero-copy {
-  color: #b9c5d8;
+  color: var(--text-muted);
   font-size: 1.12rem;
   line-height: 1.7;
   max-width: 830px;
@@ -74,9 +154,15 @@ h2 {
 .workspace-card,
 .diagnostics-card,
 .guidance-card {
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: rgba(16, 28, 47, 0.82) !important;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg) !important;
   backdrop-filter: blur(18px);
+}
+
+.hero-side {
+  display: grid;
+  gap: 12px;
+  justify-items: end;
 }
 
 .privacy-card {
@@ -95,7 +181,7 @@ h2 {
 .metric-card span,
 .guidance-card p,
 .guidance-card li {
-  color: #b9c5d8;
+  color: var(--text-muted);
 }
 
 .compact-hero {
@@ -124,7 +210,7 @@ h2 {
 }
 
 .review-heading-block p:last-child {
-  color: #b9c5d8;
+  color: var(--text-muted);
   line-height: 1.65;
   margin: 10px 0 0;
 }
@@ -138,7 +224,7 @@ h2 {
 }
 
 .step-header p:last-child {
-  color: #b9c5d8;
+  color: var(--text-muted);
   line-height: 1.65;
   margin: 10px 0 0;
 }
@@ -148,10 +234,10 @@ h2 {
   place-items: center;
   width: 2.45rem;
   height: 2.45rem;
-  border: 1px solid rgba(255, 138, 61, 0.38);
+  border: 1px solid color-mix(in srgb, var(--accent-primary), transparent 62%);
   border-radius: 999px;
-  background: rgba(255, 138, 61, 0.14);
-  color: #ffb37b;
+  background: color-mix(in srgb, var(--accent-primary), transparent 86%);
+  color: var(--accent-primary);
   font-weight: 900;
 }
 
@@ -170,7 +256,7 @@ h2 {
 }
 
 .metric-card strong {
-  color: #fff;
+  color: var(--metric-strong);
   font-size: 2rem;
   line-height: 1;
 }
@@ -190,7 +276,7 @@ h2 {
 
 .advanced-card {
   border-style: dashed;
-  background: rgba(16, 28, 47, 0.58) !important;
+  background: var(--panel-bg-soft) !important;
 }
 
 .advanced-body {
@@ -234,7 +320,7 @@ h2 {
 }
 
 .input-help {
-  color: #b9c5d8;
+  color: var(--text-muted);
   line-height: 1.6;
   margin: -4px 0 16px;
 }
@@ -244,9 +330,9 @@ h2 {
   grid-template-columns: max-content minmax(0, 1fr);
   max-height: 62vh;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--subtle-border);
   border-radius: 16px;
-  background: rgba(5, 12, 24, 0.82);
+  background: var(--editor-bg);
 }
 
 .editor-gutter {
@@ -254,9 +340,9 @@ h2 {
   max-height: 62vh;
   overflow: hidden;
   padding: 0.875rem 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.025);
-  color: rgba(185, 197, 216, 0.62);
+  border-right: 1px solid var(--subtle-border);
+  background: var(--gutter-bg);
+  color: var(--gutter-text);
   font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   font-size: 0.91rem;
   line-height: 1.55;
@@ -272,13 +358,13 @@ h2 {
 }
 
 .editor-gutter-warning {
-  background: rgba(255, 209, 102, 0.16);
-  color: #ffd166;
+  background: var(--warning-bg);
+  color: var(--warning-text);
 }
 
 .editor-gutter-error {
-  background: rgba(255, 102, 120, 0.18);
-  color: #ff8d9b;
+  background: var(--error-bg);
+  color: var(--error-text);
 }
 
 .editor-marker {
@@ -302,7 +388,7 @@ h2 {
   overflow: auto;
   resize: vertical;
   background: transparent;
-  color: #d8f7f2;
+  color: var(--editor-text);
   font-size: 0.91rem;
   white-space: pre;
 }
@@ -323,10 +409,10 @@ h2 {
   max-height: 62vh;
   margin: 0;
   padding: 12px 0;
-  border: 1px solid rgba(88, 213, 201, 0.22);
+  border: 1px solid var(--output-border);
   border-radius: 16px;
-  background: rgba(5, 12, 24, 0.86);
-  color: #d8f7f2;
+  background: var(--editor-bg-strong);
+  color: var(--editor-text);
   font-size: 0.91rem;
   white-space: pre;
 }
@@ -344,7 +430,7 @@ h2 {
 }
 
 .line-number {
-  color: rgba(185, 197, 216, 0.54);
+  color: var(--line-number);
   font-variant-numeric: tabular-nums;
   text-align: right;
   user-select: none;
@@ -356,9 +442,9 @@ h2 {
 
 .diagnostic-item {
   margin: 8px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--subtle-border);
   border-radius: 14px !important;
-  background: rgba(5, 12, 24, 0.44);
+  background: var(--diagnostic-bg);
 }
 
 .diagnostic-navigable {
@@ -366,17 +452,17 @@ h2 {
 }
 
 .diagnostic-navigable:hover {
-  border-color: rgba(88, 213, 201, 0.42) !important;
+  border-color: var(--nav-hover-border) !important;
 }
 
 .diagnostic-warning {
-  border-color: rgba(255, 209, 102, 0.32) !important;
-  background: linear-gradient(90deg, rgba(255, 209, 102, 0.12), rgba(5, 12, 24, 0.44));
+  border-color: var(--diagnostic-warning-border) !important;
+  background: linear-gradient(90deg, var(--diagnostic-warning-bg), var(--diagnostic-bg));
 }
 
 .diagnostic-error {
-  border-color: rgba(255, 102, 120, 0.42) !important;
-  background: linear-gradient(90deg, rgba(255, 102, 120, 0.14), rgba(5, 12, 24, 0.44));
+  border-color: var(--diagnostic-error-border) !important;
+  background: linear-gradient(90deg, var(--diagnostic-error-bg), var(--diagnostic-bg));
 }
 
 .severity-chip {
@@ -388,11 +474,11 @@ h2 {
   margin-top: 10px;
   padding: 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--diagnostic-guidance-bg);
 }
 
 .diagnostic-guidance p {
-  color: #d8e3f4;
+  color: var(--diagnostic-guidance-text);
   font-size: 0.9rem;
   line-height: 1.55;
   margin: 0 0 10px;
@@ -405,9 +491,9 @@ h2 {
 }
 
 .reference-links a {
-  border: 1px solid rgba(88, 213, 201, 0.24);
+  border: 1px solid var(--reference-border);
   border-radius: 999px;
-  color: #58d5c9;
+  color: var(--accent-secondary);
   font-size: 0.8rem;
   font-weight: 700;
   padding: 5px 10px;
@@ -415,8 +501,8 @@ h2 {
 }
 
 .reference-links a:hover {
-  border-color: rgba(255, 138, 61, 0.6);
-  color: #ffb37b;
+  border-color: var(--reference-hover-border);
+  color: var(--accent-primary);
 }
 
 .scope-card ul {
@@ -428,7 +514,7 @@ h2 {
 .guidance-card ol {
   display: grid;
   gap: 11px;
-  color: #b9c5d8;
+  color: var(--text-muted);
   line-height: 1.55;
   padding-left: 22px;
 }
@@ -439,7 +525,7 @@ h2 {
 
 .guidance-card code,
 .hero-copy code {
-  color: #ffd166;
+  color: var(--code-accent);
 }
 
 @media (max-width: 960px) {
@@ -460,7 +546,12 @@ h2 {
   }
 
   .privacy-card {
+    justify-items: start;
     min-width: 0;
+  }
+
+  .hero-side {
+    justify-items: stretch;
   }
 
   .panel-heading,

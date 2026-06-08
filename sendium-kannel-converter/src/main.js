@@ -71,6 +71,19 @@ const vuetify = createVuetify({
           success: '#79d279',
         },
       },
+      sendiumLight: {
+        dark: false,
+        colors: {
+          background: '#f6f2e9',
+          surface: '#ffffff',
+          primary: '#c95d22',
+          secondary: '#087a72',
+          error: '#b3261e',
+          warning: '#8a5a00',
+          info: '#356ac3',
+          success: '#257447',
+        },
+      },
     },
   },
 });
