@@ -40,7 +40,19 @@ test('renders the default Kannel sample conversion', async ({ page }) => {
   await expect(preview).toContainText('systemId: "legacy-http-user"');
 
   await page.getByRole('tab', { name: 'Generated file routingTable.conf' }).click();
+  await expect(preview).toContainText('upstreamA:owner_id~~to~~to:equals~~startsWith~~!startsWith:legacy-http-user~~447~~447999');
+  await expect(preview).toContainText('upstreamA:message_center:equals:vip-a');
+  await expect(preview).toContainText('upstreamA:message_center:equals:upstream-a');
   await expect(preview).toContainText('upstreamA::default:');
+  await expect(page.getByLabel('Routing syntax legend')).toContainText('target destination worker or table');
+
+  const routedLine = page.locator('.output-line', {
+    hasText: 'upstreamA:owner_id~~to~~to:equals~~startsWith~~!startsWith:legacy-http-user~~447~~447999',
+  });
+  await expect(routedLine.locator('.token-target', { hasText: 'upstreamA' })).toBeVisible();
+  await expect(routedLine.locator('.token-attribute', { hasText: 'owner_id' })).toBeVisible();
+  await expect(routedLine.locator('.token-operator').filter({ hasText: /^startsWith$/ })).toBeVisible();
+  await expect(routedLine.locator('.token-value', { hasText: 'legacy-http-user' })).toBeVisible();
 });
 
 test('updates generated files when the Kannel source changes', async ({ page }) => {
@@ -67,6 +79,9 @@ test('loads smppbox sample and generates SMPP server settings', async ({ page })
 
   await page.getByRole('tab', { name: 'Generated file credentials.yml' }).click();
   await expect(preview).toContainText('systemId: "downstream-user"');
+
+  await page.getByRole('tab', { name: 'Generated file routingTable.conf' }).click();
+  await expect(preview).toContainText('upstreamA:owner_id~~to:equals~~startsWith:downstream-user~~447');
 });
 
 test('diagnostics navigate to the legacy source that needs review', async ({ page }) => {

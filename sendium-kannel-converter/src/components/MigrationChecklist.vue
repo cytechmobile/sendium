@@ -5,7 +5,7 @@
     <ol>
       <li>Review generated secrets and replace placeholders.</li>
       <li>Validate SMPP TON/NPI, bind mode, throughput, and keepalive settings with each provider.</li>
-      <li>Translate Kannel SMSC selection rules into `routingTable.conf` manually.</li>
+      <li>Review generated routing rules for Kannel SMSC selectors, prefixes, and fallback behavior.</li>
       <li>Move Kannel process, logging, and network settings into deployment configuration where appropriate.</li>
     </ol>
     <div class="reference-links checklist-links">

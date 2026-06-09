@@ -39,6 +39,15 @@
   --subtle-border: rgba(255, 255, 255, 0.08);
   --text-main: #ffffff;
   --text-muted: #b9c5d8;
+  --token-attribute: #8fd6ff;
+  --token-comment: #8da3c1;
+  --token-joiner: #f1a7ff;
+  --token-operator: #ffd166;
+  --token-property: #a7f3d0;
+  --token-separator: #ffb38a;
+  --token-table: #c7b9ff;
+  --token-target: #58d5c9;
+  --token-value: #f33730;
   --warning-bg: rgba(255, 209, 102, 0.16);
   --warning-text: #ffd166;
 }
@@ -78,6 +87,15 @@
   --subtle-border: rgba(24, 35, 51, 0.1);
   --text-main: #182333;
   --text-muted: #526070;
+  --token-attribute: #075985;
+  --token-comment: #64748b;
+  --token-joiner: #8b1fa9;
+  --token-operator: #9a5200;
+  --token-property: #047857;
+  --token-separator: #a64616;
+  --token-table: #5b3fb2;
+  --token-target: #087a72;
+  --token-value: #f33730;
   --warning-bg: rgba(138, 90, 0, 0.13);
   --warning-text: #8a5a00;
 }
@@ -434,6 +452,73 @@ h2 {
 
 .output-line code {
   white-space: pre;
+}
+
+.syntax-token {
+  font: inherit;
+}
+
+.token-comment {
+  color: var(--token-comment);
+  font-style: italic;
+}
+
+.token-table {
+  color: var(--token-table);
+  font-weight: 800;
+}
+
+.token-target {
+  color: var(--token-target);
+  font-weight: 800;
+}
+
+.token-attribute {
+  color: var(--token-attribute);
+  font-weight: 700;
+}
+
+.token-operator {
+  color: var(--token-operator);
+  font-weight: 800;
+}
+
+.token-value {
+  color: var(--token-value);
+}
+
+.token-property {
+  color: var(--token-property);
+  font-weight: 700;
+}
+
+.token-separator {
+  color: var(--token-separator);
+  font-weight: 800;
+}
+
+.token-joiner {
+  color: var(--token-joiner);
+  font-weight: 900;
+}
+
+.routing-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 12px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.routing-legend > span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 0.32rem 0.55rem;
+  border: 1px solid var(--subtle-border);
+  border-radius: 999px;
+  background: var(--diagnostic-guidance-bg);
 }
 
 .line-number {
