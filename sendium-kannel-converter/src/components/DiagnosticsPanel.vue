@@ -1,7 +1,8 @@
 <script setup>
-import { mdiAlertOctagonOutline, mdiAlertOutline, mdiInformationOutline } from '@mdi/js';
+import { computed, ref } from 'vue';
+import DiagnosticReviewItem from './DiagnosticReviewItem.vue';
 
-defineProps({
+const props = defineProps({
   diagnostics: {
     type: Array,
     required: true,
@@ -14,14 +15,37 @@ defineProps({
 
 const emit = defineEmits(['navigate-diagnostic']);
 
-const diagnosticIcon = {
-  error: mdiAlertOctagonOutline,
-  warning: mdiAlertOutline,
-  info: mdiInformationOutline,
-};
+const expandedGroups = ref(new Set());
 
-function diagnosticClass(diagnostic) {
-  return `diagnostic-item diagnostic-${diagnostic.severity}`;
+const REVIEW_GROUPS = [
+  { id: 'error', label: 'Errors', color: 'error' },
+  { id: 'warning', label: 'Warnings', color: 'warning' },
+  { id: 'info', label: 'Info', color: 'info' },
+];
+
+const nonRoutingDiagnostics = computed(() => props.diagnostics.filter((diagnostic) => !diagnostic.routingStatus));
+
+const reviewGroups = computed(() => REVIEW_GROUPS
+  .map((group) => ({
+    ...group,
+    diagnostics: nonRoutingDiagnostics.value.filter((diagnostic) => diagnostic.severity === group.id),
+  }))
+  .filter((group) => group.diagnostics.length > 0));
+
+const hasErrors = computed(() => nonRoutingDiagnostics.value.some((diagnostic) => diagnostic.severity === 'error'));
+
+function isGroupExpanded(groupId) {
+  return expandedGroups.value.has(groupId);
+}
+
+function toggleGroup(groupId) {
+  const nextGroups = new Set(expandedGroups.value);
+  if (nextGroups.has(groupId)) {
+    nextGroups.delete(groupId);
+  } else {
+    nextGroups.add(groupId);
+  }
+  expandedGroups.value = nextGroups;
 }
 
 function canNavigateDiagnostic(diagnostic) {
@@ -42,63 +66,41 @@ function navigateDiagnostic(diagnostic) {
         <p class="panel-kicker">Migration review</p>
         <h2>Warnings and manual steps</h2>
       </div>
-      <v-chip :color="summary.errors ? 'error' : 'success'" variant="tonal">
-        {{ diagnostics.length }} items
+      <v-chip :color="hasErrors ? 'error' : 'success'" variant="tonal">
+        {{ nonRoutingDiagnostics.length }} items
       </v-chip>
     </div>
 
-    <v-list v-if="diagnostics.length" class="diagnostic-list" lines="three">
-      <v-list-item
-        v-for="(diagnostic, index) in diagnostics"
-        :key="`${diagnostic.source || 'global'}-${diagnostic.line || 'global'}-${index}`"
-        :class="[diagnosticClass(diagnostic), { 'diagnostic-navigable': canNavigateDiagnostic(diagnostic) }]"
-        @click="navigateDiagnostic(diagnostic)"
-      >
-        <template #prepend>
-          <v-icon
-            :color="diagnostic.severity === 'error' ? 'error' : 'warning'"
-            :icon="diagnosticIcon[diagnostic.severity] || diagnosticIcon.info"
-          />
-        </template>
-
-        <v-list-item-title>
-          <v-chip
-            class="severity-chip"
-            :color="diagnostic.severity === 'error' ? 'error' : 'warning'"
-            size="x-small"
-            variant="tonal"
-          >
-            {{ diagnostic.severity }}
+    <div v-if="reviewGroups.length" class="review-group-list" aria-label="Warnings and manual steps groups">
+      <section v-for="group in reviewGroups" :key="group.id" class="review-group">
+        <button
+          type="button"
+          class="review-group-header"
+          :aria-expanded="isGroupExpanded(group.id)"
+          @click="toggleGroup(group.id)"
+        >
+          <span>
+            <strong>{{ group.diagnostics.length }}</strong>
+            {{ group.label }}
+          </span>
+          <v-chip :color="group.color" size="small" variant="tonal">
+            {{ isGroupExpanded(group.id) ? 'Hide' : 'Show' }}
           </v-chip>
-          {{ diagnostic.message }}
-        </v-list-item-title>
-        <v-list-item-subtitle>
-          <span v-if="diagnostic.line">line {{ diagnostic.line }}</span>
-          <span v-if="diagnostic.source"> · {{ diagnostic.source }}</span>
-          <span v-if="diagnostic.group"> · group {{ diagnostic.group }}</span>
-          <span v-if="diagnostic.key"> · key {{ diagnostic.key }}</span>
-        </v-list-item-subtitle>
+        </button>
 
-        <div class="diagnostic-guidance">
-          <p>{{ diagnostic.nextStep }}</p>
-          <div class="reference-links">
-            <a
-              v-for="reference in diagnostic.references"
-              :key="reference.href"
-              :href="reference.href"
-              target="_blank"
-              rel="noreferrer"
-              @click.stop
-            >
-              {{ reference.label }}
-            </a>
-          </div>
-        </div>
-      </v-list-item>
-    </v-list>
+        <v-list v-if="isGroupExpanded(group.id)" class="diagnostic-list review-group-items" lines="three">
+          <DiagnosticReviewItem
+            v-for="(diagnostic, index) in group.diagnostics"
+            :key="`${diagnostic.source || 'global'}-${diagnostic.line || 'global'}-${index}`"
+            :diagnostic="diagnostic"
+            @navigate="navigateDiagnostic"
+          />
+        </v-list>
+      </section>
+    </div>
 
     <v-alert v-else type="success" variant="tonal">
-      No warnings detected for the currently supported mappings.
+      No non-routing warnings detected for the currently supported mappings.
     </v-alert>
   </v-card>
 </template>

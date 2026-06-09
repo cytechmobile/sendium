@@ -5,6 +5,7 @@ import HeroSection from './components/HeroSection.vue';
 import ConverterWorkspace from './components/ConverterWorkspace.vue';
 import DiagnosticsPanel from './components/DiagnosticsPanel.vue';
 import MigrationChecklist from './components/MigrationChecklist.vue';
+import RoutingCompatibilitySummary from './components/RoutingCompatibilitySummary.vue';
 import { useConverterUi } from './composables/useConverterUi';
 
 const THEME_STORAGE_KEY = 'sendium-kannel-converter-theme';
@@ -84,23 +85,20 @@ function getInitialTheme() {
         </section>
 
         <section class="workflow-section">
-          <div class="review-heading-block">
-            <p class="panel-kicker">Migration review</p>
-            <h2>Resolve warnings and manual steps</h2>
-            <p>
-              Warnings do not block output, but they identify behavior that should be moved to Sendium config,
-              routing, deployment, or application code.
-            </p>
-          </div>
           <v-row align="start">
-            <v-col cols="12" lg="7">
+            <v-col cols="12" lg="6">
               <DiagnosticsPanel
                 :diagnostics="ui.conversion.value.diagnostics"
                 :summary="ui.conversion.value.summary"
                 @navigate-diagnostic="ui.navigateToDiagnostic"
               />
             </v-col>
-            <v-col cols="12" lg="5">
+            <v-col cols="12" lg="6">
+              <RoutingCompatibilitySummary
+                :compatibility="ui.conversion.value.routingCompatibility"
+                :diagnostics="ui.conversion.value.diagnostics"
+                @navigate-entry="ui.navigateToDiagnostic"
+              />
               <MigrationChecklist />
             </v-col>
           </v-row>
