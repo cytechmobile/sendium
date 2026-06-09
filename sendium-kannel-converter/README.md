@@ -1,6 +1,6 @@
 # Sendium Kannel Converter
 
-Browser-only migration assistant for turning a narrow subset of `kannel.conf` into Sendium starter files.
+Browser-only beta migration assistant for turning a narrow subset of `kannel.conf` into Sendium starter files.
 
 ## Local Development
 
@@ -24,7 +24,7 @@ The converter is published by `.github/workflows/kannel-converter-pages.yml` fro
 
 Public URL: <https://cytechmobile.github.io/sendium/>
 
-## V1.1 Scope
+## Current Beta Scope
 
 - Parse Kannel-style `group = ...` blocks and `key = value` lines.
 - Generate starter `credentials.yml` from `group = sendsms-user` entries.
