@@ -29,6 +29,7 @@ test.beforeEach(async ({ page }) => {
 
 test('renders the default Kannel sample conversion', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Kannel config converter' })).toBeVisible();
+  await expect(page.getByText('Beta')).toBeVisible();
   await expect(page.getByLabel('kannel.conf editor')).toHaveValue(/group = smsc/);
 
   const preview = page.getByLabel('Generated Sendium file preview');
