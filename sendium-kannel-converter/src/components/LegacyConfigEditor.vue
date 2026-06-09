@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 
 const props = defineProps({
   diagnostics: {
@@ -28,6 +28,18 @@ const model = defineModel({ type: String, required: true });
 const gutter = ref(null);
 const textarea = ref(null);
 
+const LINE_TONE_PRIORITY = ['error', 'unsupported', 'runtime-needed', 'warning-only', 'mapped-active', 'warning'];
+
+const LINE_MARKERS = {
+  error: 'E',
+  unsupported: 'U',
+  'runtime-needed': 'R',
+  'warning-only': 'W',
+  'mapped-active': 'M',
+  warning: '!',
+  none: '',
+};
+
 const editorLines = computed(() => {
   const diagnosticsByLine = props.diagnostics.reduce((lines, diagnostic) => {
     if (!diagnostic.line || diagnostic.source !== props.sourceName) {
@@ -45,25 +57,57 @@ const editorLines = computed(() => {
   return Array.from({ length: lineCount }, (_, index) => {
     const number = index + 1;
     const diagnostics = diagnosticsByLine.get(number) || [];
-    const severity = diagnostics.some((diagnostic) => diagnostic.severity === 'error')
-      ? 'error'
-      : diagnostics.length > 0
-        ? 'warning'
-        : 'none';
+    const tone = getLineTone(diagnostics);
 
     return {
       number,
       diagnostics,
-      severity,
+      tone,
       title: diagnostics.map((diagnostic) => diagnostic.message).join('\n'),
     };
   });
 });
 
-function syncGutterScroll(event) {
-  if (gutter.value) {
-    gutter.value.scrollTop = event.target.scrollTop;
+function getLineTone(diagnostics) {
+  if (diagnostics.length === 0) {
+    return 'none';
   }
+
+  return LINE_TONE_PRIORITY.find((tone) => diagnostics.some((diagnostic) => diagnosticTone(diagnostic) === tone)) || 'warning';
+}
+
+function diagnosticTone(diagnostic) {
+  if (diagnostic.severity === 'error') {
+    return 'error';
+  }
+
+  return diagnostic.routingStatus || diagnostic.severity || 'warning';
+}
+
+function lineMarker(line) {
+  return LINE_MARKERS[line.tone] || '';
+}
+
+function syncGutterScroll(event) {
+  syncGutterToTextarea(event.target);
+}
+
+function syncGutterToTextarea(textareaElement = textarea.value) {
+  if (!gutter.value || !textareaElement) {
+    return;
+  }
+
+  updateGutterScrollbarCompensation(textareaElement);
+  gutter.value.scrollTop = textareaElement.scrollTop;
+}
+
+function updateGutterScrollbarCompensation(textareaElement = textarea.value) {
+  if (!gutter.value || !textareaElement) {
+    return;
+  }
+
+  const horizontalScrollbarHeight = Math.max(0, textareaElement.offsetHeight - textareaElement.clientHeight);
+  gutter.value.style.setProperty('--editor-scrollbar-compensation', `${horizontalScrollbarHeight}px`);
 }
 
 watch(
@@ -79,6 +123,19 @@ watch(
   { immediate: true },
 );
 
+watch(
+  model,
+  async () => {
+    await nextTick();
+    syncGutterToTextarea();
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  updateGutterScrollbarCompensation();
+});
+
 function scrollToLine(line) {
   if (!textarea.value) {
     return;
@@ -89,9 +146,7 @@ function scrollToLine(line) {
   const scrollTop = Math.max(0, (line - 1) * lineHeight - textarea.value.clientHeight / 3);
 
   textarea.value.scrollTop = scrollTop;
-  if (gutter.value) {
-    gutter.value.scrollTop = scrollTop;
-  }
+  syncGutterToTextarea();
 
   textarea.value.focus({ preventScroll: true });
 }
@@ -103,10 +158,10 @@ function scrollToLine(line) {
       <div
         v-for="line in editorLines"
         :key="line.number"
-        :class="['editor-gutter-line', `editor-gutter-${line.severity}`]"
+        :class="['editor-gutter-line', `editor-gutter-${line.tone}`]"
         :title="line.title"
       >
-        <span class="editor-marker">{{ line.severity === 'error' ? 'E' : line.severity === 'warning' ? '!' : '' }}</span>
+        <span class="editor-marker">{{ lineMarker(line) }}</span>
         <span class="editor-line-number">{{ line.number }}</span>
       </div>
     </div>

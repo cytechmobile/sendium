@@ -7,6 +7,9 @@ group = sendsms-user
 username = legacy-http-user
 password = change-me
 user-allow-ip = 10.0.0.15
+forced-smsc = upstream-a
+allowed-prefix = 447, 448
+denied-prefix = 447999
 
 group = smsc
 smsc = smpp
@@ -25,6 +28,7 @@ source-addr-npi = 0
 dest-addr-ton = 1
 dest-addr-npi = 1
 address-range = ""
+preferred-smsc-id = vip-a
 allowed-smsc-id = upstream-a
 `;
 
@@ -38,6 +42,8 @@ max-connections = 100
 max-connections-per-ip = 4
 throughput = 20
 max-pending-submits = 1000
+route-to-smsc = upstream-a
+allowed-prefix = 447
 `;
 
 const KEY_CATALOG = {
@@ -64,10 +70,10 @@ const KEY_CATALOG = {
       'dest-addr-ton',
       'dest-addr-npi',
       'address-range',
+      'allowed-smsc-id',
+      'preferred-smsc-id',
     ]),
     manual: new Map([
-      ['allowed-smsc-id', 'Kannel routing constraints must be reviewed against Sendium `routingTable.conf`.'],
-      ['preferred-smsc-id', 'Kannel routing preference must be reviewed against Sendium `routingTable.conf`.'],
       ['denied-smsc-id', 'Kannel SMSC deny routing has no direct beta converter mapping.'],
       ['alt-charset', 'Provider charset behavior needs manual review against Sendium DCS charset mappings.'],
       ['log-file', 'Logging paths are runtime/deployment configuration in Sendium and are not worker mappings.'],
@@ -82,13 +88,9 @@ const KEY_CATALOG = {
     ]),
   },
   'sendsms-user': {
-    mapped: new Set(['username', 'password', 'user-allow-ip']),
+    mapped: new Set(['username', 'password', 'user-allow-ip', 'forced-smsc', 'default-smsc', 'allowed-prefix', 'denied-prefix']),
     manual: new Map([
       ['user-deny-ip', 'Sendium credentials support allowed IPs, not deny lists. Convert this to an allow list manually.'],
-      ['allowed-prefix', 'Prefix constraints should be implemented with Sendium routing or upstream policy.'],
-      ['denied-prefix', 'Prefix deny rules should be implemented with Sendium routing or upstream policy.'],
-      ['forced-smsc', 'Forced SMSC behavior should be reviewed against Sendium `routingTable.conf`.'],
-      ['default-smsc', 'Default SMSC behavior should be reviewed against Sendium `routingTable.conf`.'],
       ['concatenation', 'HTTP concatenation behavior must be validated with the sending application and Sendium message handling.'],
       ['max-messages', 'Per-user message limits are not configured in Sendium credentials.'],
       ['dlr-url', 'Sendium accepts Kannel-style `dlr-url` per request; config-level defaults need manual migration.'],
@@ -149,15 +151,15 @@ const KEY_CATALOG = {
       'user-allow-ip',
       'allowed-ip',
       'allow-ip',
+      'route-to-smsc',
+      'allowed-prefix',
+      'denied-prefix',
     ]),
     manual: new Map([
       ['bearerbox-host', 'Sendium does not use Kannel bearerbox/smppbox process links; review deployment topology manually.'],
       ['bearerbox-port', 'Sendium does not use Kannel bearerbox/smppbox process links; review deployment topology manually.'],
       ['log-file', 'Logging paths are deployment configuration in Sendium.'],
       ['log-level', 'Logging levels are deployment configuration in Sendium.'],
-      ['route-to-smsc', 'SMPP ingress routing should be reviewed against Sendium `routingTable.conf`.'],
-      ['allowed-prefix', 'Prefix constraints should be implemented with Sendium routing or upstream policy.'],
-      ['denied-prefix', 'Prefix deny rules should be implemented with Sendium routing or upstream policy.'],
     ]),
   },
   'opensmppbox': {
@@ -165,11 +167,41 @@ const KEY_CATALOG = {
     manual: new Map(),
   },
   'smppbox-user': {
-    mapped: new Set(['system-id', 'systemid', 'system_id', 'username', 'user', 'password', 'user-allow-ip', 'allowed-ip', 'allow-ip', 'throughput', 'tps', 'max-connections']),
+    mapped: new Set(['system-id', 'systemid', 'system_id', 'username', 'user', 'password', 'user-allow-ip', 'allowed-ip', 'allow-ip', 'throughput', 'tps', 'max-connections', 'route-to-smsc', 'allowed-prefix', 'denied-prefix']),
+    manual: new Map([]),
+  },
+  'smsbox-route': {
+    mapped: new Set([]),
     manual: new Map([
-      ['allowed-prefix', 'Prefix constraints should be implemented with Sendium routing or upstream policy.'],
-      ['denied-prefix', 'Prefix deny rules should be implemented with Sendium routing or upstream policy.'],
-      ['route-to-smsc', 'SMPP ingress routing should be reviewed against Sendium `routingTable.conf`.'],
+      ['smsbox-id', 'Kannel smsbox route topology is not converted; review whether this belongs in Sendium deployment topology, SMPP ingress, or webhook/application routing.'],
+      ['smsbox', 'Kannel smsbox route topology is not converted; review whether this belongs in Sendium deployment topology, SMPP ingress, or webhook/application routing.'],
+      ['smsc-id', 'Kannel smsbox-to-SMSC route constraints are not converted into Sendium outbound routing rules.'],
+      ['shortcode', 'Kannel shortcode smsbox routing needs manual migration to Sendium ingress or application-level handling.'],
+    ]),
+  },
+  'smsc-route': {
+    mapped: new Set([]),
+    manual: new Map([
+      ['smsc-id', 'Kannel SMSC route group targets need manual review against generated Sendium worker names and route ordering.'],
+      ['smsc', 'Kannel SMSC route group targets need manual review against generated Sendium worker names and route ordering.'],
+      ['prefix', 'Kannel route-group prefix behavior is warning-only; translate manually if it should become Sendium to:startsWith routing.'],
+      ['receiver', 'Kannel receiver route constraints need manual review against Sendium to/from routing fields.'],
+      ['sender', 'Kannel sender route constraints need manual review against Sendium from routing fields.'],
+      ['account', 'Kannel route account constraints need manual review because Sendium owner_id may come from HTTP account or credential context.'],
+    ]),
+  },
+  'sms-service': {
+    mapped: new Set([]),
+    manual: new Map([
+      ['keyword', 'Kannel keyword service routing maps to Sendium MO webhook or application logic, not outbound routingTable.conf.'],
+      ['aliases', 'Kannel keyword aliases need manual migration to Sendium MO webhook or application logic.'],
+      ['catch-all', 'Kannel catch-all service behavior needs manual migration to Sendium MO webhook or application logic.'],
+      ['text', 'Kannel static SMS service responses are not generated by the converter.'],
+      ['get-url', 'Kannel HTTP service callbacks should be reviewed against Sendium MO webhook/application handling.'],
+      ['post-url', 'Kannel HTTP service callbacks should be reviewed against Sendium MO webhook/application handling.'],
+      ['accepted-smsc', 'Kannel service SMSC allow lists do not map to outbound Sendium routing rules.'],
+      ['accepted-account', 'Kannel service account allow lists need manual migration to application or credential policy.'],
+      ['max-messages', 'Kannel service message limits are application behavior and are not generated by the converter.'],
     ]),
   },
 };
@@ -177,6 +209,165 @@ const KEY_CATALOG = {
 KEY_CATALOG.opensmppbox = KEY_CATALOG.smppbox;
 
 const STRUCTURAL_GROUPS = new Set(['core', 'smsbox']);
+
+const ROUTING_ADJACENT_GROUP_MESSAGES = new Map([
+  ['smsbox-route', 'Kannel `group = smsbox-route` describes smsbox routing topology; the beta converter does not turn it into active Sendium routes.'],
+  ['smsc-route', 'Kannel `group = smsc-route` describes explicit SMSC route topology; review it manually before editing generated Sendium routingTable.conf.'],
+  ['sms-service', 'Kannel `group = sms-service` describes MO/keyword service behavior; migrate it through Sendium webhooks or application logic rather than outbound routingTable.conf.'],
+]);
+
+const ROUTING_COMPATIBILITY_STATUS = Object.freeze({
+  MAPPED_ACTIVE: 'mapped-active',
+  WARNING_ONLY: 'warning-only',
+  UNSUPPORTED: 'unsupported',
+  RUNTIME_NEEDED: 'runtime-needed',
+});
+
+const ROUTING_COMPATIBILITY_MATRIX = Object.freeze([
+  {
+    id: 'sendsms-user.forced-smsc',
+    groups: ['sendsms-user'],
+    key: 'forced-smsc',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'outbound-smsc-selection',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.owner_id'],
+    activeRouteGeneration: true,
+    note: 'Maps to an account-scoped route when the target resolves to a converted SMPP client.',
+  },
+  {
+    id: 'sendsms-user.default-smsc',
+    groups: ['sendsms-user'],
+    key: 'default-smsc',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'outbound-smsc-selection',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.owner_id'],
+    activeRouteGeneration: true,
+    note: 'Currently maps like forced-smsc; request-level smsc override semantics need a Phase 7 diagnostic pass.',
+  },
+  {
+    id: 'sendsms-user.allowed-prefix',
+    groups: ['sendsms-user'],
+    key: 'allowed-prefix',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'prefix-policy',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.to'],
+    activeRouteGeneration: true,
+    note: 'Maps to destination prefix route-selection conditions when a route target is resolvable.',
+  },
+  {
+    id: 'sendsms-user.denied-prefix',
+    groups: ['sendsms-user'],
+    key: 'denied-prefix',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'submission-policy',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.to'],
+    activeRouteGeneration: true,
+    note: 'Adds negated prefix conditions when scoped to an active route, but still needs warning-only rejection-policy review.',
+  },
+  {
+    id: 'smsc.preferred-smsc-id',
+    groups: ['smsc'],
+    key: 'preferred-smsc-id',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'request-override',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.message_center'],
+    activeRouteGeneration: true,
+    note: 'Maps request smsc selectors to message_center routes when the owning SMSC resolves to a converted client.',
+  },
+  {
+    id: 'smsc.allowed-smsc-id',
+    groups: ['smsc'],
+    key: 'allowed-smsc-id',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'request-override',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.message_center'],
+    activeRouteGeneration: true,
+    note: 'Maps request smsc selectors to message_center routes after preferred selectors.',
+  },
+  {
+    id: 'smsc.denied-smsc-id',
+    groups: ['smsc'],
+    key: 'denied-smsc-id',
+    status: ROUTING_COMPATIBILITY_STATUS.WARNING_ONLY,
+    category: 'submission-policy',
+    sendiumSurfaces: ['manual migration', 'runtime rejection/filter support'],
+    activeRouteGeneration: false,
+    note: 'Deny semantics require rejection behavior, not only alternate route selection.',
+  },
+  {
+    id: 'smppbox.route-to-smsc',
+    groups: ['smppbox', 'opensmppbox', 'smppbox-user'],
+    key: 'route-to-smsc',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'ingress-routing',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.owner_id'],
+    activeRouteGeneration: true,
+    note: 'Maps to an account-scoped route when the ingress account and target SMSC are resolvable.',
+  },
+  {
+    id: 'smppbox.allowed-prefix',
+    groups: ['smppbox', 'opensmppbox', 'smppbox-user'],
+    key: 'allowed-prefix',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'prefix-policy',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.to'],
+    activeRouteGeneration: true,
+    note: 'Maps to destination prefix route-selection conditions when tied to route-to-smsc.',
+  },
+  {
+    id: 'smppbox.denied-prefix',
+    groups: ['smppbox', 'opensmppbox', 'smppbox-user'],
+    key: 'denied-prefix',
+    status: ROUTING_COMPATIBILITY_STATUS.MAPPED_ACTIVE,
+    category: 'submission-policy',
+    sendiumSurfaces: ['routingTable.conf', 'StandardMessage.to'],
+    activeRouteGeneration: true,
+    note: 'Adds negated prefix conditions when scoped to an active route, but still needs warning-only rejection-policy review.',
+  },
+  {
+    id: 'smsbox-route.group',
+    groups: ['smsbox-route'],
+    key: null,
+    status: ROUTING_COMPATIBILITY_STATUS.UNSUPPORTED,
+    category: 'mo-service-routing',
+    sendiumSurfaces: ['webhook/MO config', 'manual migration'],
+    activeRouteGeneration: false,
+    note: 'Kannel smsbox route topology is not converted into outbound Sendium routing rules.',
+  },
+  {
+    id: 'smsc-route.group',
+    groups: ['smsc-route'],
+    key: null,
+    status: ROUTING_COMPATIBILITY_STATUS.UNSUPPORTED,
+    category: 'outbound-smsc-selection',
+    sendiumSurfaces: ['routingTable.conf', 'manual migration'],
+    activeRouteGeneration: false,
+    note: 'Dedicated route groups need a later diagnostics pass before any generated route rules are safe.',
+  },
+  {
+    id: 'sms-service.group',
+    groups: ['sms-service'],
+    key: null,
+    status: ROUTING_COMPATIBILITY_STATUS.RUNTIME_NEEDED,
+    category: 'mo-service-routing',
+    sendiumSurfaces: ['webhook/MO config', 'application code'],
+    activeRouteGeneration: false,
+    note: 'Kannel keyword/service behavior maps to MO webhook or application behavior rather than outbound routingTable.conf.',
+  },
+]);
+
+const ROUTING_COMPATIBILITY_BY_GROUP_AND_KEY = new Map();
+const ROUTING_COMPATIBILITY_BY_GROUP = new Map();
+
+ROUTING_COMPATIBILITY_MATRIX.forEach((entry) => {
+  entry.groups.forEach((group) => {
+    if (entry.key) {
+      ROUTING_COMPATIBILITY_BY_GROUP_AND_KEY.set(`${group}:${entry.key}`, entry);
+    } else {
+      ROUTING_COMPATIBILITY_BY_GROUP.set(group, entry);
+    }
+  });
+});
 
 const REFERENCES = {
   kannel: {
@@ -221,6 +412,9 @@ const GROUP_REFERENCE_KEYS = {
   smppbox: ['smpp', 'credentials', 'routing', 'kannel'],
   opensmppbox: ['smpp', 'credentials', 'routing', 'kannel'],
   'smppbox-user': ['credentials', 'smpp', 'routing', 'kannel'],
+  'smsbox-route': ['routing', 'webhooks', 'kannel'],
+  'smsc-route': ['routing', 'smpp', 'kannel'],
+  'sms-service': ['webhooks', 'routing', 'kannel'],
 };
 
 const KEY_REFERENCE_KEYS = {
@@ -245,9 +439,24 @@ const KEY_REFERENCE_KEYS = {
   systemid: ['credentials', 'smpp', 'kannel'],
   system_id: ['credentials', 'smpp', 'kannel'],
   'route-to-smsc': ['routing', 'kannel'],
+  keyword: ['webhooks', 'kannel'],
+  aliases: ['webhooks', 'kannel'],
+  'catch-all': ['webhooks', 'kannel'],
+  'get-url': ['webhooks', 'kannel'],
+  'post-url': ['webhooks', 'kannel'],
+  'accepted-smsc': ['webhooks', 'routing', 'kannel'],
+  'accepted-account': ['webhooks', 'credentials', 'kannel'],
 };
 
 export { SAMPLE_KANNEL_CONFIG, SAMPLE_SMPPBOX_CONFIG };
+
+export function getRoutingCompatibilityMatrix() {
+  return ROUTING_COMPATIBILITY_MATRIX.map((entry) => ({
+    ...entry,
+    groups: [...entry.groups],
+    sendiumSurfaces: [...entry.sendiumSurfaces],
+  }));
+}
 
 export function convertKannelConfig(source, smppboxSource = '') {
   const diagnostics = [];
@@ -256,16 +465,22 @@ export function convertKannelConfig(source, smppboxSource = '') {
   const smppboxIngress = buildSmppboxIngress(smppboxGroups, diagnostics);
   const credentials = [...buildCredentials(groups, diagnostics), ...smppboxIngress.credentials];
   const smppClients = buildSmppClients(groups, diagnostics);
+  const routingModel = buildRoutingModel(groups, smppboxGroups, smppClients, smppboxIngress.servers, diagnostics);
   const allGroups = [...groups, ...smppboxGroups];
-  const enrichedDiagnostics = diagnostics.map(addGuidanceToDiagnostic);
+  addOutboundRouteSelectionDiagnostics(groups, buildClientRouteTargetMap(smppClients), diagnostics);
+  const routingCompatibility = buildRoutingCompatibilityReport(allGroups, diagnostics);
+  const enrichedDiagnostics = diagnostics
+    .map(addRoutingCompatibilityToDiagnostic)
+    .map(addGuidanceToDiagnostic);
 
   return {
     groups: allGroups,
     diagnostics: enrichedDiagnostics,
+    routingCompatibility,
     files: {
       'credentials.yml': renderCredentials(credentials),
       'smsg.properties': renderSmsgProperties(smppClients, smppboxIngress.servers),
-      'routingTable.conf': renderRoutingTable(smppClients, smppboxIngress.servers),
+      'routingTable.conf': renderRoutingTable(routingModel),
     },
     summary: {
       groups: allGroups.length,
@@ -289,6 +504,37 @@ function addGuidanceToDiagnostic(diagnostic) {
   };
 }
 
+function addRoutingCompatibilityToDiagnostic(diagnostic) {
+  const matrixEntry = getRoutingCompatibilityForDiagnostic(diagnostic);
+
+  if (!matrixEntry) {
+    return diagnostic;
+  }
+
+  return {
+    ...diagnostic,
+    routingCompatibilityId: matrixEntry.id,
+    routingStatus: getDiagnosticRoutingStatus(diagnostic, matrixEntry),
+    routingCategory: matrixEntry.category,
+    routingSurfaces: [...matrixEntry.sendiumSurfaces],
+  };
+}
+
+function getRoutingCompatibilityForDiagnostic(diagnostic) {
+  if (!diagnostic.group) {
+    return null;
+  }
+
+  if (diagnostic.key) {
+    const keyEntry = ROUTING_COMPATIBILITY_BY_GROUP_AND_KEY.get(`${diagnostic.group}:${diagnostic.key}`);
+    if (keyEntry) {
+      return keyEntry;
+    }
+  }
+
+  return ROUTING_COMPATIBILITY_BY_GROUP.get(diagnostic.group) || null;
+}
+
 function buildNextStep(diagnostic) {
   if (diagnostic.severity === 'error') {
     return 'Fix the missing or invalid source value before using the generated file in a Sendium deployment.';
@@ -303,6 +549,165 @@ function buildNextStep(diagnostic) {
   }
 
   return 'Review this item manually before using the generated Sendium files.';
+}
+
+function buildRoutingCompatibilityReport(groups, diagnostics = []) {
+  const entries = [];
+
+  groups.forEach((group) => {
+    const groupMatrixEntry = ROUTING_COMPATIBILITY_BY_GROUP.get(group.type);
+    if (groupMatrixEntry) {
+      entries.push(toRoutingCompatibilityEntry(groupMatrixEntry, group, null, diagnostics));
+    }
+
+    group.entries.forEach((entry) => {
+      const matrixEntry = ROUTING_COMPATIBILITY_BY_GROUP_AND_KEY.get(`${group.type}:${entry.key}`);
+      if (matrixEntry) {
+        entries.push(toRoutingCompatibilityEntry(matrixEntry, group, entry, diagnostics));
+      }
+    });
+  });
+
+  return {
+    entries,
+    summary: summarizeRoutingCompatibility(entries),
+  };
+}
+
+function toRoutingCompatibilityEntry(matrixEntry, group, entry = null, diagnostics = []) {
+  const status = getSourceRoutingStatus(matrixEntry, group, entry, diagnostics);
+
+  return {
+    id: matrixEntry.id,
+    source: entry?.source || group.source,
+    line: entry?.line || group.line,
+    group: group.type,
+    key: entry?.key || matrixEntry.key,
+    value: entry?.value,
+    status,
+    category: matrixEntry.category,
+    sendiumSurfaces: [...matrixEntry.sendiumSurfaces],
+    activeRouteGeneration: matrixEntry.activeRouteGeneration,
+    note: matrixEntry.note,
+  };
+}
+
+function getSourceRoutingStatus(matrixEntry, group, entry, diagnostics) {
+  if (entry && isUnmappedRoutingSource(group, entry, diagnostics)) {
+    return ROUTING_COMPATIBILITY_STATUS.WARNING_ONLY;
+  }
+
+  return matrixEntry.status;
+}
+
+function getDiagnosticRoutingStatus(diagnostic, matrixEntry) {
+  if (isUnmappedRoutingDiagnostic(diagnostic)) {
+    return ROUTING_COMPATIBILITY_STATUS.WARNING_ONLY;
+  }
+
+  return matrixEntry.status;
+}
+
+function isUnmappedRoutingSource(group, entry, diagnostics) {
+  return diagnostics.some((diagnostic) => diagnostic.source === entry.source
+    && diagnostic.line === entry.line
+    && diagnostic.group === group.type
+    && diagnostic.key === entry.key
+    && isUnmappedRoutingDiagnostic(diagnostic));
+}
+
+function isUnmappedRoutingDiagnostic(diagnostic) {
+  return /Could not map|no resolvable|does not match a converted|missing|leaves default behavior/.test(diagnostic.message || '');
+}
+
+function summarizeRoutingCompatibility(entries) {
+  const summary = Object.fromEntries(
+    Object.values(ROUTING_COMPATIBILITY_STATUS).map((status) => [status, 0]),
+  );
+
+  entries.forEach((entry) => {
+    summary[entry.status] = (summary[entry.status] || 0) + 1;
+  });
+
+  return summary;
+}
+
+function addOutboundRouteSelectionDiagnostics(groups, clientTargets, diagnostics) {
+  groups
+    .filter((group) => group.type === 'sendsms-user')
+    .forEach((group) => {
+      const forcedEntry = getEntry(group, 'forced-smsc');
+      const defaultEntry = getEntry(group, 'default-smsc');
+      const routeEntry = forcedEntry || defaultEntry;
+
+      if (!routeEntry) {
+        return;
+      }
+
+      const username = getEntryValue(group, 'username');
+      const target = clientTargets.get(normalizeRouteTarget(routeEntry.value));
+      if (!username || hasUnsafeRoutingValue(username) || !target) {
+        return;
+      }
+
+      diagnostics.push({
+        severity: 'warning',
+        source: routeEntry.source,
+        line: routeEntry.line,
+        group: group.type,
+        key: routeEntry.key,
+        message: `Generated Kannel ${routeEntry.key} routes match Sendium owner_id; review callers that send the HTTP account parameter because it can change the routed owner value.`,
+      });
+
+      if (defaultEntry) {
+        diagnostics.push({
+          severity: 'warning',
+          source: defaultEntry.source,
+          line: defaultEntry.line,
+          group: group.type,
+          key: defaultEntry.key,
+          message: 'Kannel `default-smsc` can be overridden by request-level `smsc`; review generated owner and message_center route ordering before production use.',
+        });
+      }
+
+      if (forcedEntry && defaultEntry) {
+        diagnostics.push({
+          severity: 'warning',
+          source: defaultEntry.source,
+          line: defaultEntry.line,
+          group: group.type,
+          key: defaultEntry.key,
+          message: 'Kannel `forced-smsc` is stricter than `default-smsc`; the beta converter routes this user through the forced target and leaves default behavior for manual review.',
+        });
+      }
+    });
+
+  groups
+    .filter((group) => group.type === 'smsc')
+    .forEach((group) => {
+      const sourceId = getEntryValue(group, 'smsc-id') || getEntryValue(group, 'id') || getEntryValue(group, 'host');
+      const target = clientTargets.get(normalizeRouteTarget(sourceId));
+      if (!target) {
+        return;
+      }
+
+      [getEntry(group, 'preferred-smsc-id'), getEntry(group, 'allowed-smsc-id')]
+        .filter(Boolean)
+        .forEach((entry) => {
+          if (!splitCsv(entry.value).some((selector) => !hasUnsafeRoutingValue(selector))) {
+            return;
+          }
+
+          diagnostics.push({
+            severity: 'warning',
+            source: entry.source,
+            line: entry.line,
+            group: group.type,
+            key: entry.key,
+            message: `Mapped Kannel ${entry.key} as Sendium message_center route-selection logic only; verify request-level smsc precedence, fallback behavior, and any legacy allow/preference policy.`,
+          });
+        });
+    });
 }
 
 function parseKannelConfig(source, diagnostics, sourceName) {
@@ -502,7 +907,7 @@ function buildSmppClients(groups, diagnostics) {
         source: group.source,
         line: group.line,
         group: group.type,
-        message: `Kannel \`group = ${group.type}\` is not converted by the current converter.`,
+        message: ROUTING_ADJACENT_GROUP_MESSAGES.get(group.type) || `Kannel \`group = ${group.type}\` is not converted by the current converter.`,
       });
       diagnoseCatalogKeys(group, diagnostics);
     });
@@ -709,24 +1114,370 @@ function renderSmsgProperties(clients, smppServers = []) {
   return lines.join('\n');
 }
 
-function renderRoutingTable(clients, smppServers = []) {
-  const firstClient = clients[0]?.instanceName || '<manual-smpp-client>';
-  const firstServerTarget = smppServers[0] ? `smppserver.${smppServers[0].instanceName}:type:==:18` : '# smppserver.<instance>:type:==:18';
+function buildRoutingModel(groups, smppboxGroups, clients, smppServers, diagnostics) {
+  const model = {
+    dlrTarget: smppServers[0] ? `smppserver.${smppServers[0].instanceName}` : '# smppserver.<instance>',
+    fallbackTarget: clients[0]?.instanceName || '<manual-smpp-client>',
+    messageRules: [],
+  };
 
-  return [
-    '# Minimal starter routing generated by Sendium Kannel Converter',
-    '# Kannel routing is not deeply converted by this beta converter. Review docs/05-routing-engine.md.',
+  const clientTargets = buildClientRouteTargetMap(clients);
+  addUserSmscRoutes(groups, clientTargets, model, diagnostics);
+  addSmppboxRouteToSmscRoutes(smppboxGroups, clientTargets, model, diagnostics);
+  addSmscConstraintRoutes(groups, clientTargets, model, diagnostics);
+
+  return model;
+}
+
+function buildClientRouteTargetMap(clients) {
+  const targets = new Map();
+
+  clients.forEach((client) => {
+    addClientRouteTarget(targets, client.sourceId, client.instanceName);
+    addClientRouteTarget(targets, client.instanceName, client.instanceName);
+  });
+
+  return targets;
+}
+
+function addClientRouteTarget(targets, sourceValue, instanceName) {
+  if (!sourceValue) {
+    return;
+  }
+
+  const key = normalizeRouteTarget(sourceValue);
+  if (!targets.has(key)) {
+    targets.set(key, instanceName);
+  }
+}
+
+function addUserSmscRoutes(groups, clientTargets, model, diagnostics) {
+  groups
+    .filter((group) => group.type === 'sendsms-user')
+    .forEach((group) => {
+      const forcedEntry = getEntry(group, 'forced-smsc');
+      const defaultEntry = getEntry(group, 'default-smsc');
+      const routeEntry = forcedEntry || defaultEntry;
+      const prefixContext = getPrefixContext(group);
+
+      if (!routeEntry) {
+        warnPrefixWithoutTarget(group, prefixContext, diagnostics);
+        return;
+      }
+
+      const username = getEntryValue(group, 'username');
+      if (!username) {
+        diagnostics.push({
+          severity: 'warning',
+          source: routeEntry.source,
+          line: routeEntry.line,
+          group: group.type,
+          key: routeEntry.key,
+          message: `Could not map Kannel \`${routeEntry.key}\` because the sendsms-user has no username for Sendium \`owner_id\` routing.`,
+        });
+        return;
+      }
+
+      if (hasUnsafeRoutingValue(username)) {
+        diagnostics.push({
+          severity: 'warning',
+          source: routeEntry.source,
+          line: routeEntry.line,
+          group: group.type,
+          key: routeEntry.key,
+          message: `Could not map Kannel \`${routeEntry.key}\` for \`${username}\` because Sendium routing values cannot contain colon or multi-rule separators safely.`,
+        });
+        return;
+      }
+
+      const target = clientTargets.get(normalizeRouteTarget(routeEntry.value));
+      if (!target) {
+        diagnostics.push({
+          severity: 'warning',
+          source: routeEntry.source,
+          line: routeEntry.line,
+          group: group.type,
+          key: routeEntry.key,
+          message: `Could not map Kannel \`${routeEntry.key} = ${routeEntry.value}\` because it does not match a converted SMPP client.`,
+        });
+        return;
+      }
+
+      addTargetedPrefixWarning(group, prefixContext, diagnostics);
+      addAccountTargetRules(model, {
+        target,
+        accountId: username,
+        routeLabel: `sendsms-user ${username} ${routeEntry.key}=${routeEntry.value}`,
+        prefixContext,
+      }, diagnostics);
+    });
+}
+
+function addSmppboxRouteToSmscRoutes(groups, clientTargets, model, diagnostics) {
+  groups
+    .filter((group) => ['smppbox', 'opensmppbox', 'smppbox-user'].includes(group.type))
+    .forEach((group) => {
+      const routeEntry = getEntry(group, 'route-to-smsc');
+      const prefixContext = getPrefixContext(group);
+
+      if (!routeEntry) {
+        warnPrefixWithoutTarget(group, prefixContext, diagnostics);
+        return;
+      }
+
+      const accountId = getFirstEntryValue(group, ['system-id', 'systemid', 'system_id', 'username', 'user']);
+      if (!accountId) {
+        diagnostics.push({
+          severity: 'warning',
+          source: routeEntry.source,
+          line: routeEntry.line,
+          group: group.type,
+          key: routeEntry.key,
+          message: `Could not map Kannel \`${routeEntry.key}\` because the smppbox route has no system-id/account value for Sendium \`owner_id\` routing.`,
+        });
+        return;
+      }
+
+      if (hasUnsafeRoutingValue(accountId)) {
+        diagnostics.push({
+          severity: 'warning',
+          source: routeEntry.source,
+          line: routeEntry.line,
+          group: group.type,
+          key: routeEntry.key,
+          message: `Could not map Kannel \`${routeEntry.key}\` for \`${accountId}\` because Sendium routing values cannot contain colon or multi-rule separators safely.`,
+        });
+        return;
+      }
+
+      const target = clientTargets.get(normalizeRouteTarget(routeEntry.value));
+      if (!target) {
+        diagnostics.push({
+          severity: 'warning',
+          source: routeEntry.source,
+          line: routeEntry.line,
+          group: group.type,
+          key: routeEntry.key,
+          message: `Could not map Kannel \`${routeEntry.key} = ${routeEntry.value}\` because it does not match a converted SMPP client.`,
+        });
+        return;
+      }
+
+      addTargetedPrefixWarning(group, prefixContext, diagnostics);
+      addAccountTargetRules(model, {
+        target,
+        accountId,
+        routeLabel: `${group.type} ${accountId} ${routeEntry.key}=${routeEntry.value}`,
+        prefixContext,
+      }, diagnostics);
+    });
+}
+
+function addSmscConstraintRoutes(groups, clientTargets, model, diagnostics) {
+  groups
+    .filter((group) => group.type === 'smsc')
+    .forEach((group) => {
+      const preferredEntry = getEntry(group, 'preferred-smsc-id');
+      const allowedEntry = getEntry(group, 'allowed-smsc-id');
+
+      if (!preferredEntry && !allowedEntry) {
+        return;
+      }
+
+      const sourceId = getEntryValue(group, 'smsc-id') || getEntryValue(group, 'id') || getEntryValue(group, 'host');
+      const target = clientTargets.get(normalizeRouteTarget(sourceId));
+
+      if (!target) {
+        [preferredEntry, allowedEntry].filter(Boolean).forEach((entry) => {
+          diagnostics.push({
+            severity: 'warning',
+            source: entry.source,
+            line: entry.line,
+            group: group.type,
+            key: entry.key,
+            message: `Could not map Kannel \`${entry.key}\` because the owning SMSC did not become a converted SMPP client.`,
+          });
+        });
+        return;
+      }
+
+      const emittedSelectors = new Set();
+      addSmscSelectorRules(model, diagnostics, {
+        target,
+        entry: preferredEntry,
+        selectors: splitCsv(preferredEntry?.value || ''),
+        emittedSelectors,
+        commentLabel: 'preferred-smsc-id',
+      });
+      addSmscSelectorRules(model, diagnostics, {
+        target,
+        entry: allowedEntry,
+        selectors: splitCsv(allowedEntry?.value || ''),
+        emittedSelectors,
+        commentLabel: 'allowed-smsc-id',
+      });
+    });
+}
+
+function addSmscSelectorRules(model, diagnostics, { target, entry, selectors, emittedSelectors, commentLabel }) {
+  if (!entry) {
+    return;
+  }
+
+  selectors.forEach((selector) => {
+    const normalizedSelector = normalizeRouteTarget(selector);
+    if (emittedSelectors.has(normalizedSelector)) {
+      return;
+    }
+
+    if (hasUnsafeRoutingValue(selector)) {
+      diagnostics.push({
+        severity: 'warning',
+        source: entry.source,
+        line: entry.line,
+        group: 'smsc',
+        key: entry.key,
+        message: `Could not map Kannel \`${entry.key} = ${selector}\` because Sendium routing values cannot contain colon or multi-rule separators safely.`,
+      });
+      return;
+    }
+
+    emittedSelectors.add(normalizedSelector);
+    model.messageRules.push({
+      target,
+      conditions: [{ field: 'message_center', operator: 'equals', value: selector }],
+      comment: `Converted from SMSC ${target} ${commentLabel}=${selector}`,
+    });
+  });
+}
+
+function addAccountTargetRules(model, { target, accountId, routeLabel, prefixContext }, diagnostics) {
+  const baseCondition = { field: 'owner_id', operator: 'equals', value: accountId };
+  const deniedConditions = buildDeniedPrefixConditions(prefixContext, diagnostics);
+
+  if (prefixContext.allowed.length > 0) {
+    prefixContext.allowed.forEach((prefix) => {
+      if (hasUnsafeRoutingValue(prefix)) {
+        warnUnsafePrefix(prefixContext.allowedEntry, prefix, diagnostics);
+        return;
+      }
+
+      model.messageRules.push({
+        target,
+        conditions: [baseCondition, { field: 'to', operator: 'startsWith', value: prefix }, ...deniedConditions],
+        comment: `Converted from ${routeLabel} allowed-prefix=${prefix}`,
+      });
+    });
+    return;
+  }
+
+  model.messageRules.push({
+    target,
+    conditions: [baseCondition, ...deniedConditions],
+    comment: `Converted from ${routeLabel}`,
+  });
+}
+
+function buildDeniedPrefixConditions(prefixContext, diagnostics) {
+  return prefixContext.denied
+    .filter((prefix) => {
+      if (!hasUnsafeRoutingValue(prefix)) {
+        return true;
+      }
+
+      warnUnsafePrefix(prefixContext.deniedEntry, prefix, diagnostics);
+      return false;
+    })
+    .map((prefix) => ({ field: 'to', operator: '!startsWith', value: prefix }));
+}
+
+function getPrefixContext(group) {
+  const allowedEntry = getEntry(group, 'allowed-prefix');
+  const deniedEntry = getEntry(group, 'denied-prefix');
+
+  return {
+    allowedEntry,
+    deniedEntry,
+    allowed: splitCsv(allowedEntry?.value || ''),
+    denied: splitCsv(deniedEntry?.value || ''),
+  };
+}
+
+function warnPrefixWithoutTarget(group, prefixContext, diagnostics) {
+  [prefixContext.allowedEntry, prefixContext.deniedEntry].filter(Boolean).forEach((entry) => {
+    diagnostics.push({
+      severity: 'warning',
+      source: entry.source,
+      line: entry.line,
+      group: group.type,
+      key: entry.key,
+      message: `Could not map Kannel \`${entry.key}\` because no resolvable SMSC route target was found in the same group.`,
+    });
+  });
+}
+
+function addTargetedPrefixWarning(group, prefixContext, diagnostics) {
+  [prefixContext.allowedEntry, prefixContext.deniedEntry].filter(Boolean).forEach((entry) => {
+    diagnostics.push({
+      severity: 'warning',
+      source: entry.source,
+      line: entry.line,
+      group: group.type,
+      key: entry.key,
+      message: `Mapped Kannel \`${entry.key}\` as route-selection logic only; verify whether Sendium must also reject submissions outside the legacy prefix policy.`,
+    });
+  });
+}
+
+function warnUnsafePrefix(entry, prefix, diagnostics) {
+  diagnostics.push({
+    severity: 'warning',
+    source: entry?.source,
+    line: entry?.line,
+    key: entry?.key,
+    message: `Could not map Kannel prefix \`${prefix}\` because Sendium routing values cannot contain colon or multi-rule separators safely.`,
+  });
+}
+
+function renderRoutingTable(routingModel) {
+  const lines = [
+    '# Routing starter generated by Sendium Kannel Converter',
+    '# Review generated rules against legacy Kannel routing behavior before production use.',
     '[default]',
     'MESSAGE:type:==:0',
     'MESSAGE:type:==:11',
     'MESSAGE:type:==:14',
     'MESSAGE:type:==:17',
     'MESSAGE:type:==:10',
-    firstServerTarget,
+    `${routingModel.dlrTarget}:type:==:18`,
     '',
     '[MESSAGE]',
-    `${firstClient}::default:`,
-  ].join('\n');
+  ];
+
+  routingModel.messageRules.forEach((rule) => {
+    lines.push(`# ${rule.comment}`);
+    lines.push(renderRoutingRule(rule));
+  });
+
+  lines.push(`${routingModel.fallbackTarget}::default:`);
+
+  return lines.join('\n');
+}
+
+function renderRoutingRule(rule) {
+  const conditions = rule.conditions || [{ field: rule.field, operator: rule.operator, value: rule.value }];
+
+  if (conditions.length === 1) {
+    const [condition] = conditions;
+    return `${rule.target}:${condition.field}:${condition.operator}:${condition.value}`;
+  }
+
+  return [
+    rule.target,
+    conditions.map((condition) => condition.field).join('~~'),
+    conditions.map((condition) => condition.operator).join('~~'),
+    conditions.map((condition) => condition.value).join('~~'),
+  ].join(':');
 }
 
 function diagnoseCatalogKeys(group, diagnostics) {
@@ -778,7 +1529,11 @@ function normalizeInterfaceVersion(value) {
 }
 
 function getEntryValue(group, key) {
-  return group.entries.find((entry) => entry.key === key)?.value || '';
+  return getEntry(group, key)?.value || '';
+}
+
+function getEntry(group, key) {
+  return group.entries.find((entry) => entry.key === key);
 }
 
 function getFirstEntryValue(group, keys) {
@@ -832,6 +1587,14 @@ function splitCsv(value) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizeRouteTarget(value) {
+  return value.trim().toLowerCase();
+}
+
+function hasUnsafeRoutingValue(value) {
+  return value.includes(':') || value.includes('~~');
 }
 
 function toInstanceName(value) {
