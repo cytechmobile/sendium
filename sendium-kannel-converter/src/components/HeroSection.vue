@@ -15,7 +15,10 @@ defineEmits(['toggle-appearance']);
   <section class="hero compact-hero">
     <div>
       <p class="eyebrow">Sendium migration tool</p>
-      <h1>Kannel config converter</h1>
+      <div class="hero-title-row">
+        <h1>Kannel config converter</h1>
+        <v-chip color="primary" size="small" variant="tonal">Beta</v-chip>
+      </div>
       <p class="hero-copy">
         Convert legacy Kannel config into Sendium starter files locally in your browser.
       </p>

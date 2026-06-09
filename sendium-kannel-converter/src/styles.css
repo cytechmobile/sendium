@@ -136,6 +136,13 @@ h1 {
   letter-spacing: -0.07em;
 }
 
+.hero-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
 h2 {
   font-size: clamp(1.35rem, 2vw, 2rem);
   letter-spacing: -0.04em;
