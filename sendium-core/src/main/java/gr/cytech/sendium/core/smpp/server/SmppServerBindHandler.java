@@ -41,12 +41,11 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
     ) throws SmppProcessingException {
         logger.info("new bind request from ip:{} systemId:{}", sessionConfiguration.getHost(), sessionConfiguration.getSystemId());
         checkIfConnectionFromIpIsOverLimit(sessionConfiguration.getHost());
-        SmppSessionContext context = authProvider.authenticate(
+        var context = authProvider.authenticate(
                 sessionConfiguration.getSystemId(),
                 sessionConfiguration.getPassword(),
                 sessionConfiguration.getHost()
         );
-        pendingSessionContexts.put(sessionId, context);
         String accountId = context.getAccountId();
 
         checkIfConnectionsFromAccountIdIsOverLimit(accountId, context.getMaxConnections());
@@ -63,6 +62,7 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
         String packageName = SmppServerBindHandler.class.getPackageName();
         sessionConfiguration.getLoggingOptions().setLoggerName(packageName);
         sessionConfiguration.getLoggingOptions().setLogParamPrefix("accId:" + accountId);
+        pendingSessionContexts.put(sessionId, context);
     }
 
     public void sessionCreated(
@@ -73,7 +73,7 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
         String accountId = session.getConfiguration().getName();
         Tlv optional = new Tlv(SmppConstants.TAG_SC_INTERFACE_VERSION, new byte[]{SmppConstants.VERSION_3_4}, "Interface Version");
         preparedBindResponse.setOptionalParameter(optional);
-        SmppSessionContext smppSessionContext = pendingSessionContexts.remove(sessionId);
+        var smppSessionContext = pendingSessionContexts.remove(sessionId);
         var handler = new SmppServerSessionHandler<M>(worker, sessionId, session, smppSessionContext, submitSmProcessor);
         if (smppSessionContext != null && !Strings.isNullOrEmpty(smppSessionContext.getProduct())) {
             handler.setApiProduct(smppSessionContext.getProduct());
@@ -129,6 +129,7 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
             logger.info("final session rx-submitSM: name:{}-{}", session.getConfiguration().getName(), session.getCounters().getRxSubmitSM());
         }
         connections.removeConnection(session);
+        pendingSessionContexts.remove(sessionId);
         session.destroy();
     }
 
