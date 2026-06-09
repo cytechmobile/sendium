@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7](https://github.com/cytechmobile/sendium/compare/v0.2.6...v0.2.7) (2026-06-09)
+
+
+### Bug Fixes
+
+* **smpp:** avoid leaking pending session contexts on rejected binds ([d6c83c1](https://github.com/cytechmobile/sendium/commit/d6c83c1150a1bc9e486ccddf248d5a6422ef81c2))
+
 ## [0.2.6](https://github.com/cytechmobile/sendium/compare/v0.2.5...v0.2.6) (2026-06-03)
 
 
