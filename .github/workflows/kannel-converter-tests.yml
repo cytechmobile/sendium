@@ -1,0 +1,61 @@
+name: Test Kannel Converter
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kannel-converter-tests.yml'
+      - 'sendium-kannel-converter/**'
+  pull_request:
+    paths:
+      - '.github/workflows/kannel-converter-tests.yml'
+      - 'sendium-kannel-converter/**'
+  workflow_dispatch:
+
+concurrency:
+  group: kannel-converter-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sendium-kannel-converter/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sendium-kannel-converter
+        run: npm ci
+
+      - name: Run converter unit tests and build
+        working-directory: sendium-kannel-converter
+        run: npm run check
+
+      - name: Install Playwright browsers
+        working-directory: sendium-kannel-converter
+        run: npx playwright install --with-deps chromium
+
+      - name: Run converter browser tests
+        working-directory: sendium-kannel-converter
+        run: npm run test:e2e
+
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kannel-converter-playwright-artifacts
+          path: |
+            sendium-kannel-converter/test-results
+            sendium-kannel-converter/playwright-report
+          if-no-files-found: ignore
+          retention-days: 2

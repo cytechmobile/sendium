@@ -42,6 +42,14 @@ nb-configuration.xml
 # Plugin directory
 .quarkus/
 
+# Node / frontend
+node_modules/
+dist/
+.vite/
+playwright-report/
+test-results/
+blob-report/
+
 conf/
 sendium-app/conf
 sendium-app/data
