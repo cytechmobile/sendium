@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/cytechmobile/sendium/compare/v0.2.7...v0.3.0) (2026-06-15)
+
+
+### Features
+
+* **conf:** add browser-based Kannel migration converter ([b4c36dc](https://github.com/cytechmobile/sendium/commit/b4c36dcd1b4d311c3f7cdef14f572f032ced542e))
+* **converter:** Added migrator handling on routing rules ([b5c8cc8](https://github.com/cytechmobile/sendium/commit/b5c8cc8ad7da2f13961b96aaf932ccebb3f4539c))
+
 ## [0.2.7](https://github.com/cytechmobile/sendium/compare/v0.2.6...v0.2.7) (2026-06-09)
 
 
