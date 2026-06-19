@@ -11,7 +11,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout main repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Find migration guid
       - name: Set migration guide path
@@ -29,7 +29,7 @@ jobs:
 
       - name: Checkout Wiki repository
         if: steps.check_files.outputs.files_exists == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}.wiki
           path: wiki
