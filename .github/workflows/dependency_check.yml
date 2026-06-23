@@ -19,7 +19,7 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Restore Dependency-Check data
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/dependency-check-data
           key: dependency-check-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -36,7 +36,7 @@ jobs:
           ./mvnw "org.owasp:dependency-check-maven:${OWASP_VERSION}":aggregate -DfailBuildOnCVSS=7 -DnvdApiKeyEnvironmentVariable=NVD_API_KEY -DsuppressionFile=dependency-check-suppressions.xml -DdataDirectory="${DEPENDENCY_CHECK_DATA}" -DnvdValidForHours=24 ${MVN_OPTS}
       - name: Save Dependency-Check data
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/dependency-check-data
           key: dependency-check-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
