@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/cytechmobile/sendium/compare/v0.3.0...v0.3.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **deps:** release Quarkus platform upgrade ([085863b](https://github.com/cytechmobile/sendium/commit/085863bb3330be7b78da2488b1cc80072b588227))
+
 ## [0.3.0](https://github.com/cytechmobile/sendium/compare/v0.2.7...v0.3.0) (2026-06-15)
 
 
