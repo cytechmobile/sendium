@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/cytechmobile/sendium/compare/v0.3.1...v0.3.2) (2026-07-09)
+
+
+### Bug Fixes
+
+* **core:** cover StandardMessage byte JSON handling ([f4cf8d6](https://github.com/cytechmobile/sendium/commit/f4cf8d65fbb98de8c5dd0ec53770201b9deff0e1))
+
 ## [0.3.1](https://github.com/cytechmobile/sendium/compare/v0.3.0...v0.3.1) (2026-07-02)
 
 
