@@ -27,7 +27,7 @@
 
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-        <quarkus.platform.version>3.37.3</quarkus.platform.version>
+        <quarkus.platform.version>3.37.4</quarkus.platform.version>
 
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
         <checkstyle-tools.version>13.8.0</checkstyle-tools.version>
