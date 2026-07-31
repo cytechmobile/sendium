@@ -52,113 +52,57 @@ With over 20 years of experience building high-performance telecommunications so
 ## 📦 Quick Start
 
 ### Prerequisites
-* Docker installed on your host machine.
-* Create three empty directories in your current working folder: `./conf`, `./data`, and `./logs`.
-* Before starting the container, Sendium requires three configuration files inside `./conf`. These files control your binds, authentication, and routing logic.
 
-Create the following three files inside `./conf` and adapt the sample configurations:
-#### 1. credentials.yml
-- Setting smpp and http credentials on sendium
+* Docker with Docker Compose v2.
+* `curl` and a POSIX shell.
 
-```yml
-credentials:
-  - type: SMPP
-    systemId: "sendium-smpp-user"
-    password: "change-me-smpp"
-  - type: HTTP
-    systemId: "sendium-http-user"
-    password: "change-me-http"
-```
-#### 2. smsg.properties
-- Setting a smpp client connection and the smpp server.
-```properties
-# sample smpp client worker
-outSms.instance.testRoute.enable = true
-outSms.instance.testRoute.type = smppclient
-outSms.instance.testRoute.username = upstream-system-id
-outSms.instance.testRoute.password = upstream-password
-outSms.instance.testRoute.host = smpp.test.com
-outSms.instance.testRoute.port = 2775
-outSms.instance.testRoute.tps = 0
-outSms.instance.testRoute.connections.transceivers = 1
+### Generate and Start Sendium
 
-# smpp server
-outSms.instance.smpp.enable = true
-outSms.instance.smpp.type = smppserver
-outSms.instance.smpp.tps = 0
-outSms.instance.smpp.srv.port = 27777
-outSms.instance.smpp.srv.defaultWindowSize = 1000
-outSms.instance.smpp.srv.maxConnections = 1000
-outSms.instance.smpp.srv.maxConnectionsPerIP = 4
-outSms.instance.smpp.conf.maxConnectionsPerUser.default = 4
-outSms.instance.smpp.conf.maxRate.default = 0
-```
-#### 3. routingTable.conf
-- Routing configuration for sending all traffic by default through the SMPP client named `testRoute`
-
-```conf
-[default]
-MESSAGE:type:==:0
-MESSAGE:type:==:11
-MESSAGE:type:==:14
-MESSAGE:type:==:17
-MESSAGE:type:==:10
-smppserver.smpp:type:==:18
-
-[MESSAGE]
-testRoute::default:
-```
-
-### Running with Docker
-Sendium publishes two Docker image variants:
-
-| Image | Runtime |
-| :--- | :--- |
-| `cytechmobile/sendium:latest` | JVM image based on Eclipse Temurin 25 JRE. |
-| `cytechmobile/sendium:latest-native` | Native executable image. |
-
-Run the following command to start the default JVM image in the background:
+Download and run the setup script:
 
 ```bash
-docker run -d --name sendium \
-  -e QUARKUS_LOG_FILE_ENABLE=true \
-  -e QUARKUS_LOG_CONSOLE_ENABLE=false \
-  -e QUARKUS_LOG_FILE_PATH=/work/logs/smsg.log \
-  -e QUARKUS_LOG_FILE_SMPPCLIENT_PATH=/work/logs/smppclient.log \
-  -e QUARKUS_LOG_FILE_SMPPSERVER_PATH=/work/logs/smppserver.log \
-  -e QUARKUS_HTTP_ACCESS_LOG_DIRECTORY=/work/logs \
-  -p 8080:8080 \
-  -p 27777:27777 \
-  -v ./conf:/work/conf \
-  -v ./data:/work/data \
-  -v ./logs:/work/logs \
-  cytechmobile/sendium:latest
+curl -fsSLo quick-start.sh https://raw.githubusercontent.com/cytechmobile/sendium/main/quick-start.sh && sh quick-start.sh
 ```
 
-To run the native image instead, use `cytechmobile/sendium:latest-native`.
+The script creates a `sendium/` runtime directory, generates random HTTP and SMPP credentials, writes Docker Compose and all required configuration files, starts Sendium, and waits for the HTTP API.
+
+It asks you to choose one upstream option:
+
+1. **ProSMS:** Uses `smpp.prosms.gr:2775` with a transceiver connection. [Create a ProSMS account](https://prosms.gr/sms-tool/?v=2&m=8) if needed; SMPP credentials require manual approval from ProSMS. Until credentials are approved, the script creates a local-only setup without a failing placeholder connection.
+2. **Existing SMPP provider:** Enter your provider host, port, credentials, and TLS choice. Quick Start uses a transceiver connection.
+3. **Local setup only:** Starts Sendium's local HTTP and SMPP interfaces without an outbound provider. You can explore the API, but messages cannot be delivered until an upstream route is configured.
+
+HTTP and SMPP ports are bound to `127.0.0.1` by default. Use the [Docker deployment guide](docs/02-docker-deployment.md) for generated-file details, manual setup, native images, and non-local deployments.
+
+When startup completes, the script prints the Swagger URL and an exact command for following live logs
+
+### Send Your First SMS
+
+For a configured upstream provider, load the generated local HTTP credentials and submit a message:
+
+```bash
+cd sendium
+set -a
+. ./.sendium.env
+set +a
+
+curl -i -G http://127.0.0.1:8080/sendsms \
+  --data-urlencode "username=${SENDIUM_HTTP_USER}" \
+  --data-urlencode "password=${SENDIUM_HTTP_PASSWORD}" \
+  --data-urlencode "from=Sendium" \
+  --data-urlencode "to=306910000000" \
+  --data-urlencode "text=Hello from Sendium!"
+```
+
+Replace the sender and recipient with values accepted by your provider. A `202 Accepted` response and UUID mean Sendium validated and queued the request; they do not confirm that the upstream provider accepted or delivered the SMS.
+
+See the [Docker deployment guide](docs/02-docker-deployment.md) for the complete manual container setup. Configuration details are maintained in [Authentication and Security](docs/03-auth-security.md), [SMPP Configuration](docs/04-smpp-configuration.md), [Routing Engine](docs/05-routing-engine.md), and the [Configuration Reference](docs/09-configuration-reference.md).
 
 ## 💬 Documentation & Support
 
 The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, roadmap, and community resources.
 
 Migrating from Kannel? Use the browser-only **[Kannel migration converter](https://cytechmobile.github.io/sendium/)** to paste a legacy `kannel.conf` and generate Sendium starter files locally in your browser.
-
-Key docs:
-
-1. **[Architecture Overview](docs/01-architecture.md):** Understand runtime components, queues, routing flow, workers, DLRs with diagrams.
-2. **[Docker Deployment](docs/02-docker-deployment.md):** Run Sendium with Docker, volumes, ports, logs, and startup checks.
-3. **[Authentication & Security](docs/03-auth-security.md):** Configure HTTP and SMPP credentials.
-4. **[SMPP Configuration](docs/04-smpp-configuration.md):** Configure SMPP server, SMPP client, worker behavior, TLS, retries, and logging.
-5. **[Routing Engine](docs/05-routing-engine.md):** Configure routing tables, rules, operators, and fallbacks.
-6. **[HTTP API](docs/06-http-api.md):** Submit SMS through the Kannel-compatible `/sendsms` endpoint.
-7. **[Webhooks](docs/07-webhooks.md):** Configure DLR callbacks and MO forwarding.
-8. **[Monitoring & Observability](docs/08-monitoring-observability.md):** Expose Prometheus metrics and configure Prometheus/Grafana.
-9. **[Configuration Reference](docs/09-configuration-reference.md):** Review paths, Docker environment variables, logging, and OpenAPI endpoints.
-10. **[Troubleshooting](docs/10-troubleshooting.md):** Diagnose common setup and runtime issues.
-11. **[Release Process](docs/11-release-process.md):** Understand Release Please, Maven publishing, and Docker image publishing.
-12. **[Features & Roadmap](docs/12-features-roadmap.md):** Review current capabilities and planned roadmap phases.
-
-When Sendium is running, API discovery is available at `/swagger-ui` and `/openapi.json`.
 
 If you run into issues, have questions, or want to share what you're building, we'd love to hear from you! We use **[GitHub Discussions](https://github.com/cytechmobile/sendium/discussions)** for our community hub.
 
@@ -168,5 +112,3 @@ To help us help you faster, please use the appropriate category:
 * **💡 Ideas:** Have a feature request or a suggestion to make Sendium better? Let's discuss it.
 * **🙌 Show and tell:** Are you using Sendium in production? Did you build a cool integration? Share it with the community!
 * **💬 General:** For all other chats and discussions about the project.
-
-*Note: If you are confident you have found a bug, please open a formal [GitHub Issue](https://github.com/cytechmobile/sendium/issues) so we can track it.*
