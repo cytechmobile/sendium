@@ -9,6 +9,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  quick-start:
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Test quick-start generator
+        run: sh tests/quick-start-test.sh
+
   tests:
     permissions:
       contents: read
@@ -28,6 +41,12 @@ jobs:
           export QUARKUS_LOG_LEVEL=ERROR
           chmod +x ./mvnw
           ./mvnw verify
+      - name: Build quick-start test image
+        run: docker build -t sendium:quick-start-test -f sendium-app/src/main/docker/Dockerfile.jvm sendium-app
+      - name: Test generated container startup
+        env:
+          SENDIUM_TEST_IMAGE: sendium:quick-start-test
+        run: sh tests/quick-start-test.sh
       - id: result
         name: Sendium Test Result
         if: always()
@@ -53,7 +72,7 @@ jobs:
         if: always()
         continue-on-error: true
   automerge-dependabot:
-    needs: tests
+    needs: [quick-start, tests]
     if: success() && github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
