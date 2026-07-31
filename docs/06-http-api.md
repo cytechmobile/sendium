@@ -57,7 +57,7 @@ The API returns standard HTTP status codes along with a plain-text response body
 
 | HTTP Status | Meaning | Description |
 | :--- | :--- | :--- |
-| **`202 Accepted`** | **Success** | The message was successfully validated and enqueued for delivery. The response body contains the unique UUID (serial) of the message. |
+| **`202 Accepted`** | **Success** | The message was validated and inserted into Sendium's router queue. The response body contains the unique UUID (serial) of the message. |
 | **`400 Bad Request`** | **Error** | Missing a required parameter (`to`, `from`, or `text`). The response body details which parameter is missing. |
 | **`401 Unauthorized`** | **Error** | Invalid or missing credentials. |
 | **`500 Server Error`** | **Error** | An internal error occurred while parsing or processing the message payload. |
@@ -67,21 +67,30 @@ The API returns standard HTTP status codes along with a plain-text response body
 
 ## 📖 Example Request
 
-Here is an example of submitting a standard text message using `curl`:
+If you used the generated Quick Start and configured an upstream provider, load its HTTP credentials before submitting a message:
 
 ```bash
-curl -G http://localhost:8080/sendsms \
-  --data-urlencode "username=myuser" \
-  --data-urlencode "password=example-password" \
+cd sendium
+set -a
+. ./.sendium.env
+set +a
+
+curl -i -G http://127.0.0.1:8080/sendsms \
+  --data-urlencode "username=${SENDIUM_HTTP_USER}" \
+  --data-urlencode "password=${SENDIUM_HTTP_PASSWORD}" \
   --data-urlencode "from=Sendium" \
   --data-urlencode "to=306910000000" \
   --data-urlencode "text=Hello from Sendium!"
 ```
 
+For a manual installation, replace the environment variables with the HTTP `systemId` and `password` from `credentials.yml`. Keep the endpoint local for evaluation. Before external use, terminate HTTPS at a trusted proxy and ensure proxy/access logs omit query strings because authentication credentials, addresses, and message content are URL parameters.
+
 **Example Successful Response (`202 Accepted`):**
 ```text
 123e4567-e89b-12d3-a456-426614174000
 ```
+
+`202 Accepted` means Sendium validated the message and inserted it into the router queue. It does not prove that a viable route exists, that an upstream SMSC accepted the message, or that a handset received it. Local-only Quick Start installations have no outbound route. Check routing configuration, the SMPP client connection, message lifecycle logs, submit response, and delivery receipt for those later stages.
 
 ## Related Documentation
 
