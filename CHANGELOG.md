@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/cytechmobile/sendium/compare/v0.4.0...v0.4.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **checkstyle:** remove obsolete JavadocStyle check ([f67d4ec](https://github.com/cytechmobile/sendium/commit/f67d4ecb6f9dd2636136a3d444a898e3d2641432))
+
 ## [0.4.0](https://github.com/cytechmobile/sendium/compare/v0.3.2...v0.4.0) (2026-08-12)
 
 
