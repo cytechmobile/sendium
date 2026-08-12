@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/cytechmobile/sendium/compare/v0.3.2...v0.4.0) (2026-08-12)
+
+
+### Features
+
+* add secure quick-start installer ([5a899f3](https://github.com/cytechmobile/sendium/commit/5a899f3df7d4ed59f649ce3cd1b72aaf97cb31b5))
+
 ## [0.3.2](https://github.com/cytechmobile/sendium/compare/v0.3.1...v0.3.2) (2026-07-09)
 
 
