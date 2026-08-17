@@ -5,10 +5,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.StandardMessage;
+import io.quarkus.arc.DefaultBean;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 import org.h2.mvstore.MVStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,8 +39,9 @@ import java.util.concurrent.TimeUnit;
  * before returning them so concurrent reconnect callbacks for the same systemId cannot enqueue the same DLR twice.
  */
 @ApplicationScoped
-public class InMemoryDlrService {
-    private static final Logger logger = LoggerFactory.getLogger(InMemoryDlrService.class);
+@DefaultBean
+public class MvStoreDlrStorage implements DlrStorage {
+    private static final Logger logger = LoggerFactory.getLogger(MvStoreDlrStorage.class);
     private static final long SEVEN_DAYS_MILLIS = TimeUnit.DAYS.toMillis(7);
     private static final long THREE_DAYS_MILLIS = TimeUnit.DAYS.toMillis(3);
     private static final long EXPIRY_CHECK_INTERVAL = TimeUnit.HOURS.toMillis(1);
@@ -51,9 +52,6 @@ public class InMemoryDlrService {
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     private static final TypeReference<List<String>> STRING_LIST_TYPE = new TypeReference<>() {
     };
-
-    @Inject
-    ForwardDlrService forwardDlrService;
 
     private final Object unpushedDlrStateLock = new Object();
     private final Set<String> claimedUnpushedDlrKeys = ConcurrentHashMap.newKeySet();
@@ -140,7 +138,7 @@ public class InMemoryDlrService {
 
     @PreDestroy
     void onStop() {
-        logger.info("InMemoryDlrService shutting down");
+        logger.info("MvStoreDlrStorage shutting down");
         saveAndClose();
     }
 
@@ -161,6 +159,7 @@ public class InMemoryDlrService {
         }
     }
 
+    @Override
     public void saveInitialState(MessageState context) {
         if (primaryStore != null) {
             checkExpiry();
@@ -174,6 +173,7 @@ public class InMemoryDlrService {
         }
     }
 
+    @Override
     public void linkOperatorId(String gatewayMsgId, String operatorMsgId) {
         checkExpiry();
         if (primaryStore == null || correlationIndex == null) {
@@ -222,7 +222,8 @@ public class InMemoryDlrService {
         }
     }
 
-    public Optional<MessageState> resolveAndRemoveDlr(String operatorMsgId, int dlrState) {
+    @Override
+    public Optional<MessageState> resolveAndRemoveDlr(String operatorMsgId, MessageState.MessageStatus status) {
         checkExpiry();
         if (correlationIndex == null || primaryStore == null) {
             return Optional.empty();
@@ -238,18 +239,13 @@ public class InMemoryDlrService {
             try {
                 MessageState state = mapper.readValue(stateJson, MessageState.class);
                 state.setTimestamp(System.currentTimeMillis());
-                state.setStatus(mapDlrStateToMessageStatus(dlrState));
+                state.setStatus(status);
 
                 primaryStore.remove(gatewayMsgId);
                 primaryTimestamps.remove(gatewayMsgId);
                 correlationIndex.remove(operatorMsgId);
                 correlationTimestamps.remove(operatorMsgId);
                 logger.debug("Resolved and removed DLR for gatewayMsgId: {}", gatewayMsgId);
-
-                String forwardUrl = state.getForwardDlrUrl();
-                if (forwardUrl != null && !forwardUrl.isEmpty()) {
-                    forwardDlrService.forwardDlr(state);
-                }
 
                 return Optional.of(state);
             } catch (JsonProcessingException e) {
@@ -261,16 +257,7 @@ public class InMemoryDlrService {
         return Optional.empty();
     }
 
-    private MessageState.MessageStatus mapDlrStateToMessageStatus(int dlrState) {
-        return switch (dlrState) {
-            case 1 -> MessageState.MessageStatus.DELIVERED;
-            case 2, 3, 4, 6, 7, 8 -> MessageState.MessageStatus.FAILED;
-            case 5, 9 -> MessageState.MessageStatus.ACCEPTED;
-            case 15 -> MessageState.MessageStatus.DELIVERED;
-            default -> MessageState.MessageStatus.FAILED;
-        };
-    }
-
+    @Override
     public Optional<MessageState> getState(String gatewayMsgId) {
         checkExpiry();
         if (primaryStore == null) {
@@ -288,6 +275,7 @@ public class InMemoryDlrService {
         return Optional.empty();
     }
 
+    @Override
     public boolean markAsFailed(String gatewayMsgId) {
         checkExpiry();
         if (primaryStore == null) {
@@ -312,6 +300,7 @@ public class InMemoryDlrService {
     /**
      * Persist a DLR that could not be pushed to the SMPP client.
      */
+    @Override
     public boolean saveUnpushedDlr(StandardMessage msg) {
         checkExpiry();
         if (unpushedDlrStore == null || unpushedDlrIndex == null || msg == null || msg.type != StandardMessage.MSG_DLR ||
@@ -338,6 +327,7 @@ public class InMemoryDlrService {
     /**
      * Load unpushed DLRs for one SMPP systemId without marking them for replay.
      */
+    @Override
     public List<StandardMessage> getUnpushedDlrs(String systemId) {
         return loadUnpushedDlrs(systemId, false);
     }
@@ -345,6 +335,7 @@ public class InMemoryDlrService {
     /**
      * Load and claim unpushed DLRs for replay. Claimed entries are hidden from later claims until removed or released.
      */
+    @Override
     public List<StandardMessage> claimUnpushedDlrs(String systemId) {
         return loadUnpushedDlrs(systemId, true);
     }
@@ -399,6 +390,7 @@ public class InMemoryDlrService {
     /**
      * Remove a replayed DLR from all unpushed-DLR maps.
      */
+    @Override
     public boolean removeUnpushedDlr(StandardMessage msg) {
         if (unpushedDlrStore == null || unpushedDlrIndex == null || msg == null || msg.systemId == null || msg.systemId.isBlank()) {
             return false;
@@ -420,6 +412,7 @@ public class InMemoryDlrService {
     /**
      * Make a claimed but not yet removed DLR eligible for a later replay attempt.
      */
+    @Override
     public void releaseUnpushedDlrClaim(StandardMessage msg) {
         if (msg == null || msg.systemId == null || msg.systemId.isBlank()) {
             return;

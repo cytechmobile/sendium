@@ -32,7 +32,7 @@ class InMemoryMessageTrackerTest {
     private WorkerResourceProvider workerResources;
 
     @Mock
-    private InMemoryDlrService dlrService;
+    private DlrService dlrService;
 
     private InMemoryMessageTracker tracker;
 
