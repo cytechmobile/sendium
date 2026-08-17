@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
+import gr.cytech.sendium.core.message.StandardMessage;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -15,6 +16,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -27,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @EnabledIfSystemProperty(named = "sendium.postgresql.tests", matches = "true")
-class PostgresqlMessageStateStorageTest {
+class PostgresqlDlrStorageTest {
     private static final String MIGRATION_LOCATION = "classpath:db/sendium-dlr/postgresql";
     private static final PostgreSQLContainer POSTGRESQL = new PostgreSQLContainer("postgres:17-alpine")
             .withDatabaseName("sendium")
@@ -36,7 +38,7 @@ class PostgresqlMessageStateStorageTest {
 
     private static DataSource dataSource;
 
-    private PostgresqlMessageStateStorage storage;
+    private PostgresqlDlrStorage storage;
 
     @BeforeAll
     static void startPostgresql() {
@@ -63,9 +65,9 @@ class PostgresqlMessageStateStorageTest {
     void resetStorage() throws SQLException {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE sendium_dlr.tracked_message CASCADE");
+            statement.execute("TRUNCATE sendium_dlr.tracked_message, sendium_dlr.unpushed_dlr CASCADE");
         }
-        storage = new PostgresqlMessageStateStorage(dataSource);
+        storage = new PostgresqlDlrStorage(dataSource);
     }
 
     @Test
@@ -186,8 +188,8 @@ class PostgresqlMessageStateStorageTest {
 
     @Test
     void linkOperatorIdFailsWhenGatewayStateDoesNotAppear() {
-        PostgresqlMessageStateStorage noRetryStorage =
-                new PostgresqlMessageStateStorage(dataSource, 1, 0);
+        PostgresqlDlrStorage noRetryStorage =
+                new PostgresqlDlrStorage(dataSource, 1, 0);
 
         assertThatThrownBy(() -> noRetryStorage.linkOperatorId(UUID.randomUUID().toString(), "operator"))
                 .isInstanceOf(DlrStorageException.class)
@@ -258,7 +260,7 @@ class PostgresqlMessageStateStorageTest {
         storage.linkOperatorId(correlationState.getGatewayMsgId(), "old-correlation");
         ageCorrelation("old-correlation");
 
-        PostgresqlMessageStateStorage correlationCleanup = new PostgresqlMessageStateStorage(dataSource);
+        PostgresqlDlrStorage correlationCleanup = new PostgresqlDlrStorage(dataSource);
         assertThat(correlationCleanup.getState(correlationState.getGatewayMsgId())).isPresent();
         assertThat(countCorrelations(correlationState.getGatewayMsgId())).isZero();
 
@@ -266,8 +268,143 @@ class PostgresqlMessageStateStorageTest {
         storage.saveInitialState(oldMessage);
         ageMessage(oldMessage.getGatewayMsgId());
 
-        PostgresqlMessageStateStorage messageCleanup = new PostgresqlMessageStateStorage(dataSource);
+        PostgresqlDlrStorage messageCleanup = new PostgresqlDlrStorage(dataSource);
         assertThat(messageCleanup.getState(oldMessage.getGatewayMsgId())).isEmpty();
+    }
+
+    @Test
+    void saveUnpushedDlrRoundTripsAllPersistedFields() {
+        StandardMessage dlr = newDlr("account-1", "system-1");
+
+        assertThat(storage.saveUnpushedDlr(dlr)).isTrue();
+
+        List<StandardMessage> stored = storage.getUnpushedDlrs("system-1");
+        assertThat(stored).singleElement().satisfies(actual -> {
+            assertThat(actual.type).isEqualTo(StandardMessage.MSG_DLR);
+            assertThat(actual.systemId).isEqualTo(dlr.systemId);
+            assertThat(actual.owner_id).isEqualTo(dlr.owner_id);
+            assertThat(actual.from).isEqualTo(dlr.from);
+            assertThat(actual.to).isEqualTo(dlr.to);
+            assertThat(actual.serial).isEqualTo(dlr.serial);
+            assertThat(actual.msgId).isEqualTo(dlr.msgId);
+            assertThat(actual.state).isEqualTo(dlr.state);
+            assertThat(actual.errcode).isEqualTo(dlr.errcode);
+            assertThat(actual.acked).isEqualTo(dlr.acked);
+            assertThat(actual.priority).isEqualTo(dlr.priority);
+            assertThat(actual.reassembledParts).containsExactlyElementsOf(dlr.reassembledParts);
+        });
+    }
+
+    @Test
+    void saveUnpushedDlrRejectsInvalidMessages() throws SQLException {
+        StandardMessage wrongType = newDlr("account-1", "system-1");
+        wrongType.type = StandardMessage.MSG_TEXT;
+        StandardMessage blankSystem = newDlr("account-1", " ");
+
+        assertThat(storage.saveUnpushedDlr(null)).isFalse();
+        assertThat(storage.saveUnpushedDlr(wrongType)).isFalse();
+        assertThat(storage.saveUnpushedDlr(blankSystem)).isFalse();
+        assertThat(countUnpushedDlrs()).isZero();
+    }
+
+    @Test
+    void saveUnpushedDlrOverwritesSameReplayKey() throws SQLException {
+        StandardMessage initial = newDlr("account-1", "system-1");
+        storage.saveUnpushedDlr(initial);
+
+        StandardMessage replacement = newDlr("replacement-account", initial.systemId);
+        replacement.serial = initial.serial;
+        replacement.msgId = initial.msgId;
+        replacement.state = initial.state;
+        replacement.errcode = initial.errcode;
+        replacement.priority = 9;
+        replacement.reassembledParts = new ArrayList<>(List.of("replacement-part"));
+        storage.saveUnpushedDlr(replacement);
+
+        assertThat(countUnpushedDlrs()).isOne();
+        assertThat(storage.getUnpushedDlrs(initial.systemId))
+                .singleElement()
+                .satisfies(actual -> {
+                    assertThat(actual.owner_id).isEqualTo("replacement-account");
+                    assertThat(actual.priority).isEqualTo(9);
+                    assertThat(actual.reassembledParts).containsExactly("replacement-part");
+                });
+    }
+
+    @Test
+    void unpushedDlrsAreFilteredAndSurviveAdapterRecreation() {
+        StandardMessage first = newDlr("account-1", "system-1");
+        StandardMessage second = newDlr("account-2", "system-2");
+        storage.saveUnpushedDlr(first);
+        storage.saveUnpushedDlr(second);
+
+        PostgresqlDlrStorage recreated = new PostgresqlDlrStorage(dataSource);
+
+        assertThat(recreated.getUnpushedDlrs("system-1"))
+                .extracting(message -> message.serial)
+                .containsExactly(first.serial);
+        assertThat(recreated.getUnpushedDlrs("system-2"))
+                .extracting(message -> message.serial)
+                .containsExactly(second.serial);
+        assertThat(recreated.getUnpushedDlrs("missing-system")).isEmpty();
+    }
+
+    @Test
+    void claimHidesReceiptUntilReleasedOrRemoved() {
+        StandardMessage dlr = newDlr("account-1", "system-1");
+        storage.saveUnpushedDlr(dlr);
+
+        List<StandardMessage> firstClaim = storage.claimUnpushedDlrs(dlr.systemId);
+
+        assertThat(firstClaim).hasSize(1);
+        assertThat(storage.claimUnpushedDlrs(dlr.systemId)).isEmpty();
+        assertThat(storage.getUnpushedDlrs(dlr.systemId)).hasSize(1);
+
+        storage.releaseUnpushedDlrClaim(firstClaim.getFirst());
+        List<StandardMessage> releasedClaim = storage.claimUnpushedDlrs(dlr.systemId);
+        assertThat(releasedClaim).hasSize(1);
+        assertThat(storage.removeUnpushedDlr(releasedClaim.getFirst())).isTrue();
+        assertThat(storage.removeUnpushedDlr(releasedClaim.getFirst())).isFalse();
+        assertThat(storage.getUnpushedDlrs(dlr.systemId)).isEmpty();
+    }
+
+    @Test
+    void concurrentClaimsReturnReceiptOnlyOnce() throws Exception {
+        StandardMessage dlr = newDlr("account-1", "system-1");
+        storage.saveUnpushedDlr(dlr);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<List<StandardMessage>> first = executor.submit(
+                    () -> claimWhenReleased(dlr.systemId, ready, start));
+            Future<List<StandardMessage>> second = executor.submit(
+                    () -> claimWhenReleased(dlr.systemId, ready, start));
+            ready.await();
+            start.countDown();
+
+            assertThat(List.of(first.get(), second.get()).stream().filter(claim -> !claim.isEmpty()).count())
+                    .isOne();
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void expiryRemovesOldUnpushedDlrsAndTheirClaims() throws SQLException {
+        StandardMessage dlr = newDlr("account-1", "system-1");
+        storage.saveUnpushedDlr(dlr);
+        storage = new PostgresqlDlrStorage(dataSource, 20, 200, 0);
+        assertThat(storage.claimUnpushedDlrs(dlr.systemId)).hasSize(1);
+        ageUnpushedDlr(dlr.serial);
+
+        assertThat(storage.getUnpushedDlrs(dlr.systemId)).isEmpty();
+        assertThat(countUnpushedDlrs()).isZero();
+
+        assertThat(storage.saveUnpushedDlr(dlr)).isTrue();
+        assertThat(storage.claimUnpushedDlrs(dlr.systemId)).hasSize(1);
+        assertThat(storage.claimUnpushedDlrs(dlr.systemId)).isEmpty();
     }
 
     private Optional<MessageState> resolveWhenReleased(String operatorMsgId, CountDownLatch ready,
@@ -277,9 +414,33 @@ class PostgresqlMessageStateStorageTest {
         return storage.resolveAndRemoveDlr(operatorMsgId, MessageState.MessageStatus.DELIVERED);
     }
 
+    private List<StandardMessage> claimWhenReleased(String systemId, CountDownLatch ready,
+                                                     CountDownLatch start) throws InterruptedException {
+        ready.countDown();
+        start.await();
+        return storage.claimUnpushedDlrs(systemId);
+    }
+
     private MessageState newState() {
         return new MessageState(UUID.randomUUID().toString(), "account", "system", "source", "destination",
                 "https://example.test/dlr");
+    }
+
+    private StandardMessage newDlr(String accountId, String systemId) {
+        StandardMessage dlr = new StandardMessage();
+        dlr.type = StandardMessage.MSG_DLR;
+        dlr.systemId = systemId;
+        dlr.owner_id = accountId;
+        dlr.from = "source";
+        dlr.to = "destination";
+        dlr.serial = UUID.randomUUID().toString();
+        dlr.msgId = 42;
+        dlr.state = 1;
+        dlr.errcode = "000";
+        dlr.acked = true;
+        dlr.priority = 3;
+        dlr.reassembledParts = new ArrayList<>(List.of("part-1", "part-2"));
+        return dlr;
     }
 
     private int countCorrelations(String gatewayMsgId) throws SQLException {
@@ -294,6 +455,15 @@ class PostgresqlMessageStateStorageTest {
                 resultSet.next();
                 return resultSet.getInt(1);
             }
+        }
+    }
+
+    private int countUnpushedDlrs() throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM sendium_dlr.unpushed_dlr")) {
+            resultSet.next();
+            return resultSet.getInt(1);
         }
     }
 
@@ -317,6 +487,18 @@ class PostgresqlMessageStateStorageTest {
                      WHERE gateway_message_id = ?
                      """)) {
             statement.setObject(1, UUID.fromString(gatewayMsgId));
+            statement.executeUpdate();
+        }
+    }
+
+    private void ageUnpushedDlr(String serial) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE sendium_dlr.unpushed_dlr
+                     SET created_at = CURRENT_TIMESTAMP - INTERVAL '8 days'
+                     WHERE serial = ?
+                     """)) {
+            statement.setString(1, serial);
             statement.executeUpdate();
         }
     }

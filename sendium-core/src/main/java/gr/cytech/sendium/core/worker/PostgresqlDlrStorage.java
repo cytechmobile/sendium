@@ -1,5 +1,7 @@
 package gr.cytech.sendium.core.worker;
 
+import gr.cytech.sendium.core.message.StandardMessage;
+
 import javax.sql.DataSource;
 import java.sql.Array;
 import java.sql.Connection;
@@ -12,10 +14,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-public class PostgresqlMessageStateStorage implements DlrMessageStorage {
+public class PostgresqlDlrStorage implements DlrStorage {
     private static final int DEFAULT_LINK_MAX_ATTEMPTS = 20;
     private static final long DEFAULT_LINK_RETRY_INTERVAL_MILLIS = 200;
     private static final long EXPIRY_CHECK_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(1);
@@ -98,23 +102,72 @@ public class PostgresqlMessageStateStorage implements DlrMessageStorage {
             WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
             """;
 
+    private static final String SAVE_UNPUSHED_DLR_SQL = """
+            INSERT INTO sendium_dlr.unpushed_dlr
+                (dlr_key, system_id, account_id, source_address, destination_address, serial,
+                 message_id, dlr_state, error_code, acked, priority, reassembled_parts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (dlr_key) DO UPDATE SET
+                system_id = EXCLUDED.system_id,
+                account_id = EXCLUDED.account_id,
+                source_address = EXCLUDED.source_address,
+                destination_address = EXCLUDED.destination_address,
+                serial = EXCLUDED.serial,
+                message_id = EXCLUDED.message_id,
+                dlr_state = EXCLUDED.dlr_state,
+                error_code = EXCLUDED.error_code,
+                acked = EXCLUDED.acked,
+                priority = EXCLUDED.priority,
+                reassembled_parts = EXCLUDED.reassembled_parts,
+                created_at = CURRENT_TIMESTAMP
+            """;
+
+    private static final String GET_UNPUSHED_DLRS_SQL = """
+            SELECT dlr_key, system_id, account_id, source_address, destination_address, serial,
+                   message_id, dlr_state, error_code, acked, priority, reassembled_parts
+            FROM sendium_dlr.unpushed_dlr
+            WHERE system_id = ?
+            ORDER BY created_at, dlr_key
+            """;
+
+    private static final String DELETE_UNPUSHED_DLR_SQL = """
+            DELETE FROM sendium_dlr.unpushed_dlr
+            WHERE dlr_key = ?
+            """;
+
+    private static final String DELETE_EXPIRED_UNPUSHED_DLRS_SQL = """
+            DELETE FROM sendium_dlr.unpushed_dlr
+            WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
+            RETURNING dlr_key
+            """;
+
     private final DataSource dataSource;
     private final int linkMaxAttempts;
     private final long linkRetryIntervalMillis;
+    private final long expiryCheckIntervalMillis;
+    private final Object unpushedDlrStateLock = new Object();
+    private final Set<String> claimedUnpushedDlrKeys = ConcurrentHashMap.newKeySet();
     private volatile long lastExpiryCheck;
 
-    public PostgresqlMessageStateStorage(DataSource dataSource) {
-        this(dataSource, DEFAULT_LINK_MAX_ATTEMPTS, DEFAULT_LINK_RETRY_INTERVAL_MILLIS);
+    public PostgresqlDlrStorage(DataSource dataSource) {
+        this(dataSource, DEFAULT_LINK_MAX_ATTEMPTS, DEFAULT_LINK_RETRY_INTERVAL_MILLIS,
+                EXPIRY_CHECK_INTERVAL_MILLIS);
     }
 
-    PostgresqlMessageStateStorage(DataSource dataSource, int linkMaxAttempts,
-                                  long linkRetryIntervalMillis) {
+    PostgresqlDlrStorage(DataSource dataSource, int linkMaxAttempts,
+                         long linkRetryIntervalMillis) {
+        this(dataSource, linkMaxAttempts, linkRetryIntervalMillis, EXPIRY_CHECK_INTERVAL_MILLIS);
+    }
+
+    PostgresqlDlrStorage(DataSource dataSource, int linkMaxAttempts,
+                         long linkRetryIntervalMillis, long expiryCheckIntervalMillis) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
-        if (linkMaxAttempts < 1 || linkRetryIntervalMillis < 0) {
-            throw new IllegalArgumentException("Invalid operator-link retry policy");
+        if (linkMaxAttempts < 1 || linkRetryIntervalMillis < 0 || expiryCheckIntervalMillis < 0) {
+            throw new IllegalArgumentException("Invalid storage retry or expiry policy");
         }
         this.linkMaxAttempts = linkMaxAttempts;
         this.linkRetryIntervalMillis = linkRetryIntervalMillis;
+        this.expiryCheckIntervalMillis = expiryCheckIntervalMillis;
     }
 
     @Override
@@ -209,6 +262,135 @@ public class PostgresqlMessageStateStorage implements DlrMessageStorage {
         } catch (SQLException e) {
             throw failure("mark DLR state as failed", e);
         }
+    }
+
+    @Override
+    public boolean saveUnpushedDlr(StandardMessage message) {
+        checkExpiry();
+        if (!isValidUnpushedDlr(message)) {
+            return false;
+        }
+
+        UnpushedDlr dlr = UnpushedDlr.fromMessage(message);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(SAVE_UNPUSHED_DLR_SQL)) {
+            statement.setString(1, getUnpushedDlrKey(message));
+            statement.setString(2, dlr.systemId);
+            statement.setString(3, dlr.accountId);
+            statement.setString(4, dlr.from);
+            statement.setString(5, dlr.to);
+            statement.setString(6, dlr.serial);
+            statement.setInt(7, dlr.msgId);
+            statement.setInt(8, dlr.state);
+            statement.setString(9, dlr.errcode);
+            statement.setBoolean(10, dlr.acked);
+            statement.setInt(11, dlr.priority);
+            setStringArray(connection, statement, 12, dlr.reassembledParts);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw failure("save unpushed DLR", e);
+        }
+    }
+
+    @Override
+    public List<StandardMessage> getUnpushedDlrs(String systemId) {
+        return loadUnpushedDlrs(systemId, false);
+    }
+
+    @Override
+    public List<StandardMessage> claimUnpushedDlrs(String systemId) {
+        return loadUnpushedDlrs(systemId, true);
+    }
+
+    @Override
+    public boolean removeUnpushedDlr(StandardMessage message) {
+        if (!isValidUnpushedDlr(message)) {
+            return false;
+        }
+
+        String key = getUnpushedDlrKey(message);
+        synchronized (unpushedDlrStateLock) {
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(DELETE_UNPUSHED_DLR_SQL)) {
+                statement.setString(1, key);
+                boolean removed = statement.executeUpdate() == 1;
+                claimedUnpushedDlrKeys.remove(key);
+                return removed;
+            } catch (SQLException e) {
+                throw failure("remove unpushed DLR", e);
+            }
+        }
+    }
+
+    @Override
+    public void releaseUnpushedDlrClaim(StandardMessage message) {
+        if (!isValidUnpushedDlr(message)) {
+            return;
+        }
+
+        synchronized (unpushedDlrStateLock) {
+            claimedUnpushedDlrKeys.remove(getUnpushedDlrKey(message));
+        }
+    }
+
+    private List<StandardMessage> loadUnpushedDlrs(String systemId, boolean claimForReplay) {
+        checkExpiry();
+        if (systemId == null || systemId.isBlank()) {
+            return List.of();
+        }
+
+        synchronized (unpushedDlrStateLock) {
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(GET_UNPUSHED_DLRS_SQL)) {
+                statement.setString(1, systemId);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    List<StandardMessage> messages = new ArrayList<>();
+                    while (resultSet.next()) {
+                        String key = resultSet.getString("dlr_key");
+                        if (!claimForReplay || claimedUnpushedDlrKeys.add(key)) {
+                            messages.add(readUnpushedDlr(resultSet).toMessage());
+                        }
+                    }
+                    return messages;
+                }
+            } catch (SQLException e) {
+                throw failure("read unpushed DLRs", e);
+            }
+        }
+    }
+
+    private UnpushedDlr readUnpushedDlr(ResultSet resultSet) throws SQLException {
+        UnpushedDlr dlr = new UnpushedDlr();
+        dlr.systemId = resultSet.getString("system_id");
+        dlr.accountId = resultSet.getString("account_id");
+        dlr.from = resultSet.getString("source_address");
+        dlr.to = resultSet.getString("destination_address");
+        dlr.serial = resultSet.getString("serial");
+        dlr.msgId = resultSet.getInt("message_id");
+        dlr.state = resultSet.getInt("dlr_state");
+        dlr.errcode = resultSet.getString("error_code");
+        dlr.acked = resultSet.getBoolean("acked");
+        dlr.priority = resultSet.getInt("priority");
+        dlr.reassembledParts = readStringArray(resultSet, "reassembled_parts");
+        return dlr;
+    }
+
+    private boolean isValidUnpushedDlr(StandardMessage message) {
+        return message != null && message.type == StandardMessage.MSG_DLR &&
+                message.systemId != null && !message.systemId.isBlank();
+    }
+
+    private String getUnpushedDlrKey(StandardMessage message) {
+        return String.join("|",
+                nullToEmpty(message.systemId),
+                nullToEmpty(message.serial),
+                String.valueOf(message.state),
+                nullToEmpty(message.errcode),
+                String.valueOf(message.msgId));
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 
     private boolean tryLinkOperatorId(UUID gatewayMsgId, String operatorMsgId) {
@@ -355,11 +537,11 @@ public class PostgresqlMessageStateStorage implements DlrMessageStorage {
 
     private void checkExpiry() {
         long now = System.currentTimeMillis();
-        if (now - lastExpiryCheck < EXPIRY_CHECK_INTERVAL_MILLIS) {
+        if (now - lastExpiryCheck < expiryCheckIntervalMillis) {
             return;
         }
         synchronized (this) {
-            if (now - lastExpiryCheck < EXPIRY_CHECK_INTERVAL_MILLIS) {
+            if (now - lastExpiryCheck < expiryCheckIntervalMillis) {
                 return;
             }
             deleteExpiredState();
@@ -368,19 +550,29 @@ public class PostgresqlMessageStateStorage implements DlrMessageStorage {
     }
 
     private void deleteExpiredState() {
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-            try (PreparedStatement correlations = connection.prepareStatement(DELETE_EXPIRED_CORRELATIONS_SQL);
-                 PreparedStatement messages = connection.prepareStatement(DELETE_EXPIRED_MESSAGES_SQL)) {
-                correlations.executeUpdate();
-                messages.executeUpdate();
-                connection.commit();
+        synchronized (unpushedDlrStateLock) {
+            List<String> expiredUnpushedDlrKeys = new ArrayList<>();
+            try (Connection connection = dataSource.getConnection()) {
+                connection.setAutoCommit(false);
+                try (PreparedStatement correlations = connection.prepareStatement(DELETE_EXPIRED_CORRELATIONS_SQL);
+                     PreparedStatement messages = connection.prepareStatement(DELETE_EXPIRED_MESSAGES_SQL);
+                     PreparedStatement unpushedDlrs = connection.prepareStatement(DELETE_EXPIRED_UNPUSHED_DLRS_SQL)) {
+                    correlations.executeUpdate();
+                    messages.executeUpdate();
+                    try (ResultSet resultSet = unpushedDlrs.executeQuery()) {
+                        while (resultSet.next()) {
+                            expiredUnpushedDlrKeys.add(resultSet.getString("dlr_key"));
+                        }
+                    }
+                    connection.commit();
+                    claimedUnpushedDlrKeys.removeAll(expiredUnpushedDlrKeys);
+                } catch (SQLException e) {
+                    rollback(connection, e);
+                    throw e;
+                }
             } catch (SQLException e) {
-                rollback(connection, e);
-                throw e;
+                throw failure("expire DLR state", e);
             }
-        } catch (SQLException e) {
-            throw failure("expire DLR state", e);
         }
     }
 
