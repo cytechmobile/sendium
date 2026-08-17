@@ -5,10 +5,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.StandardMessage;
-import io.quarkus.arc.DefaultBean;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Typed;
+import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.h2.mvstore.MVStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,7 +41,7 @@ import java.util.concurrent.TimeUnit;
  * before returning them so concurrent reconnect callbacks for the same systemId cannot enqueue the same DLR twice.
  */
 @ApplicationScoped
-@DefaultBean
+@Typed(MvStoreDlrStorage.class)
 public class MvStoreDlrStorage implements DlrStorage {
     private static final Logger logger = LoggerFactory.getLogger(MvStoreDlrStorage.class);
     private static final long SEVEN_DAYS_MILLIS = TimeUnit.DAYS.toMillis(7);
@@ -55,6 +57,10 @@ public class MvStoreDlrStorage implements DlrStorage {
 
     private final Object unpushedDlrStateLock = new Object();
     private final Set<String> claimedUnpushedDlrKeys = ConcurrentHashMap.newKeySet();
+
+    @Inject
+    @ConfigProperty(name = DB_PATH_PROPERTY, defaultValue = DEFAULT_DB_PATH)
+    private String configuredDbPath;
 
     private MVStore store;
 
@@ -72,7 +78,9 @@ public class MvStoreDlrStorage implements DlrStorage {
 
     @PostConstruct
     void init() {
-        String dbPath = System.getProperty(DB_PATH_PROPERTY, DEFAULT_DB_PATH);
+        String dbPath = configuredDbPath != null ?
+                configuredDbPath
+                : System.getProperty(DB_PATH_PROPERTY, DEFAULT_DB_PATH);
         File dbFile = new File(dbPath);
         File dbDir = dbFile.getParentFile();
 
