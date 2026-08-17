@@ -61,7 +61,7 @@ The API returns standard HTTP status codes along with a plain-text response body
 | **`400 Bad Request`** | **Error** | Missing a required parameter (`to`, `from`, or `text`). The response body details which parameter is missing. |
 | **`401 Unauthorized`** | **Error** | Invalid or missing credentials. |
 | **`500 Server Error`** | **Error** | An internal error occurred while parsing or processing the message payload. |
-| **`503 Unavailable`** | **Error** | Temporal failure (e.g., the internal queue was interrupted). The client should retry later. |
+| **`503 Unavailable`** | **Error** | Required delivery-receipt state could not be persisted or internal queue admission was interrupted. The message was not queued; the client should retry later. |
 
 ---
 
@@ -90,7 +90,7 @@ For a manual installation, replace the environment variables with the HTTP `syst
 123e4567-e89b-12d3-a456-426614174000
 ```
 
-`202 Accepted` means Sendium validated the message and inserted it into the router queue. It does not prove that a viable route exists, that an upstream SMSC accepted the message, or that a handset received it. Local-only Quick Start installations have no outbound route. Check routing configuration, the SMPP client connection, message lifecycle logs, submit response, and delivery receipt for those later stages.
+`202 Accepted` means Sendium validated the message, persisted its required delivery-receipt state, and inserted it into the router queue. It does not prove that a viable route exists, that an upstream SMSC accepted the message, or that a handset received it. Local-only Quick Start installations have no outbound route. Check routing configuration, the SMPP client connection, message lifecycle logs, submit response, and delivery receipt for those later stages.
 
 ## Related Documentation
 
