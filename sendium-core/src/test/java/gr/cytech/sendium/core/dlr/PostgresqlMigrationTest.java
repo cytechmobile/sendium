@@ -133,7 +133,7 @@ class PostgresqlMigrationTest {
             insertCompleteUnpushedDlr(connection);
 
             try (PreparedStatement statement = connection.prepareStatement("""
-                         SELECT gateway_message_id, reassembled_parts, created_at, updated_at
+                         SELECT gateway_message_id, operator_message_id, reassembled_parts, created_at, updated_at
                          FROM sendium_dlr.tracked_message
                          WHERE gateway_message_id = ?
                          """)) {
@@ -142,6 +142,7 @@ class PostgresqlMigrationTest {
                     assertThat(resultSet.next()).isTrue();
                     assertThat(resultSet.getObject("gateway_message_id", UUID.class))
                             .isEqualTo(COMPLETE_GATEWAY_ID);
+                    assertThat(resultSet.getString("operator_message_id")).isNull();
                     assertThat((String[]) resultSet.getArray("reassembled_parts").getArray())
                             .containsExactly("part-1", "part-2");
                     assertThat(resultSet.getObject("created_at")).isNotNull();
