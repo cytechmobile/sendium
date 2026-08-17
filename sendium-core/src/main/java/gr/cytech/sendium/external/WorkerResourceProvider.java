@@ -4,8 +4,8 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.queue.QueueProvider;
 import gr.cytech.sendium.core.smpp.client.SmppClientHolder;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.ForwardMoService;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
 import io.quarkus.arc.DefaultBean;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -25,7 +25,7 @@ public class WorkerResourceProvider {
 
     @Inject InMemoryQueueProvider queueProvider;
     @Inject CredentialFileWatcher  credentialFileWatcher;
-    @Inject InMemoryDlrService dlrService;
+    @Inject DlrService dlrService;
     @Inject ForwardMoService forwardMoService;
     @Inject SmppClientHolder smppClientHolder;
 
@@ -40,7 +40,7 @@ public class WorkerResourceProvider {
         return credentialFileWatcher;
     }
 
-    public InMemoryDlrService getDlrService() {
+    public DlrService getDlrService() {
         return dlrService;
     }
 

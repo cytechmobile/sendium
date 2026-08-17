@@ -5,7 +5,7 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.util.MessageTrace;
 import jakarta.annotation.security.PermitAll;
@@ -44,7 +44,7 @@ public class KannelResource {
     CredentialFileWatcher credentialFileWatcher;
 
     @Inject
-    InMemoryDlrService dlrService;
+    DlrService dlrService;
 
     @Inject
     SendiumConfigurationHandler configurationHandler;
