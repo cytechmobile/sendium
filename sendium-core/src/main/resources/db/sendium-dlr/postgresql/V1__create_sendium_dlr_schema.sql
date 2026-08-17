@@ -6,6 +6,7 @@ CREATE TABLE sendium_dlr.tracked_message (
     system_id TEXT,
     source_address TEXT,
     destination_address TEXT,
+    operator_message_id TEXT,
     forward_dlr_url TEXT,
     reassembled_parts TEXT[],
     status TEXT NOT NULL,
