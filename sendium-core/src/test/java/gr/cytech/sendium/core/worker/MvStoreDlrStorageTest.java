@@ -14,9 +14,9 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class InMemoryDlrServiceTest {
+class MvStoreDlrStorageTest {
 
-    private InMemoryDlrService dlrService;
+    private MvStoreDlrStorage storage;
     private Path dbPath;
     private String oldDbPath;
 
@@ -26,14 +26,14 @@ class InMemoryDlrServiceTest {
         dbPath = Files.createTempFile("dlr-service-test", ".db");
         Files.deleteIfExists(dbPath);
         System.setProperty("sendium.dlr.db.path", dbPath.toString());
-        dlrService = new InMemoryDlrService();
-        dlrService.init();
+        storage = new MvStoreDlrStorage();
+        storage.init();
     }
 
     @AfterEach
     void tearDown() throws Exception {
-        if (dlrService != null) {
-            dlrService.onStop();
+        if (storage != null) {
+            storage.onStop();
         }
         if (oldDbPath == null) {
             System.clearProperty("sendium.dlr.db.path");
@@ -49,18 +49,18 @@ class InMemoryDlrServiceTest {
     void saveInitialState_StoresInPrimaryStore() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
 
-        dlrService.saveInitialState(state);
+        storage.saveInitialState(state);
 
-        assertEquals(1, dlrService.getPrimaryStoreSize());
+        assertEquals(1, storage.getPrimaryStoreSize());
     }
 
     @Test
     void saveInitialState_SetsTimestamp() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
 
-        dlrService.saveInitialState(state);
+        storage.saveInitialState(state);
 
-        Optional<MessageState> retrieved = dlrService.getState("gw-123");
+        Optional<MessageState> retrieved = storage.getState("gw-123");
         assertTrue(retrieved.isPresent());
         assertTrue(retrieved.get().getTimestamp() > 0);
     }
@@ -68,21 +68,21 @@ class InMemoryDlrServiceTest {
     @Test
     void linkOperatorId_LinksCorrelation() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
-        dlrService.saveInitialState(state);
+        storage.saveInitialState(state);
 
-        dlrService.linkOperatorId("gw-123", "op-456");
+        storage.linkOperatorId("gw-123", "op-456");
 
-        assertEquals(1, dlrService.getCorrelationIndexSize());
+        assertEquals(1, storage.getCorrelationIndexSize());
     }
 
     @Test
     void linkOperatorId_UpdatesStatusToSent() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
-        dlrService.saveInitialState(state);
+        storage.saveInitialState(state);
 
-        dlrService.linkOperatorId("gw-123", "op-456");
+        storage.linkOperatorId("gw-123", "op-456");
 
-        Optional<MessageState> retrieved = dlrService.getState("gw-123");
+        Optional<MessageState> retrieved = storage.getState("gw-123");
         assertTrue(retrieved.isPresent());
         assertEquals(MessageState.MessageStatus.SENT, retrieved.get().getStatus());
     }
@@ -90,19 +90,25 @@ class InMemoryDlrServiceTest {
     @Test
     void resolveAndRemoveDlr_ReturnsAndRemoves() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
-        dlrService.saveInitialState(state);
-        dlrService.linkOperatorId("gw-123", "op-456");
+        storage.saveInitialState(state);
+        storage.linkOperatorId("gw-123", "op-456");
 
-        Optional<MessageState> result = dlrService.resolveAndRemoveDlr("op-456", 1);
+        long beforeResolve = System.currentTimeMillis();
+        Optional<MessageState> result = storage.resolveAndRemoveDlr(
+                "op-456", MessageState.MessageStatus.DELIVERED);
 
         assertTrue(result.isPresent());
-        assertEquals(0, dlrService.getPrimaryStoreSize());
-        assertEquals(0, dlrService.getCorrelationIndexSize());
+        assertEquals(MessageState.MessageStatus.DELIVERED, result.get().getStatus());
+        assertEquals("op-456", result.get().getOperatorMsgId());
+        assertTrue(result.get().getTimestamp() >= beforeResolve);
+        assertEquals(0, storage.getPrimaryStoreSize());
+        assertEquals(0, storage.getCorrelationIndexSize());
     }
 
     @Test
     void resolveAndRemoveDlr_MissingId_ReturnsEmpty() {
-        Optional<MessageState> result = dlrService.resolveAndRemoveDlr("unknown", 1);
+        Optional<MessageState> result = storage.resolveAndRemoveDlr(
+                "unknown", MessageState.MessageStatus.DELIVERED);
 
         assertTrue(result.isEmpty());
     }
@@ -110,9 +116,9 @@ class InMemoryDlrServiceTest {
     @Test
     void getState_ReturnsWrappedState() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
-        dlrService.saveInitialState(state);
+        storage.saveInitialState(state);
 
-        Optional<MessageState> result = dlrService.getState("gw-123");
+        Optional<MessageState> result = storage.getState("gw-123");
 
         assertTrue(result.isPresent());
         assertEquals("gw-123", result.get().getGatewayMsgId());
@@ -120,7 +126,7 @@ class InMemoryDlrServiceTest {
 
     @Test
     void getState_MissingId_ReturnsEmpty() {
-        Optional<MessageState> result = dlrService.getState("unknown");
+        Optional<MessageState> result = storage.getState("unknown");
 
         assertTrue(result.isEmpty());
     }
@@ -128,19 +134,19 @@ class InMemoryDlrServiceTest {
     @Test
     void markAsFailed_UpdatesStatusToFailed() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
-        dlrService.saveInitialState(state);
+        storage.saveInitialState(state);
 
-        boolean result = dlrService.markAsFailed("gw-123");
+        boolean result = storage.markAsFailed("gw-123");
 
         assertTrue(result);
-        Optional<MessageState> updated = dlrService.getState("gw-123");
+        Optional<MessageState> updated = storage.getState("gw-123");
         assertTrue(updated.isPresent());
         assertEquals(MessageState.MessageStatus.FAILED, updated.get().getStatus());
     }
 
     @Test
     void markAsFailed_MissingId_ReturnsFalse() {
-        boolean result = dlrService.markAsFailed("unknown");
+        boolean result = storage.markAsFailed("unknown");
 
         assertFalse(result);
     }
@@ -149,8 +155,8 @@ class InMemoryDlrServiceTest {
     void saveUnpushedDlr_StoresAndReturnsMatchingDlr() {
         StandardMessage dlr = createDlr("account1", "sys1");
 
-        boolean result = dlrService.saveUnpushedDlr(dlr);
-        List<StandardMessage> dlrs = dlrService.getUnpushedDlrs("sys1");
+        boolean result = storage.saveUnpushedDlr(dlr);
+        List<StandardMessage> dlrs = storage.getUnpushedDlrs("sys1");
 
         assertTrue(result);
         assertTrue(dlrs.stream().anyMatch(msg -> dlr.serial.equals(msg.serial)));
@@ -160,14 +166,14 @@ class InMemoryDlrServiceTest {
         assertEquals(dlr.acked, stored.acked);
         assertEquals(dlr.priority, stored.priority);
         assertEquals(dlr.reassembledParts, stored.reassembledParts);
-        assertEquals(1, dlrService.getUnpushedDlrIndexSize());
+        assertEquals(1, storage.getUnpushedDlrIndexSize());
     }
 
     @Test
     void saveUnpushedDlr_BlankSystemIdReturnsFalse() {
         StandardMessage dlr = createDlr("account1", null);
 
-        boolean result = dlrService.saveUnpushedDlr(dlr);
+        boolean result = storage.saveUnpushedDlr(dlr);
 
         assertFalse(result);
     }
@@ -175,9 +181,9 @@ class InMemoryDlrServiceTest {
     @Test
     void getUnpushedDlrs_DifferentSystemIdDoesNotMatch() {
         StandardMessage dlr = createDlr("account1", "sys1");
-        dlrService.saveUnpushedDlr(dlr);
+        storage.saveUnpushedDlr(dlr);
 
-        List<StandardMessage> dlrs = dlrService.getUnpushedDlrs("sys2");
+        List<StandardMessage> dlrs = storage.getUnpushedDlrs("sys2");
 
         assertFalse(dlrs.stream().anyMatch(msg -> dlr.serial.equals(msg.serial)));
     }
@@ -186,12 +192,12 @@ class InMemoryDlrServiceTest {
     void getUnpushedDlrs_UsesSystemIdIndex() {
         StandardMessage sys1Dlr = createDlr("account1", "sys1");
         StandardMessage sys2Dlr = createDlr("account2", "sys2");
-        dlrService.saveUnpushedDlr(sys1Dlr);
-        dlrService.saveUnpushedDlr(sys2Dlr);
+        storage.saveUnpushedDlr(sys1Dlr);
+        storage.saveUnpushedDlr(sys2Dlr);
 
-        List<StandardMessage> dlrs = dlrService.getUnpushedDlrs("sys1");
+        List<StandardMessage> dlrs = storage.getUnpushedDlrs("sys1");
 
-        assertEquals(2, dlrService.getUnpushedDlrIndexSize());
+        assertEquals(2, storage.getUnpushedDlrIndexSize());
         assertTrue(dlrs.stream().anyMatch(msg -> sys1Dlr.serial.equals(msg.serial)));
         assertFalse(dlrs.stream().anyMatch(msg -> sys2Dlr.serial.equals(msg.serial)));
     }
@@ -199,25 +205,25 @@ class InMemoryDlrServiceTest {
     @Test
     void removeUnpushedDlr_RemovesStoredDlr() {
         StandardMessage dlr = createDlr("account1", "sys1");
-        dlrService.saveUnpushedDlr(dlr);
+        storage.saveUnpushedDlr(dlr);
 
-        boolean result = dlrService.removeUnpushedDlr(dlr);
-        List<StandardMessage> dlrs = dlrService.getUnpushedDlrs("sys1");
+        boolean result = storage.removeUnpushedDlr(dlr);
+        List<StandardMessage> dlrs = storage.getUnpushedDlrs("sys1");
 
         assertTrue(result);
         assertFalse(dlrs.stream().anyMatch(msg -> dlr.serial.equals(msg.serial)));
-        assertEquals(0, dlrService.getUnpushedDlrIndexSize());
+        assertEquals(0, storage.getUnpushedDlrIndexSize());
     }
 
     @Test
     void claimUnpushedDlrs_HidesClaimedDlrUntilReleased() {
         StandardMessage dlr = createDlr("account1", "sys1");
-        dlrService.saveUnpushedDlr(dlr);
+        storage.saveUnpushedDlr(dlr);
 
-        List<StandardMessage> firstClaim = dlrService.claimUnpushedDlrs("sys1");
-        List<StandardMessage> secondClaim = dlrService.claimUnpushedDlrs("sys1");
-        dlrService.releaseUnpushedDlrClaim(firstClaim.getFirst());
-        List<StandardMessage> afterRelease = dlrService.claimUnpushedDlrs("sys1");
+        List<StandardMessage> firstClaim = storage.claimUnpushedDlrs("sys1");
+        List<StandardMessage> secondClaim = storage.claimUnpushedDlrs("sys1");
+        storage.releaseUnpushedDlrClaim(firstClaim.getFirst());
+        List<StandardMessage> afterRelease = storage.claimUnpushedDlrs("sys1");
 
         assertEquals(1, firstClaim.size());
         assertTrue(secondClaim.isEmpty());
@@ -229,38 +235,38 @@ class InMemoryDlrServiceTest {
     void unpushedDlrs_SurviveRestart() throws Exception {
         StandardMessage dlr = createDlr("account-restart", "sys-restart");
 
-        assertTrue(dlrService.saveUnpushedDlr(dlr));
-        dlrService.onStop();
+        assertTrue(storage.saveUnpushedDlr(dlr));
+        storage.onStop();
 
-        dlrService = new InMemoryDlrService();
-        dlrService.init();
-        List<StandardMessage> dlrs = dlrService.getUnpushedDlrs("sys-restart");
+        storage = new MvStoreDlrStorage();
+        storage.init();
+        List<StandardMessage> dlrs = storage.getUnpushedDlrs("sys-restart");
 
         assertTrue(dlrs.stream().anyMatch(msg -> dlr.serial.equals(msg.serial)));
     }
 
     @Test
     void getPrimaryStoreSize_ReturnsCount() {
-        dlrService.saveInitialState(new MessageState("gw-1", "systemId", "from", "to", null));
-        dlrService.saveInitialState(new MessageState("gw-2", "systemId", "from", "to", null));
-        dlrService.saveInitialState(new MessageState("gw-3", "systemId", "from", "to", null));
+        storage.saveInitialState(new MessageState("gw-1", "systemId", "from", "to", null));
+        storage.saveInitialState(new MessageState("gw-2", "systemId", "from", "to", null));
+        storage.saveInitialState(new MessageState("gw-3", "systemId", "from", "to", null));
 
-        assertEquals(3, dlrService.getPrimaryStoreSize());
+        assertEquals(3, storage.getPrimaryStoreSize());
     }
 
     @Test
     void getCorrelationIndexSize_ReturnsCount() {
-        dlrService.saveInitialState(new MessageState("gw-1", "systemId", "from", "to", null));
-        dlrService.saveInitialState(new MessageState("gw-2", "systemId", "from", "to", null));
-        dlrService.linkOperatorId("gw-1", "op-1");
-        dlrService.linkOperatorId("gw-2", "op-2");
+        storage.saveInitialState(new MessageState("gw-1", "systemId", "from", "to", null));
+        storage.saveInitialState(new MessageState("gw-2", "systemId", "from", "to", null));
+        storage.linkOperatorId("gw-1", "op-1");
+        storage.linkOperatorId("gw-2", "op-2");
 
-        assertEquals(2, dlrService.getCorrelationIndexSize());
+        assertEquals(2, storage.getCorrelationIndexSize());
     }
 
     @Test
     void isPersistent_TrueWhenDbAvailable() {
-        assertTrue(dlrService.isPersistent());
+        assertTrue(storage.isPersistent());
     }
 
     private StandardMessage createDlr(String accountId, String systemId) {
