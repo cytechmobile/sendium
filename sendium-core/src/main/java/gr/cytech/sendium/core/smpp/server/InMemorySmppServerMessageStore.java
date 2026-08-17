@@ -1,7 +1,7 @@
 package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SensitiveLogSanitizer;
@@ -76,7 +76,7 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
 
     @Override
     public void onClientConnected(String systemId) {
-        InMemoryDlrService dlrService = getDlrService();
+        DlrService dlrService = getDlrService();
         List<StandardMessage> unpushedDlrs = dlrService.claimUnpushedDlrs(systemId);
         if (unpushedDlrs.isEmpty()) {
             logger.info("Unpushed DLR(s) not found for systemId:{}", systemId);
@@ -98,7 +98,7 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
         }
     }
 
-    private InMemoryDlrService getDlrService() {
+    private DlrService getDlrService() {
         return worker.getWorkerResources().getDlrService();
     }
 

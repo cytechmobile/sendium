@@ -1,7 +1,7 @@
 package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,7 +31,7 @@ class InMemorySmppServerMessageStoreTest {
     private WorkerResourceProvider workerResources;
 
     @Mock
-    private InMemoryDlrService dlrService;
+    private DlrService dlrService;
 
     private InMemorySmppServerMessageStore messageStore;
 
