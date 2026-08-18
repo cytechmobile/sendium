@@ -15,7 +15,11 @@ force=false
 provider=''
 allow_windows_mount=false
 upstream_password_from_environment=${SENDIUM_UPSTREAM_PASSWORD-}
+database_jdbc_url=${SENDIUM_DLR_POSTGRESQL_JDBC_URL-}
+database_username=${SENDIUM_DLR_POSTGRESQL_USERNAME-}
+database_password=${SENDIUM_DLR_POSTGRESQL_PASSWORD-}
 unset SENDIUM_UPSTREAM_PASSWORD
+unset SENDIUM_DLR_POSTGRESQL_PASSWORD
 
 usage() {
     cat <<'EOF'
@@ -37,6 +41,11 @@ Non-interactive provider configuration:
   Set SENDIUM_UPSTREAM_USERNAME and SENDIUM_UPSTREAM_PASSWORD for ProSMS.
   Custom SMPP also uses SENDIUM_UPSTREAM_HOST, SENDIUM_UPSTREAM_PORT,
   and SENDIUM_UPSTREAM_TLS.
+
+External PostgreSQL configuration:
+  Set SENDIUM_DLR_POSTGRESQL_JDBC_URL, SENDIUM_DLR_POSTGRESQL_USERNAME,
+  and SENDIUM_DLR_POSTGRESQL_PASSWORD together. Otherwise Quick Start creates
+  a private PostgreSQL 17 service with a persistent Docker volume.
 EOF
 }
 
@@ -169,6 +178,15 @@ validate_port() {
             ;;
     esac
     [ "$port_value" -ge 1 ] && [ "$port_value" -le 65535 ] || fail "SMPP port must be between 1 and 65535"
+}
+
+validate_environment_value() {
+    label=$1
+    environment_value=$2
+    validate_property_value "$label" "$environment_value"
+    case "$environment_value" in
+        *"'"*) fail "$label cannot contain a single quote" ;;
+    esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -376,6 +394,32 @@ if [ "$upstream_enabled" = true ]; then
     upstream_password=$(escape_property_value "$upstream_password")
 fi
 
+external_database=false
+if [ -n "$database_jdbc_url" ] || [ -n "$database_username" ] || [ -n "$database_password" ]; then
+    [ -n "$database_jdbc_url" ] && [ -n "$database_username" ] && [ -n "$database_password" ] || \
+        fail "external PostgreSQL requires JDBC URL, username, and password"
+    case "$database_jdbc_url" in
+        jdbc:postgresql://*) ;;
+        *) fail "PostgreSQL JDBC URL must start with jdbc:postgresql://" ;;
+    esac
+    validate_environment_value "PostgreSQL JDBC URL" "$database_jdbc_url"
+    validate_environment_value "PostgreSQL username" "$database_username"
+    validate_environment_value "PostgreSQL password" "$database_password"
+    external_database=true
+else
+    database_jdbc_url='jdbc:postgresql://postgres:5432/sendium'
+    database_username='sendium'
+    if [ "$force" = true ] && [ -f "$target_dir/.sendium.env" ]; then
+        existing_database_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$target_dir/.sendium.env")
+        if [ "${#existing_database_password}" -eq 64 ]; then
+            database_password=$existing_database_password
+        fi
+    fi
+    if [ -z "$database_password" ]; then
+        database_password=$(generate_secret 32)
+    fi
+fi
+
 mkdir -p "$target_dir/conf" "$target_dir/data" "$target_dir/logs"
 staging_dir=$(mktemp -d "$target_dir/.quick-start.XXXXXX") || fail "could not create a staging directory"
 mkdir -p "$staging_dir/conf"
@@ -410,7 +454,20 @@ SENDIUM_HTTP_USER='$http_user'
 SENDIUM_HTTP_PASSWORD='$http_password'
 SENDIUM_SMPP_USER='$smpp_user'
 SENDIUM_SMPP_PASSWORD='$smpp_password'
+SENDIUM_DLR_STORAGE='postgresql'
+SENDIUM_DLR_POSTGRESQL_ACTIVE='true'
+SENDIUM_DLR_POSTGRESQL_JDBC_URL='$database_jdbc_url'
+SENDIUM_DLR_POSTGRESQL_USERNAME='$database_username'
+SENDIUM_DLR_POSTGRESQL_PASSWORD='$database_password'
 EOF
+
+if [ "$external_database" != true ]; then
+    cat >> "$staging_dir/.sendium.env" <<EOF
+POSTGRES_DB='sendium'
+POSTGRES_USER='$database_username'
+POSTGRES_PASSWORD='$database_password'
+EOF
+fi
 
 cat > "$staging_dir/.gitignore" <<'EOF'
 .sendium.env
@@ -481,10 +538,43 @@ if [ "$upstream_enabled" = true ]; then
     printf 'upstream::default:\n' >> "$staging_dir/conf/routingTable.conf"
 fi
 
-cat > "$staging_dir/compose.yml" <<EOF
+cat > "$staging_dir/compose.yml" <<'EOF'
 services:
+EOF
+
+if [ "$external_database" != true ]; then
+    cat >> "$staging_dir/compose.yml" <<'EOF'
+  postgres:
+    image: postgres:17-alpine
+    env_file:
+      - ./.sendium.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+EOF
+fi
+
+cat >> "$staging_dir/compose.yml" <<EOF
   sendium:
     image: $image
+    env_file:
+      - ./.sendium.env
+EOF
+
+if [ "$external_database" != true ]; then
+    cat >> "$staging_dir/compose.yml" <<'EOF'
+    depends_on:
+      postgres:
+        condition: service_healthy
+EOF
+fi
+
+cat >> "$staging_dir/compose.yml" <<'EOF'
     environment:
       QUARKUS_LOG_FILE_ENABLE: "true"
       QUARKUS_LOG_CONSOLE_ENABLE: "true"
@@ -500,6 +590,14 @@ services:
       - ./data:/work/data
       - ./logs:/work/logs
 EOF
+
+if [ "$external_database" != true ]; then
+    cat >> "$staging_dir/compose.yml" <<'EOF'
+
+volumes:
+  postgres-data:
+EOF
+fi
 
 chmod 600 \
     "$staging_dir/.sendium.env" \
@@ -565,7 +663,7 @@ fi
 if [ "$start_sendium" != true ]; then
     if [ "$force" = true ]; then
         printf '\nRecreate Sendium later to apply the regenerated configuration and credentials:\n'
-        printf '  docker compose -f "%s/compose.yml" --project-directory "%s" up -d --force-recreate\n' "$absolute_target" "$absolute_target"
+        printf '  docker compose -f "%s/compose.yml" --project-directory "%s" up -d --force-recreate --remove-orphans\n' "$absolute_target" "$absolute_target"
     else
         printf '\nStart Sendium later with:\n'
         printf '  docker compose -f "%s/compose.yml" --project-directory "%s" up -d\n' "$absolute_target" "$absolute_target"
@@ -575,7 +673,7 @@ fi
 
 if [ "$force" = true ]; then
     printf '\nRecreating Sendium to apply the regenerated configuration and credentials...\n'
-    docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d --force-recreate
+    docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d --force-recreate --remove-orphans
 else
     printf '\nStarting Sendium...\n'
     docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d
@@ -583,7 +681,7 @@ fi
 
 attempt=0
 while [ "$attempt" -lt 60 ]; do
-    if curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/openapi.json >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/q/health/ready >/dev/null 2>&1; then
         printf '\nSendium is ready.\n'
         printf 'Swagger UI: http://127.0.0.1:8080/swagger-ui\n'
         printf '\nFollow live logs with:\n'
