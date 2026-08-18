@@ -34,7 +34,7 @@ curl -G http://localhost:8080/sendsms \
 | `4` | Buffered or accepted for processing. |
 | `8` | Submitted to SMSC. |
 
-DLR callbacks are sent as HTTP `GET` requests. HTTP status codes from `200` to `399` are treated as successful. Failed callback attempts are retried up to 10 times with a 120 second delay between attempts.
+DLR callbacks are sent as HTTP `GET` requests. HTTP status codes from `200` to `399` are treated as successful. Sendium makes up to 10 attempts with a 120 second delay between failed attempts. The retry schedule is process-local and does not survive a Sendium restart.
 
 ## Mobile-Originated Message Forwarding
 
@@ -85,7 +85,7 @@ outSms.instance.testRoute.forward.mo.url = https://example.com/mo?from=%p&to=%P&
 outSms.instance.testRoute.forward.mo.format = FORM
 ```
 
-MO callbacks are sent as HTTP `POST` requests. HTTP status codes from `200` to `399` are treated as successful. Failed callback attempts are retried up to 10 times with a 120 second delay between attempts.
+MO callbacks are sent as HTTP `POST` requests. HTTP status codes from `200` to `399` are treated as successful. Sendium makes up to 10 attempts with a 120 second delay between failed attempts. The retry schedule is process-local and does not survive a Sendium restart.
 
 ## Security Notes
 
