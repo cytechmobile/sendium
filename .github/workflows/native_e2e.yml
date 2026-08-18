@@ -9,6 +9,7 @@ on:
       - ".mvn/**"
       - "mvnw"
       - "mvnw.cmd"
+      - ".github/workflows/run_tests.yml"
       - ".github/workflows/native_e2e.yml"
   workflow_dispatch:
 
@@ -24,6 +25,20 @@ jobs:
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: sendium
+          POSTGRES_USER: sendium
+          POSTGRES_PASSWORD: sendium-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sendium -d sendium"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -46,7 +61,10 @@ jobs:
 
       - name: Run native E2E smoke tests
         env:
-          SENDIUM_NATIVE_IMAGE: sendium:native-e2e
+          SENDIUM_E2E_IMAGE: sendium:native-e2e
+          SENDIUM_DLR_POSTGRESQL_JDBC_URL: jdbc:postgresql://host.docker.internal:5432/sendium
+          SENDIUM_DLR_POSTGRESQL_USERNAME: sendium
+          SENDIUM_DLR_POSTGRESQL_PASSWORD: sendium-test
         run: |
           ./mvnw -B -pl sendium-core -DskipTests test-compile org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
             -Dexec.classpathScope=test \
