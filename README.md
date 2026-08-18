@@ -64,7 +64,7 @@ Download and run the setup script:
 curl -fsSLo quick-start.sh https://raw.githubusercontent.com/cytechmobile/sendium/main/quick-start.sh && sh quick-start.sh
 ```
 
-The script creates a `sendium/` runtime directory, generates random HTTP and SMPP credentials, writes Docker Compose and all required configuration files, starts Sendium, and waits for the HTTP API.
+The script creates a `sendium/` runtime directory, generates random HTTP, SMPP, and database credentials, writes Docker Compose and all required configuration files, starts PostgreSQL and Sendium, and waits for PostgreSQL-backed readiness.
 
 It asks you to choose one upstream option:
 
@@ -72,7 +72,7 @@ It asks you to choose one upstream option:
 2. **Existing SMPP provider:** Enter your provider host, port, credentials, and TLS choice. Quick Start uses a transceiver connection.
 3. **Local setup only:** Starts Sendium's local HTTP and SMPP interfaces without an outbound provider. You can explore the API, but messages cannot be delivered until an upstream route is configured.
 
-HTTP and SMPP ports are bound to `127.0.0.1` by default. Use the [Docker deployment guide](docs/02-docker-deployment.md) for generated-file details, manual setup, native images, and non-local deployments.
+HTTP and SMPP ports are bound to `127.0.0.1` by default. Use the [Docker deployment guide](docs/02-docker-deployment.md) for generated-file details, manual setup, native images, and non-local deployments. Review [DLR persistence](docs/13-dlr-persistence.md) before changing database backends or volume handling.
 
 When startup completes, the script prints the Swagger URL and an exact command for following live logs
 
