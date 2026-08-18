@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.worker.DlrService;
+import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SensitiveLogSanitizer;
@@ -9,6 +10,7 @@ import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
@@ -35,25 +37,59 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
 
     @Override
     public Future<Boolean> persistMessages(List<InEvent<StandardMessage>> eventsQueue) {
-        for (InEvent<StandardMessage> event : eventsQueue) {
-            try {
-                StandardMessage msg = event.pMsg;
-                if (msg != null) {
-                    String gatewayMsgId = msg.serial;
-                    String accountId = msg.owner_id;
-                    String systemId = msg.systemId;
-                    String sourceAddr = msg.from;
-                    String destAddr = msg.to;
+        boolean persisted = true;
+        int start = 0;
+        while (start < eventsQueue.size()) {
+            boolean clientSubmission = isClientSubmission(eventsQueue.get(start));
+            int end = start + 1;
+            while (end < eventsQueue.size() && isClientSubmission(eventsQueue.get(end)) == clientSubmission) {
+                end++;
+            }
+            persisted = persistBatch(eventsQueue.subList(start, end)) && persisted;
+            start = end;
+        }
+        return CompletableFuture.completedFuture(persisted);
+    }
 
-                    MessageState state = new MessageState(gatewayMsgId, accountId, systemId, sourceAddr, destAddr, null);
-                    state.setReassembledParts(msg.reassembledParts);
-                    worker.getWorkerResources().getDlrService().saveInitialState(state);
-                }
-            } catch (Exception e) {
-                logger.error("Failed to persist message state", e);
+    private boolean isClientSubmission(InEvent<StandardMessage> event) {
+        return event != null && event.submitSm != null;
+    }
+
+    private boolean persistBatch(List<InEvent<StandardMessage>> eventsQueue) {
+        if (eventsQueue.isEmpty()) {
+            return true;
+        }
+        List<MessageState> states = new ArrayList<>(eventsQueue.size());
+        for (InEvent<StandardMessage> event : eventsQueue) {
+            if (event == null) {
+                continue;
+            }
+            StandardMessage msg = event.pMsg;
+            if (msg != null) {
+                MessageState state = new MessageState(msg.serial, msg.owner_id, msg.systemId, msg.from, msg.to, null);
+                state.setReassembledParts(msg.reassembledParts);
+                states.add(state);
             }
         }
-        return CompletableFuture.completedFuture(true);
+
+        try {
+            getDlrService().saveInitialStates(states);
+        } catch (DlrStorageException e) {
+            logger.error("SMPP submission batch rejected: DLR storage unavailable");
+            worker.handleMessagePersistenceFailure(eventsQueue);
+            return false;
+        } catch (Exception e) {
+            logger.error("Failed to persist SMPP submission batch", e);
+            worker.handleMessagePersistenceFailure(eventsQueue);
+            return false;
+        }
+        worker.handlePersistedMessages(eventsQueue);
+        return true;
+    }
+
+    @Override
+    public boolean persistsBeforeAcknowledgement() {
+        return true;
     }
 
     @Override

@@ -7,6 +7,7 @@ import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -69,6 +70,20 @@ class ConfiguredDlrStorageTest {
 
         assertThat(meterRegistry.find("sendium.dlr.storage.operation")
                 .tags("backend", "mvstore", "operation", "mark_failed", "outcome", "error")
+                .timer().count()).isOne();
+    }
+
+    @Test
+    void delegatesBatchSavesAndRecordsMetrics() {
+        List<MessageState> states = List.of(
+                new MessageState("gateway-id", "system", "source", "destination", null));
+        storage.initialize();
+
+        storage.saveInitialStates(states);
+
+        verify(mvStore).saveInitialStates(states);
+        assertThat(meterRegistry.find("sendium.dlr.storage.operation")
+                .tags("backend", "mvstore", "operation", "save_initial_batch", "outcome", "success")
                 .timer().count()).isOne();
     }
 

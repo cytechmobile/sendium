@@ -22,6 +22,10 @@ public interface SmppServerMessageStore<M extends StandardMessage> {
      */
     Future<Boolean> persistMessages(List<InEvent<M>> eventsQueue);
 
+    default boolean persistsBeforeAcknowledgement() {
+        return false;
+    }
+
     /**
      * Mark a message as unpushed to retry it later.
      * @return true if successfully handled by the store, false if the worker should handle the retry in-memory.
