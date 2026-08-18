@@ -43,6 +43,22 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `QUARKUS_HTTP_ACCESS_LOG_ENABLE` | `true` | Enables HTTP access logging. |
 | `QUARKUS_HTTP_ACCESS_LOG_DIRECTORY` | `/work/logs` | HTTP access log directory. |
 
+## DLR Storage Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SENDIUM_DLR_STORAGE` | `mvstore` | Selects `mvstore` or `postgresql`. Generated Quick Start runtimes explicitly select PostgreSQL. |
+| `SENDIUM_DLR_MVSTORE_PATH` | `data/dlr-mvstore.db` | MVStore compatibility file path. |
+| `SENDIUM_DLR_POSTGRESQL_ACTIVE` | `false` | Activates the named PostgreSQL datasource and Flyway migration. Must be `true` when PostgreSQL is selected. |
+| `SENDIUM_DLR_POSTGRESQL_JDBC_URL` | Empty | PostgreSQL JDBC URL. |
+| `SENDIUM_DLR_POSTGRESQL_USERNAME` | Empty | PostgreSQL role name. |
+| `SENDIUM_DLR_POSTGRESQL_PASSWORD` | Empty | PostgreSQL password; provide through an access-controlled environment or secret. |
+| `SENDIUM_DLR_POSTGRESQL_POOL_MIN_SIZE` | `0` | Minimum datasource pool size. |
+| `SENDIUM_DLR_POSTGRESQL_POOL_MAX_SIZE` | `10` | Maximum datasource pool size. |
+| `SENDIUM_DLR_POSTGRESQL_ACQUISITION_TIMEOUT` | `5S` | Maximum wait for a pooled connection. |
+
+PostgreSQL selection is fail-closed and requires the URL, username, password, active datasource, and Flyway migration to agree. See [DLR Persistence](13-dlr-persistence.md) before switching an existing deployment; Sendium does not transfer pending state between MVStore and PostgreSQL.
+
 ## Logs
 
 | Log | Description |
@@ -68,6 +84,8 @@ When the HTTP server is running, Sendium exposes:
 | :--- | :--- |
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI JSON document. |
+| `/q/health/ready` | Readiness status and selected DLR backend. |
+| `/q/metrics` | Prometheus metrics, including DLR storage and datasource metrics. |
 
 ## Related Documentation
 
@@ -75,3 +93,4 @@ When the HTTP server is running, Sendium exposes:
 - [Authentication and Security](03-auth-security.md)
 - [SMPP Configuration](04-smpp-configuration.md)
 - [Routing Engine](05-routing-engine.md)
+- [DLR Persistence](13-dlr-persistence.md)
