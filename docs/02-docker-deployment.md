@@ -108,10 +108,12 @@ Sendium publishes two Docker image variants:
 
 ### Run Command
 
-This command starts the default JVM image:
+This standalone example explicitly uses MVStore compatibility mode. For the default PostgreSQL backend, use Generated Quick Start or configure an external database as described in [DLR Persistence](13-dlr-persistence.md).
 
 ```bash
 docker run -d --name sendium \
+  -e SENDIUM_DLR_STORAGE=mvstore \
+  -e SENDIUM_DLR_POSTGRESQL_ACTIVE=false \
   -e QUARKUS_LOG_FILE_ENABLE=true \
   -e QUARKUS_LOG_CONSOLE_ENABLE=false \
   -e QUARKUS_LOG_FILE_PATH=/work/logs/smsg.log \
