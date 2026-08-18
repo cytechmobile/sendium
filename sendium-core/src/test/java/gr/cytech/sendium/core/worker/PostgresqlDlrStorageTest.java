@@ -118,6 +118,25 @@ class PostgresqlDlrStorageTest {
     }
 
     @Test
+    void trackedStateAndCorrelationSurviveAdapterRecreation() {
+        MessageState state = newState();
+        storage.saveInitialState(state);
+        storage.linkOperatorId(state.getGatewayMsgId(), "operator-after-restart");
+
+        PostgresqlDlrStorage recreated = new PostgresqlDlrStorage(dataSource);
+
+        assertThat(recreated.getState(state.getGatewayMsgId()))
+                .get()
+                .extracting(MessageState::getOperatorMsgId, MessageState::getStatus)
+                .containsExactly("operator-after-restart", MessageState.MessageStatus.SENT);
+        assertThat(recreated.resolveAndRemoveDlr(
+                "operator-after-restart", MessageState.MessageStatus.DELIVERED))
+                .get()
+                .extracting(MessageState::getGatewayMsgId, MessageState::getStatus)
+                .containsExactly(state.getGatewayMsgId(), MessageState.MessageStatus.DELIVERED);
+    }
+
+    @Test
     void saveInitialStateOverwritesExistingState() throws SQLException {
         MessageState initial = newState();
         storage.saveInitialState(initial);
@@ -378,6 +397,10 @@ class PostgresqlDlrStorageTest {
                 .extracting(message -> message.serial)
                 .containsExactly(second.serial);
         assertThat(recreated.getUnpushedDlrs("missing-system")).isEmpty();
+        assertThat(recreated.claimUnpushedDlrs("system-1"))
+                .extracting(message -> message.serial)
+                .containsExactly(first.serial);
+        assertThat(recreated.claimUnpushedDlrs("system-1")).isEmpty();
     }
 
     @Test
