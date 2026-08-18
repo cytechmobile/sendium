@@ -33,7 +33,7 @@ public class ConfiguredDlrStorage implements DlrStorage {
             """;
 
     @Inject
-    @ConfigProperty(name = "sendium.dlr.storage", defaultValue = "mvstore")
+    @ConfigProperty(name = "sendium.dlr.storage", defaultValue = "postgresql")
     String configuredBackend;
 
     @Inject
