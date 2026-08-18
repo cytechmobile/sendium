@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
@@ -172,18 +173,53 @@ public class PostgresqlDlrStorage implements DlrStorage {
 
     @Override
     public void saveInitialState(MessageState state) {
-        Objects.requireNonNull(state, "state");
+        saveInitialStates(List.of(state));
+    }
+
+    @Override
+    public void saveInitialStates(List<MessageState> states) {
+        Objects.requireNonNull(states, "states");
+        if (states.isEmpty()) {
+            return;
+        }
+
+        List<MessageState> checkedStates = states.stream()
+                .map(state -> Objects.requireNonNull(state, "state"))
+                .toList();
+        List<UUID> gatewayMsgIds = checkedStates.stream()
+                .map(state -> parseGatewayId(state.getGatewayMsgId()))
+                .toList();
         checkExpiry();
 
-        UUID gatewayMsgId = parseGatewayId(state.getGatewayMsgId());
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
-            try {
-                saveState(connection, gatewayMsgId, state);
-                deleteCorrelations(connection, gatewayMsgId);
-                if (state.getOperatorMsgId() != null &&
-                        !saveCorrelation(connection, gatewayMsgId, state.getOperatorMsgId())) {
-                    throw new SQLException("Operator message ID is already linked to another gateway message");
+            try (PreparedStatement saveStates = connection.prepareStatement(SAVE_INITIAL_STATE_SQL);
+                 PreparedStatement deleteCorrelations = connection.prepareStatement(DELETE_CORRELATIONS_SQL);
+                 PreparedStatement saveCorrelations = connection.prepareStatement(SAVE_CORRELATION_SQL)) {
+                int correlationCount = 0;
+                for (int index = 0; index < checkedStates.size(); index++) {
+                    MessageState state = checkedStates.get(index);
+                    UUID gatewayMsgId = gatewayMsgIds.get(index);
+                    setStateParameters(connection, saveStates, gatewayMsgId, state);
+                    saveStates.addBatch();
+                    deleteCorrelations.setObject(1, gatewayMsgId);
+                    deleteCorrelations.addBatch();
+                    if (state.getOperatorMsgId() != null) {
+                        saveCorrelations.setString(1, state.getOperatorMsgId());
+                        saveCorrelations.setObject(2, gatewayMsgId);
+                        saveCorrelations.addBatch();
+                        correlationCount++;
+                    }
+                }
+
+                saveStates.executeBatch();
+                deleteCorrelations.executeBatch();
+                if (correlationCount > 0) {
+                    for (int result : saveCorrelations.executeBatch()) {
+                        if (result == 0 || result == Statement.EXECUTE_FAILED) {
+                            throw new SQLException("Operator message ID is already linked to another gateway message");
+                        }
+                    }
                 }
                 connection.commit();
             } catch (SQLException e) {
@@ -191,7 +227,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 throw e;
             }
         } catch (SQLException e) {
-            throw failure("save initial DLR state", e);
+            throw failure("save initial DLR states", e);
         }
     }
 
@@ -424,28 +460,18 @@ public class PostgresqlDlrStorage implements DlrStorage {
         }
     }
 
-    private void saveState(Connection connection, UUID gatewayMsgId,
-                           MessageState state) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(SAVE_INITIAL_STATE_SQL)) {
-            statement.setObject(1, gatewayMsgId);
-            statement.setString(2, state.getAccountId());
-            statement.setString(3, state.getSystemId());
-            statement.setString(4, state.getSourceAddr());
-            statement.setString(5, state.getDestAddr());
-            statement.setString(6, state.getOperatorMsgId());
-            statement.setString(7, state.getForwardDlrUrl());
-            setStringArray(connection, statement, 8, state.getReassembledParts());
-            statement.setString(9, state.getStatus().name());
-            statement.setTimestamp(10, new Timestamp(state.getTimestamp()));
-            statement.executeUpdate();
-        }
-    }
-
-    private void deleteCorrelations(Connection connection, UUID gatewayMsgId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(DELETE_CORRELATIONS_SQL)) {
-            statement.setObject(1, gatewayMsgId);
-            statement.executeUpdate();
-        }
+    private void setStateParameters(Connection connection, PreparedStatement statement, UUID gatewayMsgId,
+                                    MessageState state) throws SQLException {
+        statement.setObject(1, gatewayMsgId);
+        statement.setString(2, state.getAccountId());
+        statement.setString(3, state.getSystemId());
+        statement.setString(4, state.getSourceAddr());
+        statement.setString(5, state.getDestAddr());
+        statement.setString(6, state.getOperatorMsgId());
+        statement.setString(7, state.getForwardDlrUrl());
+        setStringArray(connection, statement, 8, state.getReassembledParts());
+        statement.setString(9, state.getStatus().name());
+        statement.setTimestamp(10, new Timestamp(state.getTimestamp()));
     }
 
     private boolean saveCorrelation(Connection connection, UUID gatewayMsgId,

@@ -87,6 +87,37 @@ class PostgresqlDlrStorageTest {
     }
 
     @Test
+    void saveInitialStatesCommitsWholeBatch() {
+        List<MessageState> states = List.of(newState(), newState(), newState());
+
+        storage.saveInitialStates(states);
+
+        for (MessageState state : states) {
+            assertThat(storage.getState(state.getGatewayMsgId()))
+                    .get()
+                    .usingRecursiveComparison()
+                    .isEqualTo(state);
+        }
+    }
+
+    @Test
+    void saveInitialStatesRollsBackWholeBatchOnCorrelationConflict() {
+        MessageState owner = newState();
+        owner.setOperatorMsgId("shared-operator");
+        storage.saveInitialState(owner);
+        MessageState innocent = newState();
+        MessageState conflict = newState();
+        conflict.setOperatorMsgId("shared-operator");
+
+        assertThatThrownBy(() -> storage.saveInitialStates(List.of(innocent, conflict)))
+                .isInstanceOf(DlrStorageException.class);
+
+        assertThat(storage.getState(innocent.getGatewayMsgId())).isEmpty();
+        assertThat(storage.getState(conflict.getGatewayMsgId())).isEmpty();
+        assertThat(storage.getState(owner.getGatewayMsgId())).isPresent();
+    }
+
+    @Test
     void saveInitialStateOverwritesExistingState() throws SQLException {
         MessageState initial = newState();
         storage.saveInitialState(initial);
