@@ -23,7 +23,7 @@ flowchart LR
     workerQueues[Worker queues]
     smppClients["SMPP client workers<br/>smppclient instances"]
     carriers["Upstream SMSCs<br/>carriers or SMPP providers"]
-    dlrStore["DLR correlation store<br/>InMemoryDlrService"]
+    dlrStore["DLR storage<br/>PostgreSQL or MVStore"]
     webhooks["HTTP webhooks<br/>DLR and MO callbacks"]
     config["Runtime config files<br/>credentials.yml<br/>smsg.properties<br/>routingTable.conf"]
 
@@ -87,7 +87,7 @@ sequenceDiagram
     participant Client as HTTP client
     participant API as KannelResource
     participant Creds as CredentialFileWatcher
-    participant DLR as InMemoryDlrService
+    participant DLR as DlrStorage
     participant Queue as Router queue
     participant Router as StandardRoutingManager
     participant Worker as SmppClientWorker
@@ -116,6 +116,8 @@ sequenceDiagram
     participant Server as SmppServerWorker
     participant Auth as BasicSmppAuthenticationProvider
     participant Submit as BasicSubmitSmProcessor
+    participant Store as SMPP message store
+    participant DLR as DlrStorage
     participant Queue as Router queue
     participant Router as StandardRoutingManager
 
@@ -124,7 +126,12 @@ sequenceDiagram
     Auth-->>Server: Bind accepted or rejected
     Client->>Server: submit_sm
     Server->>Submit: Validate and convert PDU
-    Submit->>Queue: Enqueue StandardMessage
+    Submit-->>Server: Valid submission event
+    Server->>Store: Add event to persistence batch
+    Store->>DLR: Persist initial DLR state
+    DLR-->>Store: Commit successful
+    Store-->>Server: Handle persisted event
+    Server->>Queue: Enqueue StandardMessage
     Server-->>Client: submit_sm_resp
     Router->>Queue: Dequeue and route message
 ```
@@ -151,7 +158,7 @@ sequenceDiagram
     participant SMSC as Upstream SMSC
     participant Worker as SmppClientWorker
     participant Tracker as InMemoryMessageTracker
-    participant Store as InMemoryDlrService
+    participant Store as DlrStorage
     participant Router as Router queue
     participant DLRHook as ForwardDlrService
     participant App as Originating application
@@ -209,9 +216,9 @@ Sendium expects runtime files in the configured `conf` directory.
 
 ## Persistence Boundaries
 
-Most runtime queues are in-memory. The DLR correlation service uses H2 MVStore at `data/dlr-mvstore.db` by default and falls back to in-memory maps if the store cannot be opened.
+Most runtime queues are in memory. DLR tracking, provider correlations, and unpushed downstream SMPP receipts can use PostgreSQL or the compatibility MVStore backend. Sendium completes the selected storage operation before HTTP routing or successful downstream SMPP acknowledgement; PostgreSQL makes that state durable, while MVStore can fall back to memory if its file cannot be opened. Queued and in-flight messages remain process-local.
 
-This means operators should treat queued, in-flight messages as process-local state, while DLR correlation has lightweight local persistence.
+PostgreSQL does not make multipart assembly, replay claims, callback retries, or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, cutover, rollback, and the remaining crash windows.
 
 ## Related Documentation
 
@@ -221,3 +228,4 @@ This means operators should treat queued, in-flight messages as process-local st
 * [Routing Engine](05-routing-engine.md)
 * [Webhooks](07-webhooks.md)
 * [Docker Deployment](02-docker-deployment.md)
+* [DLR Persistence](13-dlr-persistence.md)
