@@ -19,6 +19,10 @@ public class DlrService {
         storage.saveInitialState(state);
     }
 
+    public void saveInitialStates(List<MessageState> states) {
+        storage.saveInitialStates(states);
+    }
+
     public void linkOperatorId(String gatewayMsgId, String operatorMsgId) {
         storage.linkOperatorId(gatewayMsgId, operatorMsgId);
     }
