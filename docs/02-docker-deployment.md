@@ -4,7 +4,7 @@ This guide explains how to run Sendium with Docker for local testing or simple d
 
 ## Generated Quick Start
 
-The recommended evaluation path generates random local credentials, Docker Compose, and the three required configuration files:
+The recommended evaluation path generates random local credentials, Docker Compose, PostgreSQL 17 with a persistent named volume, and the three required configuration files:
 
 ```bash
 curl -fsSLo quick-start.sh \
@@ -43,9 +43,11 @@ sendium/
   logs/
 ```
 
-`.sendium.env`, `credentials.yml`, and `smsg.properties` contain secrets. The generated `.gitignore` excludes them, but they still require access-controlled storage and backups.
+`.sendium.env`, `credentials.yml`, and `smsg.properties` contain secrets. The generated `.gitignore` excludes them, but they still require access-controlled storage and backups. The local PostgreSQL service is private to the Compose network and does not publish a database port.
 
-Using `--force` regenerates the local credentials and configuration. When startup is enabled, Quick Start recreates the container so the new credentials and worker configuration take effect together. With `--no-start`, it prints the required `docker compose up -d --force-recreate` command instead.
+Using `--force` regenerates the HTTP/SMPP credentials and configuration while preserving the generated local database password required by the existing PostgreSQL volume. When startup is enabled, Quick Start recreates the containers so the new credentials and worker configuration take effect together. With `--no-start`, it prints the required `docker compose up -d --force-recreate --remove-orphans` command instead.
+
+To use an operator-managed PostgreSQL database, set `SENDIUM_DLR_POSTGRESQL_JDBC_URL`, `SENDIUM_DLR_POSTGRESQL_USERNAME`, and `SENDIUM_DLR_POSTGRESQL_PASSWORD` together before running Quick Start. The generated Compose file then omits the local PostgreSQL service. See [DLR Persistence](13-dlr-persistence.md) for TLS, permissions, retention, cutover, and rollback guidance.
 
 To generate a separate runtime using the native image, first stop any generated runtime using the same local ports:
 
@@ -132,7 +134,7 @@ After starting the container:
 
 1. Check container status with `docker ps`.
 2. Open `http://localhost:8080/swagger-ui` to confirm the HTTP API is available.
-3. Open `http://localhost:8080/openapi.json` to confirm OpenAPI is available.
+3. Check `http://localhost:8080/q/health/ready` and confirm the `sendium-dlr-storage` check is `UP` before sending traffic.
 4. Inspect `logs/smsg.log`, `logs/smppclient.log`, and `logs/smppserver.log` if startup fails.
 
 ## Configuration Files
@@ -162,9 +164,13 @@ docker compose logs -f
 docker compose down
 ```
 
+`docker compose down` retains the generated PostgreSQL volume. Adding `--volumes` permanently removes it and should only be used when database deletion is intended.
+
 For the manual `docker run` example:
 
 ```bash
 docker stop sendium
 docker rm sendium
 ```
+
+See [DLR Persistence](13-dlr-persistence.md) before changing storage backends or changing how the database volume is managed.
