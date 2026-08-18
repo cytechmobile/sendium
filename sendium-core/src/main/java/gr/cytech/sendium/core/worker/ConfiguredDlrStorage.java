@@ -115,6 +115,11 @@ public class ConfiguredDlrStorage implements DlrStorage {
     }
 
     @Override
+    public void saveInitialStates(List<MessageState> states) {
+        timed("save_initial_batch", () -> delegate.saveInitialStates(states));
+    }
+
+    @Override
     public void linkOperatorId(String gatewayMsgId, String operatorMsgId) {
         timed("link_operator", () -> delegate.linkOperatorId(gatewayMsgId, operatorMsgId));
     }

@@ -238,9 +238,12 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     @Override
     public boolean stop() {
         logger.info("Stopping SMPP server...");
-        messagePartsHandler.stop();
         keepOnRunning = false;
-        messageStore.stop();
+        messagePartsHandler.stop();
+        boolean drainPersistedIngress = messageStore != null && messageStore.persistsBeforeAcknowledgement();
+        if (!drainPersistedIngress) {
+            messageStore.stop();
+        }
         if (inactivityTimeFuture != null) {
             try {
                 inactivityTimeFuture.cancel(true);
@@ -252,7 +255,14 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             inExecutorRunnable.die();
         }
         stopExecutor(inExecutor, "in");
-        stopExecutor(monitorExecutor, "monitor");
+        boolean ingressDrained = true;
+        if (drainPersistedIngress) {
+            stopExecutor(monitorExecutor, "monitor");
+            ingressDrained = drainPersistedIngress();
+            messageStore.stop();
+        } else {
+            stopExecutor(monitorExecutor, "monitor");
+        }
         stopExecutor(outExecutor, "out");
         destroyServer(server);
         destroyServer(tlsServer);
@@ -272,7 +282,36 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                     tlsServer != null ? tlsServer.getCounters() : null,
                     proxyServer != null ? proxyServer.getCounters() : null);
         }
-        return super.stop();
+        boolean workerStopped = super.stop();
+        return ingressDrained && workerStopped;
+    }
+
+    private boolean drainPersistedIngress() {
+        int batchSize = Math.max(1, messageStore.getInsertBatchSize());
+        long deadline = System.currentTimeMillis() + Math.max(1_000, getResponseTimeout());
+        do {
+            List<InEvent<M>> pendingEvents = new ArrayList<>();
+            inEventQueue.drainTo(pendingEvents);
+            for (int offset = 0; offset < pendingEvents.size(); offset += batchSize) {
+                int end = Math.min(offset + batchSize, pendingEvents.size());
+                persistMessagesIn(new ArrayList<>(pendingEvents.subList(offset, end)));
+            }
+            if (!inEventQueue.isEmpty() && !isFastUnsafeStop) {
+                long remainingMillis = deadline - System.currentTimeMillis();
+                if (remainingMillis <= 0) {
+                    logger.error("Timed out draining {} acknowledged SMPP ingress events", inEventQueue.size());
+                    return false;
+                }
+                try {
+                    Thread.sleep(Math.min(1_000, remainingMillis));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    logger.error("Interrupted while draining acknowledged SMPP ingress events");
+                    return false;
+                }
+            }
+        } while (!inEventQueue.isEmpty() && !isFastUnsafeStop);
+        return inEventQueue.isEmpty();
     }
 
     protected void destroyServer(com.cloudhopper.smpp.SmppServer smppServer) {
@@ -828,34 +867,19 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         if (printMsgs) {
             logger.debug("IN: {}", ine);
         }
+        if (!keepOnRunning) {
+            enqueueOut(SmppServerUtil.createSubmitRsp(ine.submitSm, SmppConstants.STATUS_SYSERR, null));
+            return;
+        }
 
         InEvent<M> filtered = handleBeforeInsertMessageFiltering(ine);
         if (filtered == null) {
             return;
         }
         filtered.pMsg.serial = UUID.randomUUID().toString();
-        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
-            logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(), MessageTrace.identifiers(filtered.pMsg));
-        }
-        filtered.waitingForResponse = false;
         filtered.pMsg.ctstamp = ine.localTimestamp.getTime();
         filtered.pMsg.onetwork = ine.mpid;
-
-        // Check reassembling logic
-        if (!Strings.isNullOrEmpty(ine.pMsg.binheader)) {
-            messagePartsHandler.addMessagePart(ine.pMsg);
-            enqueueOut(SmppServerUtil.createSubmitRsp(filtered.submitSm, SmppConstants.STATUS_OK, filtered.pMsg.serial));
-            return;
-        }
-        try {
-            enqueueToRouter(ine.pMsg);
-            enqueueOut(SmppServerUtil.createSubmitRsp(filtered.submitSm, SmppConstants.STATUS_OK, filtered.pMsg.serial));
-        } catch (InterruptedException e) {
-            logger.error("Interrupted while waiting for submit RSP", e);
-            enqueueOut(SmppServerUtil.createSubmitRsp(filtered.submitSm, SmppConstants.STATUS_UNKNOWNERR, filtered.pMsg.serial));
-            throw new RuntimeException(e);
-        }
-        inEventQueue.add(ine);
+        inEventQueue.add(filtered);
     }
 
     protected boolean checkReassembling(M msg) {
@@ -867,8 +891,73 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     public void reEnqueueIn(List<InEvent<M>> inEvents) {
-        inEvents.forEach(event -> enqueueToRouterNoExceptions(event.pMsg));
         inEventQueue.addAll(inEvents);
+    }
+
+    public void handlePersistedMessages(List<InEvent<M>> events) {
+        for (InEvent<M> event : events) {
+            if (event == null) {
+                continue;
+            }
+            if (event.pMsg == null) {
+                handleMessagePersistenceFailure(List.of(event));
+                continue;
+            }
+
+            try {
+                if (event.submitSm != null && !Strings.isNullOrEmpty(event.pMsg.binheader)) {
+                    messagePartsHandler.addMessagePart(event.pMsg);
+                } else {
+                    enqueueToRouter(event.pMsg);
+                }
+                if (event.submitSm != null) {
+                    if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
+                        logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(),
+                                MessageTrace.identifiers(event.pMsg));
+                    }
+                    enqueueOut(SmppServerUtil.createSubmitRsp(event.submitSm, SmppConstants.STATUS_OK, event.pMsg.serial));
+                    event.waitingForResponse = false;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.error("SMPP submission rejected: router admission interrupted");
+                handleMessagePersistenceFailure(List.of(event));
+            } catch (Exception e) {
+                logger.error("SMPP submission rejected after persistence", e);
+                handleMessagePersistenceFailure(List.of(event));
+            }
+        }
+    }
+
+    public void handleMessagePersistenceFailure(List<InEvent<M>> events) {
+        for (InEvent<M> event : events) {
+            if (event == null) {
+                continue;
+            }
+            if (event.submitSm == null) {
+                if (event.pMsg != null) {
+                    schedulePersistenceRetry(event);
+                }
+            } else if (event.waitingForResponse) {
+                try {
+                    enqueueOut(SmppServerUtil.createSubmitRsp(event.submitSm, SmppConstants.STATUS_SYSERR, null));
+                    event.waitingForResponse = false;
+                } catch (Exception e) {
+                    logger.error("Failed to enqueue SMPP submission failure response", e);
+                }
+            }
+        }
+    }
+
+    private void schedulePersistenceRetry(InEvent<M> event) {
+        event.persistenceAttempts++;
+        if (keepOnRunning && monitorExecutor != null && !monitorExecutor.isShutdown()) {
+            long delayMillis = Math.min(TimeUnit.SECONDS.toMillis(30),
+                    TimeUnit.SECONDS.toMillis(event.persistenceAttempts));
+            monitorExecutor.schedule(() -> reEnqueueIn(List.of(event)), delayMillis, TimeUnit.MILLISECONDS);
+            return;
+        }
+        reEnqueueIn(List.of(event));
     }
 
     public InEvent<M> handleBeforeInsertMessageFiltering(InEvent<M> ine) {
@@ -1157,7 +1246,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                 reEnqueueIn(List.of(event));
             } else {
                 var messages = parts.stream().map(m -> new InEvent<M>(m, null, m.onetwork, new Timestamp(m.ctstamp))).collect(Collectors.toList());
-                reEnqueueIn(messages);
+                if (messageStore != null && messageStore.persistsBeforeAcknowledgement()) {
+                    handlePersistedMessages(messages);
+                } else {
+                    reEnqueueIn(messages);
+                }
             }
         }
 
