@@ -26,20 +26,36 @@ git clone https://github.com/cytechmobile/sendium.git
 cd sendium
 ```
 **2. Start the application in development mode:**
+
+PostgreSQL is the runtime default. To run locally without a database, explicitly select MVStore compatibility mode:
 ```bash
-./mvnw -pl sendium-app -am quarkus:dev
+SENDIUM_DLR_STORAGE=mvstore \
+SENDIUM_DLR_POSTGRESQL_ACTIVE=false \
+  ./mvnw -pl sendium-app -am quarkus:dev
 ```
 Note: This will start the server with live reload enabled. Any changes you make to the Java code will automatically trigger a compilation and reload.
 
-On Windows PowerShell, replace `./mvnw` with `.\mvnw.cmd`.
+On Windows PowerShell:
+
+```powershell
+$env:SENDIUM_DLR_STORAGE = "mvstore"
+$env:SENDIUM_DLR_POSTGRESQL_ACTIVE = "false"
+.\mvnw.cmd -pl sendium-app -am quarkus:dev
+```
 
 **3. 🧪 Testing**
 
 We value reliability. Before submitting any changes, please ensure all tests pass.
 
-You do not need Docker running locally to execute the test suite. Simply run the following command to execute all unit and integration tests:
+You do not need Docker running locally to execute the default unit and integration suite. PostgreSQL-specific tests are skipped:
 ```bash
 ./mvnw verify
+```
+
+To include the PostgreSQL migration, adapter, and outage tests, start Docker and run:
+
+```bash
+./mvnw verify -Ppostgresql-tests
 ```
 **4. 💅 Code Style & Linting**
 

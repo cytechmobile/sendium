@@ -1,6 +1,6 @@
 # DLR Persistence
 
-Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and replay receipts that could not be delivered to a downstream SMPP client. PostgreSQL is the recommended backend for new deployments. MVStore remains available for compatibility with existing installations.
+Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and replay receipts that could not be delivered to a downstream SMPP client. PostgreSQL is the default backend for new deployments. MVStore remains available for compatibility with existing installations.
 
 This storage boundary does not make Sendium's message queues or all delivery processing durable. Review [Durability Boundaries](#durability-boundaries) before using restart recovery as a delivery guarantee.
 
@@ -38,15 +38,15 @@ unset SENDIUM_DLR_POSTGRESQL_PASSWORD
 
 The three values are an all-or-nothing override. Partial configuration is rejected instead of mixing local and external settings.
 
-For a manual deployment, configure:
+For a manual deployment, PostgreSQL selection and datasource activation default to the values below. A valid connection URL and the settings required by the database authentication method must still be supplied:
 
 | Variable | Required value or example | Purpose |
 | :--- | :--- | :--- |
-| `SENDIUM_DLR_STORAGE` | `postgresql` | Selects the PostgreSQL storage adapter. |
-| `SENDIUM_DLR_POSTGRESQL_ACTIVE` | `true` | Activates the named datasource and its Flyway migrations. |
+| `SENDIUM_DLR_STORAGE` | `postgresql` (default) | Selects the PostgreSQL storage adapter. |
+| `SENDIUM_DLR_POSTGRESQL_ACTIVE` | `true` (default) | Activates the named datasource and its Flyway migrations. |
 | `SENDIUM_DLR_POSTGRESQL_JDBC_URL` | `jdbc:postgresql://db.example.com:5432/sendium` | JDBC connection URL. Add PostgreSQL JDBC TLS parameters for external networks. |
-| `SENDIUM_DLR_POSTGRESQL_USERNAME` | `sendium` | Database role used by Sendium and Flyway. |
-| `SENDIUM_DLR_POSTGRESQL_PASSWORD` | Secret value | Database password. Supply it through an access-controlled environment or secret mechanism. |
+| `SENDIUM_DLR_POSTGRESQL_USERNAME` | `sendium` | Database role used by Sendium and Flyway when required by the authentication method. |
+| `SENDIUM_DLR_POSTGRESQL_PASSWORD` | Secret value | Database password when required. Supply it through an access-controlled environment or secret mechanism. |
 
 The database role must be able to connect to the database and create and manage the `sendium_dlr` schema. Flyway creates or validates the schema during startup. Keep migration privileges available for future application upgrades.
 

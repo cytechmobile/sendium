@@ -25,7 +25,7 @@ class DlrStorageRuntimeTest {
     MeterRegistry meterRegistry;
 
     @Test
-    void selectsExactlyOneMvStoreBackendByDefault() {
+    void selectsExactlyOneMvStoreBackendInTestProfile() {
         assertThat(storageInstance.isResolvable()).isTrue();
         assertThat(storageInstance.stream()).hasSize(1);
         assertThat(storageInstance.get()).isSameAs(configuredStorage);
