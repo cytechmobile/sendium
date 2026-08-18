@@ -1,13 +1,16 @@
 package gr.cytech.sendium.core.smpp.server;
 
+import com.cloudhopper.smpp.pdu.SubmitSm;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.worker.DlrService;
+import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -45,7 +48,7 @@ class InMemorySmppServerMessageStoreTest {
     }
 
     @Test
-    void persistMessages_SavesStateForEachMessage() {
+    void persistMessages_SavesStatesAsOneBatchBeforeNotifyingWorker() {
         List<InEvent<StandardMessage>> events = new ArrayList<>();
 
         StandardMessage msg1 = new StandardMessage();
@@ -62,20 +65,24 @@ class InMemorySmppServerMessageStoreTest {
         msg2.from = "from2";
         msg2.to = "to2";
 
-        InEvent<StandardMessage> event1 = new InEvent<>(msg1, null, 1, new Timestamp(System.currentTimeMillis()));
-        InEvent<StandardMessage> event2 = new InEvent<>(msg2, null, 2, new Timestamp(System.currentTimeMillis()));
+        InEvent<StandardMessage> event1 = new InEvent<>(msg1, new SubmitSm(), 1,
+                new Timestamp(System.currentTimeMillis()));
+        InEvent<StandardMessage> event2 = new InEvent<>(msg2, new SubmitSm(), 2,
+                new Timestamp(System.currentTimeMillis()));
 
         events.add(event1);
         events.add(event2);
 
         messageStore.persistMessages(events);
 
-        ArgumentCaptor<MessageState> captor = ArgumentCaptor.forClass(MessageState.class);
-        verify(dlrService, times(2)).saveInitialState(captor.capture());
-        assertEquals("account1", captor.getAllValues().get(0).getAccountId());
-        assertEquals("sys1", captor.getAllValues().get(0).getSystemId());
-        assertEquals("account2", captor.getAllValues().get(1).getAccountId());
-        assertEquals("sys2", captor.getAllValues().get(1).getSystemId());
+        ArgumentCaptor<List<MessageState>> captor = ArgumentCaptor.forClass(List.class);
+        InOrder order = inOrder(dlrService, worker);
+        order.verify(dlrService).saveInitialStates(captor.capture());
+        order.verify(worker).handlePersistedMessages(events);
+        assertEquals("account1", captor.getValue().get(0).getAccountId());
+        assertEquals("sys1", captor.getValue().get(0).getSystemId());
+        assertEquals("account2", captor.getValue().get(1).getAccountId());
+        assertEquals("sys2", captor.getValue().get(1).getSystemId());
     }
 
     @Test
@@ -90,9 +97,9 @@ class InMemorySmppServerMessageStoreTest {
 
         messageStore.persistMessages(List.of(new InEvent<>(msg, null, 1, new Timestamp(System.currentTimeMillis()))));
 
-        ArgumentCaptor<MessageState> captor = ArgumentCaptor.forClass(MessageState.class);
-        verify(dlrService).saveInitialState(captor.capture());
-        assertEquals(List.of("part-1", "part-2"), captor.getValue().getReassembledParts());
+        ArgumentCaptor<List<MessageState>> captor = ArgumentCaptor.forClass(List.class);
+        verify(dlrService).saveInitialStates(captor.capture());
+        assertEquals(List.of("part-1", "part-2"), captor.getValue().getFirst().getReassembledParts());
     }
 
     @Test
@@ -105,7 +112,40 @@ class InMemorySmppServerMessageStoreTest {
 
         messageStore.persistMessages(events);
 
-        verify(dlrService, never()).saveInitialState(any(MessageState.class));
+        verify(dlrService).saveInitialStates(List.of());
+        verify(worker).handlePersistedMessages(events);
+    }
+
+    @Test
+    void persistMessages_WhenStorageFails_NotifiesWorkerFailure() {
+        StandardMessage msg = new StandardMessage();
+        msg.serial = "gw-1";
+        List<InEvent<StandardMessage>> events = List.of(
+                new InEvent<>(msg, new SubmitSm(), 1, new Timestamp(System.currentTimeMillis())));
+        doThrow(new DlrStorageException("database details"))
+                .when(dlrService).saveInitialStates(anyList());
+
+        assertFalse(messageStore.persistMessages(events).resultNow());
+
+        verify(worker).handleMessagePersistenceFailure(events);
+        verify(worker, never()).handlePersistedMessages(anyList());
+    }
+
+    @Test
+    void persistMessages_IsolatesInternalEventsWithoutReorderingCallbacks() {
+        InEvent<StandardMessage> firstClient = event("first-client", new SubmitSm());
+        InEvent<StandardMessage> internal = event("internal", null);
+        InEvent<StandardMessage> secondClient = event("second-client", new SubmitSm());
+
+        messageStore.persistMessages(List.of(firstClient, internal, secondClient));
+
+        InOrder order = inOrder(dlrService, worker);
+        order.verify(dlrService).saveInitialStates(anyList());
+        order.verify(worker).handlePersistedMessages(List.of(firstClient));
+        order.verify(dlrService).saveInitialStates(anyList());
+        order.verify(worker).handlePersistedMessages(List.of(internal));
+        order.verify(dlrService).saveInitialStates(anyList());
+        order.verify(worker).handlePersistedMessages(List.of(secondClient));
     }
 
     @Test
@@ -122,6 +162,12 @@ class InMemorySmppServerMessageStoreTest {
         int result = storeWithNullWorker.getMaxAttempts(true);
 
         assertEquals(3, result);
+    }
+
+    private InEvent<StandardMessage> event(String serial, SubmitSm submitSm) {
+        StandardMessage message = new StandardMessage();
+        message.serial = serial;
+        return new InEvent<>(message, submitSm, 1, new Timestamp(System.currentTimeMillis()));
     }
 
     @Test
