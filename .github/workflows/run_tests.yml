@@ -54,7 +54,7 @@ jobs:
         run: |
           export QUARKUS_LOG_LEVEL=ERROR
           chmod +x ./mvnw
-          ./mvnw verify -Ppostgresql-tests
+          ./mvnw verify
       - name: Build quick-start test image
         run: docker build -t sendium:quick-start-test -f sendium-app/src/main/docker/Dockerfile.jvm sendium-app
       - name: Test generated container startup

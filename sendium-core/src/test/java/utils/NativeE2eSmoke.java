@@ -83,10 +83,6 @@ public class NativeE2eSmoke {
             container = verifyUnpushedDlrSurvivesRestart(containerName, workDir, upstream);
             container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 2);
             verifySmppSubmitGetsDeliverSm(upstream, 3);
-
-            stopContainer(containerName);
-            container = startMvStoreContainer(containerName, workDir);
-            waitForMvStoreReadiness();
         } catch (Throwable t) {
             printDockerLogs(containerName);
             throw t;
@@ -222,39 +218,21 @@ public class NativeE2eSmoke {
     }
 
     private static Process startSendiumContainer(String containerName, Path workDir) throws Exception {
-        return startSendiumContainer(containerName, workDir, false);
-    }
-
-    private static Process startMvStoreContainer(String containerName, Path workDir) throws Exception {
-        return startSendiumContainer(containerName, workDir, true);
-    }
-
-    private static Process startSendiumContainer(String containerName, Path workDir, boolean mvStore) throws Exception {
-        List<String> command = new ArrayList<>(List.of(
+        List<String> command = List.of(
                 "docker", "run", "--rm", "-d",
                 "--name", containerName,
                 "--add-host", "host.docker.internal:host-gateway",
                 "-p", SENDIUM_HTTP_PORT + ":8080",
                 "-p", SENDIUM_SMPP_PORT + ":27777",
                 "-v", workDir.resolve("conf").toAbsolutePath() + ":/work/conf",
-                "-v", workDir.resolve("data").toAbsolutePath() + ":/work/data",
                 "-v", workDir.resolve("logs").toAbsolutePath() + ":/work/logs",
                 "-e", "QUARKUS_LOG_LEVEL=INFO",
-                "-e", "LOG_LEVEL=INFO"
-        ));
-        if (mvStore) {
-            command.addAll(List.of(
-                    "-e", "SENDIUM_DLR_STORAGE=mvstore",
-                    "-e", "SENDIUM_DLR_POSTGRESQL_ACTIVE=false"
-            ));
-        } else {
-            command.addAll(List.of(
-                    "-e", "SENDIUM_DLR_POSTGRESQL_JDBC_URL=" + POSTGRESQL_JDBC_URL,
-                    "-e", "SENDIUM_DLR_POSTGRESQL_USERNAME=" + POSTGRESQL_USERNAME,
-                    "-e", "SENDIUM_DLR_POSTGRESQL_PASSWORD=" + POSTGRESQL_PASSWORD
-            ));
-        }
-        command.add(IMAGE);
+                "-e", "LOG_LEVEL=INFO",
+                "-e", "SENDIUM_DLR_POSTGRESQL_JDBC_URL=" + POSTGRESQL_JDBC_URL,
+                "-e", "SENDIUM_DLR_POSTGRESQL_USERNAME=" + POSTGRESQL_USERNAME,
+                "-e", "SENDIUM_DLR_POSTGRESQL_PASSWORD=" + POSTGRESQL_PASSWORD,
+                IMAGE
+        );
         Process process = run(command, true);
         require(process.waitFor(30, TimeUnit.SECONDS), "Timed out starting Sendium container");
         require(process.exitValue() == 0, "Failed to start Sendium container");
@@ -264,7 +242,6 @@ public class NativeE2eSmoke {
     private static void writeRuntimeConfig(Path workDir) throws IOException {
         Path conf = workDir.resolve("conf");
         Files.createDirectories(conf);
-        Files.createDirectories(workDir.resolve("data"));
         Files.createDirectories(workDir.resolve("logs"));
 
         Files.writeString(conf.resolve("credentials.yml"), """
@@ -334,14 +311,6 @@ public class NativeE2eSmoke {
     }
 
     private static void waitForPostgresqlReadiness() throws Exception {
-        waitForStorageReadiness("postgresql", null);
-    }
-
-    private static void waitForMvStoreReadiness() throws Exception {
-        waitForStorageReadiness("mvstore", "persistent");
-    }
-
-    private static void waitForStorageReadiness(String backend, String mode) throws Exception {
         long deadline = System.nanoTime() + TIMEOUT.toNanos();
         while (System.nanoTime() < deadline) {
             try {
@@ -349,15 +318,14 @@ public class NativeE2eSmoke {
                 String body = response.body().replaceAll("\\s", "");
                 if (response.statusCode() == HttpURLConnection.HTTP_OK
                         && body.contains("\"name\":\"sendium-dlr-storage\"")
-                        && body.contains("\"backend\":\"" + backend + "\"")
-                        && (mode == null || body.contains("\"mode\":\"" + mode + "\""))) {
+                        && body.contains("\"backend\":\"postgresql\"")) {
                     return;
                 }
             } catch (IOException ignored) {
             }
             Thread.sleep(500);
         }
-        throw new IllegalStateException("Timed out waiting for " + backend + "-backed Sendium readiness");
+        throw new IllegalStateException("Timed out waiting for PostgreSQL-backed Sendium readiness");
     }
 
     private static void awaitSuccessfulStorageOperation(String operation) throws Exception {
