@@ -15,18 +15,12 @@ public class DlrStorageReadinessCheck implements HealthCheck {
     private static final String CHECK_NAME = "sendium-dlr-storage";
 
     @Inject
-    ConfiguredDlrStorage storage;
+    ManagedDlrStorage storage;
 
     @Override
     public HealthCheckResponse call() {
         HealthCheckResponseBuilder response = HealthCheckResponse.named(CHECK_NAME)
                 .withData("backend", storage.backend());
-        if (!"postgresql".equals(storage.backend())) {
-            return response.up()
-                    .withData("mode", storage.mode())
-                    .build();
-        }
-
         try {
             storage.verifyPostgresqlSchema();
             return response.up().build();
