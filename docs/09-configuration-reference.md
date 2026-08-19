@@ -47,9 +47,6 @@ In the Docker image, the working directory is `/work`, so the default configurat
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `SENDIUM_DLR_STORAGE` | `postgresql` | Selects `postgresql` or the explicit `mvstore` compatibility backend. |
-| `SENDIUM_DLR_MVSTORE_PATH` | `data/dlr-mvstore.db` | MVStore compatibility file path. |
-| `SENDIUM_DLR_POSTGRESQL_ACTIVE` | `true` | Activates the named PostgreSQL datasource and Flyway migration. Must be `false` when MVStore is selected. |
 | `SENDIUM_DLR_POSTGRESQL_JDBC_URL` | Empty | PostgreSQL JDBC URL. |
 | `SENDIUM_DLR_POSTGRESQL_USERNAME` | Empty | PostgreSQL role name when required by the database authentication method. |
 | `SENDIUM_DLR_POSTGRESQL_PASSWORD` | Empty | PostgreSQL password when required; provide through an access-controlled environment or secret. |
@@ -57,7 +54,7 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `SENDIUM_DLR_POSTGRESQL_POOL_MAX_SIZE` | `10` | Maximum datasource pool size. |
 | `SENDIUM_DLR_POSTGRESQL_ACQUISITION_TIMEOUT` | `5S` | Maximum wait for a pooled connection. |
 
-PostgreSQL selection is fail-closed. A default startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back. Explicit MVStore compatibility requires both `SENDIUM_DLR_STORAGE=mvstore` and `SENDIUM_DLR_POSTGRESQL_ACTIVE=false`. See [DLR Persistence](13-dlr-persistence.md) before switching an existing deployment; Sendium does not transfer pending state between MVStore and PostgreSQL.
+PostgreSQL is the only DLR persistence backend and is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
 
 ## Logs
 
@@ -84,7 +81,7 @@ When the HTTP server is running, Sendium exposes:
 | :--- | :--- |
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI JSON document. |
-| `/q/health/ready` | Readiness status and selected DLR backend. |
+| `/q/health/ready` | Readiness status and PostgreSQL DLR availability. |
 | `/q/metrics` | Prometheus metrics, including DLR storage and datasource metrics. |
 
 ## Related Documentation

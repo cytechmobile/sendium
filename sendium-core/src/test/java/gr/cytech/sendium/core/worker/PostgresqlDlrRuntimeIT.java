@@ -22,7 +22,6 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import utils.CaptorWorker;
 
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -41,13 +40,12 @@ import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 @QuarkusTestResource(value = PostgresqlDlrQuarkusTestResource.class, restrictToAnnotatedClass = true)
-@EnabledIfSystemProperty(named = "sendium.postgresql.tests", matches = "true")
-class PostgresqlDlrRuntimeTest {
+class PostgresqlDlrRuntimeIT {
     @Inject
     DlrStorage storage;
 
     @Inject
-    ConfiguredDlrStorage configuredStorage;
+    ManagedDlrStorage managedStorage;
 
     @Inject
     @DataSource("dlr")
@@ -66,8 +64,8 @@ class PostgresqlDlrRuntimeTest {
     @Test
     void wiresPoolMigrationStorageHealthAndMetrics() throws SQLException {
         long successfulSavesBefore = metricCount("save_initial", "success");
-        assertThat(storage).isSameAs(configuredStorage);
-        assertThat(configuredStorage.backend()).isEqualTo("postgresql");
+        assertThat(storage).isSameAs(managedStorage);
+        assertThat(managedStorage.backend()).isEqualTo("postgresql");
         assertThat(dataSource.getHandle().getBean().isActive()).isTrue();
         assertThat(flyway.getHandle().getBean().isActive()).isTrue();
         assertThat(flyway.get().info().current().getVersion().getVersion()).isEqualTo("1");
@@ -86,9 +84,9 @@ class PostgresqlDlrRuntimeTest {
                 .body("checks.find { it.name == 'sendium-dlr-storage' }.data.backend",
                         equalTo("postgresql"));
 
+        assertThat(metricCount("save_initial", "success")).isEqualTo(successfulSavesBefore + 1);
         assertThat(meterRegistry.find("sendium.dlr.storage.selected")
                 .tag("backend", "postgresql").gauge().value()).isEqualTo(1.0);
-        assertThat(metricCount("save_initial", "success")).isEqualTo(successfulSavesBefore + 1);
         assertThat(meterRegistry.getMeters())
                 .extracting(meter -> meter.getId().getName())
                 .anyMatch(name -> name.startsWith("agroal"));
@@ -120,7 +118,7 @@ class PostgresqlDlrRuntimeTest {
                 assertThat(failedSmpp.getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
                 assertThat(failedSmpp.getMessageId()).isBlank();
                 assertThat(captorWorker.captures).isEmpty();
-                assertThat(configuredStorage.backend()).isEqualTo("postgresql");
+                assertThat(managedStorage.backend()).isEqualTo("postgresql");
 
                 given()
                         .when().get("/q/health/ready")

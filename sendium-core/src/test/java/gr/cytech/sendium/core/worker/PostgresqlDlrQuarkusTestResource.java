@@ -16,10 +16,6 @@ public class PostgresqlDlrQuarkusTestResource implements QuarkusTestResourceLife
 
     @Override
     public Map<String, String> start() {
-        if (!Boolean.getBoolean("sendium.postgresql.tests")) {
-            return Map.of();
-        }
-
         postgresql = new PostgreSQLContainer("postgres:17-alpine")
                 .withDatabaseName("sendium")
                 .withUsername("sendium")
@@ -29,7 +25,6 @@ public class PostgresqlDlrQuarkusTestResource implements QuarkusTestResourceLife
         smppConfiguration = createSmppConfiguration(smppPort);
         String jdbcUrl = postgresql.getJdbcUrl() + "&connectTimeout=2&socketTimeout=2";
         return Map.ofEntries(
-                Map.entry("sendium.dlr.storage", "postgresql"),
                 Map.entry("quarkus.datasource.dlr.active", "true"),
                 Map.entry("quarkus.flyway.dlr.active", "true"),
                 Map.entry("quarkus.flyway.dlr.migrate-at-start", "true"),

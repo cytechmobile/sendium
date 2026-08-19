@@ -23,7 +23,7 @@ flowchart LR
     workerQueues[Worker queues]
     smppClients["SMPP client workers<br/>smppclient instances"]
     carriers["Upstream SMSCs<br/>carriers or SMPP providers"]
-    dlrStore["DLR storage<br/>PostgreSQL or MVStore"]
+    dlrStore["DLR storage<br/>PostgreSQL"]
     webhooks["HTTP webhooks<br/>DLR and MO callbacks"]
     config["Runtime config files<br/>credentials.yml<br/>smsg.properties<br/>routingTable.conf"]
 
@@ -216,9 +216,9 @@ Sendium expects runtime files in the configured `conf` directory.
 
 ## Persistence Boundaries
 
-Most runtime queues are in memory. DLR tracking, provider correlations, and unpushed downstream SMPP receipts can use PostgreSQL or the compatibility MVStore backend. Sendium completes the selected storage operation before HTTP routing or successful downstream SMPP acknowledgement; PostgreSQL makes that state durable, while MVStore can fall back to memory if its file cannot be opened. Queued and in-flight messages remain process-local.
+Most runtime queues are in memory. DLR tracking, provider correlations, and unpushed downstream SMPP receipts use PostgreSQL. Sendium completes the required storage operation before HTTP routing or successful downstream SMPP acknowledgement. Queued and in-flight messages remain process-local.
 
-PostgreSQL does not make multipart assembly, replay claims, callback retries, or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, cutover, rollback, and the remaining crash windows.
+PostgreSQL does not make multipart assembly, replay claims, callback retries, or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, and the remaining crash windows.
 
 ## Related Documentation
 
