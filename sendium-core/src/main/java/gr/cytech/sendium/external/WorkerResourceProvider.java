@@ -8,6 +8,7 @@ import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import io.quarkus.arc.DefaultBean;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +26,7 @@ public class WorkerResourceProvider {
 
     @Inject InMemoryQueueProvider queueProvider;
     @Inject CredentialFileWatcher  credentialFileWatcher;
-    @Inject DlrService dlrService;
+    @Inject Instance<DlrService> dlrServices;
     @Inject ForwardMoService forwardMoService;
     @Inject SmppClientHolder smppClientHolder;
 
@@ -41,7 +42,10 @@ public class WorkerResourceProvider {
     }
 
     public DlrService getDlrService() {
-        return dlrService;
+        if (dlrServices.isUnsatisfied()) {
+            throw new IllegalStateException("Sendium DLR persistence is disabled");
+        }
+        return dlrServices.get();
     }
 
     public ForwardMoService getForwardMoService() {

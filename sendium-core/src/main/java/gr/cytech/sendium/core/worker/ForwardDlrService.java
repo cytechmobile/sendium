@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
+import io.quarkus.arc.properties.IfBuildProperty;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 
 @ApplicationScoped
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
 public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
 
