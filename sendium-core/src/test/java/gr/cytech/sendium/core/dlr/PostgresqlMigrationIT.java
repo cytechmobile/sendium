@@ -5,7 +5,6 @@ import org.flywaydb.core.api.output.MigrateResult;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.sql.Connection;
@@ -20,8 +19,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@EnabledIfSystemProperty(named = "sendium.postgresql.tests", matches = "true")
-class PostgresqlMigrationTest {
+class PostgresqlMigrationIT {
     private static final String MIGRATION_LOCATION = "classpath:db/sendium-dlr/postgresql";
     private static final UUID INVALID_STATUS_GATEWAY_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000001");
