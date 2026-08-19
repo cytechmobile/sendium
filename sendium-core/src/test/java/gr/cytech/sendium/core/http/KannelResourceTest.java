@@ -8,6 +8,7 @@ import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.MessageState;
+import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,7 @@ class KannelResourceTest {
 
     private Queue<StandardMessage> routerQueue;
     private DlrService dlrService;
+    private Instance<DlrService> dlrServices;
     private KannelResource resource;
 
     @BeforeEach
@@ -51,7 +53,9 @@ class KannelResourceTest {
         resource.credentialFileWatcher = credentials;
         resource.configurationHandler = mock(SendiumConfigurationHandler.class);
         dlrService = mock(DlrService.class);
-        resource.dlrService = dlrService;
+        dlrServices = mock(Instance.class);
+        when(dlrServices.get()).thenReturn(dlrService);
+        resource.dlrServices = dlrServices;
     }
 
     @Test
@@ -82,6 +86,17 @@ class KannelResourceTest {
         assertThat(response.getStatus()).isEqualTo(Response.Status.SERVICE_UNAVAILABLE.getStatusCode());
         assertThat(response.getEntity()).isEqualTo("Temporal failure, try again later.");
         verify(routerQueue, never()).enqueue(any(StandardMessage.class));
+    }
+
+    @Test
+    void acceptsSubmissionWithoutDlrTrackingWhenPersistenceIsDisabled() throws InterruptedException {
+        when(dlrServices.isUnsatisfied()).thenReturn(true);
+
+        Response response = submit("https://callback.test/dlr");
+
+        assertThat(response.getStatus()).isEqualTo(Response.Status.ACCEPTED.getStatusCode());
+        verify(dlrService, never()).saveInitialState(any(MessageState.class));
+        verify(routerQueue).enqueue(any(StandardMessage.class));
     }
 
     @Test

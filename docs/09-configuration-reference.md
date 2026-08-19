@@ -56,6 +56,12 @@ In the Docker image, the working directory is `/work`, so the default configurat
 
 PostgreSQL is the only DLR persistence backend and is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
 
+### Core Embedding
+
+`sendium.dlr.persistence.enabled` is a build-time setting. The `sendium-core` module defaults it to `false`, while the standalone `sendium-app` sets it to `true`.
+
+When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. An application that embeds `sendium-core` must set the property to `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. Enabled persistence remains fail-closed.
+
 ## Logs
 
 | Log | Description |
