@@ -4,6 +4,12 @@ Sendium stores the state needed to correlate upstream delivery receipts (DLRs) a
 
 This storage boundary does not make Sendium's message queues or all delivery processing durable. Review [Durability Boundaries](#durability-boundaries) before using restart recovery as a delivery guarantee.
 
+## Application Boundary
+
+The standalone `sendium-app` enables PostgreSQL DLR persistence and requires it to be available. Applications that embed `sendium-core` default to no Sendium-owned DLR subsystem and can run without a DLR database.
+
+The `sendium.dlr.persistence.enabled` build-time property controls this boundary. When it is `false`, the DLR services, PostgreSQL datasource, Flyway migration, and storage readiness check are absent. Set the property to `true` before Quarkus augmentation to opt into the complete DLR subsystem; partial or no-op persistence is not provided.
+
 ## Quick Start PostgreSQL
 
 The generated Quick Start runtime creates:
