@@ -10,6 +10,7 @@ import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.util.MessageTrace;
 import jakarta.annotation.security.PermitAll;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
@@ -45,7 +46,7 @@ public class KannelResource {
     CredentialFileWatcher credentialFileWatcher;
 
     @Inject
-    DlrService dlrService;
+    Instance<DlrService> dlrServices;
 
     @Inject
     SendiumConfigurationHandler configurationHandler;
@@ -211,8 +212,10 @@ public class KannelResource {
             }
             msg.acked = true;
             msg.serial = UUID.randomUUID().toString();
-            MessageState state = new MessageState(msg.serial, usr, msg.from, msg.to, dlrUrl);
-            dlrService.saveInitialState(state);
+            if (!dlrServices.isUnsatisfied()) {
+                MessageState state = new MessageState(msg.serial, usr, msg.from, msg.to, dlrUrl);
+                dlrServices.get().saveInitialState(state);
+            }
             queueProvider.getRouterQueue().enqueue(msg);
             if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
                 logger.info("message.accepted ingress=http {}", MessageTrace.identifiers(msg));
