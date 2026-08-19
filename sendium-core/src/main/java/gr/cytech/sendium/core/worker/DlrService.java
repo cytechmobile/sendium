@@ -1,6 +1,7 @@
 package gr.cytech.sendium.core.worker;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import io.quarkus.arc.properties.IfBuildProperty;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -8,6 +9,7 @@ import java.util.List;
 import java.util.Optional;
 
 @ApplicationScoped
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
 public class DlrService {
     @Inject
     DlrStorage storage;

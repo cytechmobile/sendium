@@ -7,6 +7,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.quarkus.agroal.DataSource;
 import io.quarkus.arc.InjectableInstance;
+import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,6 +23,7 @@ import java.util.function.Supplier;
 
 @Startup
 @ApplicationScoped
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
 public class ManagedDlrStorage implements DlrStorage {
     private static final String METRIC_NAME = "sendium.dlr.storage.operation";
     private static final String BACKEND = "postgresql";

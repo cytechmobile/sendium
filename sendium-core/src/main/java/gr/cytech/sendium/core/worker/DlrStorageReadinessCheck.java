@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
+import io.quarkus.arc.properties.IfBuildProperty;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.health.HealthCheck;
@@ -11,6 +12,7 @@ import java.sql.SQLException;
 
 @Readiness
 @ApplicationScoped
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
 public class DlrStorageReadinessCheck implements HealthCheck {
     private static final String CHECK_NAME = "sendium-dlr-storage";
 
