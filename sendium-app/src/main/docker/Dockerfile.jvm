@@ -6,7 +6,7 @@ COPY target/quarkus-app/ ./
 
 EXPOSE 8080 27777
 
-VOLUME ["/work/conf", "/work/logs", "/work/data"]
+VOLUME ["/work/conf", "/work/logs"]
 
 # The "-Dquarkus.http.host=0.0.0.0" argument is important to make the application accessible from outside the container.
 CMD ["java", "-Dquarkus.http.host=0.0.0.0", "-jar", "quarkus-run.jar"]

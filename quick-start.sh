@@ -420,7 +420,7 @@ else
     fi
 fi
 
-mkdir -p "$target_dir/conf" "$target_dir/data" "$target_dir/logs"
+mkdir -p "$target_dir/conf" "$target_dir/logs"
 staging_dir=$(mktemp -d "$target_dir/.quick-start.XXXXXX") || fail "could not create a staging directory"
 mkdir -p "$staging_dir/conf"
 install_started=false
@@ -454,8 +454,6 @@ SENDIUM_HTTP_USER='$http_user'
 SENDIUM_HTTP_PASSWORD='$http_password'
 SENDIUM_SMPP_USER='$smpp_user'
 SENDIUM_SMPP_PASSWORD='$smpp_password'
-SENDIUM_DLR_STORAGE='postgresql'
-SENDIUM_DLR_POSTGRESQL_ACTIVE='true'
 SENDIUM_DLR_POSTGRESQL_JDBC_URL='$database_jdbc_url'
 SENDIUM_DLR_POSTGRESQL_USERNAME='$database_username'
 SENDIUM_DLR_POSTGRESQL_PASSWORD='$database_password'
@@ -587,7 +585,6 @@ cat >> "$staging_dir/compose.yml" <<'EOF'
       - "127.0.0.1:27777:27777"
     volumes:
       - ./conf:/work/conf
-      - ./data:/work/data
       - ./logs:/work/logs
 EOF
 

@@ -21,7 +21,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 | Start migrating from Kannel config | [Kannel migration converter](https://cytechmobile.github.io/sendium/) |
 | Understand releases and publishing | [11. Release Process](11-release-process.md) |
 | Review current features and roadmap | [12. Features And Roadmap](12-features-roadmap.md) |
-| Configure PostgreSQL DLR persistence or plan a cutover | [13. DLR Persistence](13-dlr-persistence.md) |
+| Configure PostgreSQL DLR persistence and review durability | [13. DLR Persistence](13-dlr-persistence.md) |
 | Contribute code or docs | [Contributing](../.github/CONTRIBUTING.md) |
 
 ## Core Concepts
@@ -62,7 +62,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [10. Troubleshooting](10-troubleshooting.md) | Common startup, authentication, routing, SMPP, webhook, and logging issues. |
 | [11. Release Process](11-release-process.md) | Release Please flow, Conventional Commit rules, release PR handling, GitHub Packages, and Docker publishing. |
 | [12. Features And Roadmap](12-features-roadmap.md) | Current product capabilities, planned roadmap phases, and related feature documentation. |
-| [13. DLR Persistence](13-dlr-persistence.md) | PostgreSQL and MVStore setup, retention, restart guarantees, cutover, rollback, and durability limits. |
+| [13. DLR Persistence](13-dlr-persistence.md) | PostgreSQL setup, retention, restart guarantees, and durability limits. |
 | [Kannel migration converter](https://cytechmobile.github.io/sendium/) | Browser-only helper for turning a legacy `kannel.conf` into Sendium starter files. |
 
 ## API Discovery
@@ -75,7 +75,7 @@ When Sendium is running, the HTTP API can be inspected through:
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI specification. |
 | `/q/metrics` | Prometheus-compatible Micrometer metrics endpoint. |
-| `/q/health/ready` | Readiness status, including the selected DLR storage backend. |
+| `/q/health/ready` | Readiness status, including PostgreSQL DLR storage availability. |
 
 ## Community And Project Files
 

@@ -10,7 +10,6 @@ import io.quarkus.arc.InjectableInstance;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -18,23 +17,19 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.function.Supplier;
 
 @Startup
 @ApplicationScoped
-public class ConfiguredDlrStorage implements DlrStorage {
+public class ManagedDlrStorage implements DlrStorage {
     private static final String METRIC_NAME = "sendium.dlr.storage.operation";
+    private static final String BACKEND = "postgresql";
     private static final String POSTGRESQL_PROBE_SQL = """
             SELECT 1
             FROM sendium_dlr.tracked_message
             WHERE FALSE
             """;
-
-    @Inject
-    @ConfigProperty(name = "sendium.dlr.storage", defaultValue = "postgresql")
-    String configuredBackend;
 
     @Inject
     @ConfigProperty(name = "quarkus.flyway.dlr.active", defaultValue = "false")
@@ -45,9 +40,6 @@ public class ConfiguredDlrStorage implements DlrStorage {
     boolean flywayMigrateAtStart;
 
     @Inject
-    Instance<MvStoreDlrStorage> mvStoreStorage;
-
-    @Inject
     @DataSource("dlr")
     InjectableInstance<AgroalDataSource> postgresqlDataSource;
 
@@ -56,47 +48,26 @@ public class ConfiguredDlrStorage implements DlrStorage {
 
     private DlrStorage delegate;
     private AgroalDataSource selectedPostgresqlDataSource;
-    private String backend;
 
     @PostConstruct
     void initialize() {
-        backend = configuredBackend.strip().toLowerCase(Locale.ROOT);
         boolean postgresqlActive = postgresqlDataSource.getHandle().getBean().isActive();
-        delegate = switch (backend) {
-            case "mvstore" -> {
-                if (postgresqlActive || flywayActive || flywayMigrateAtStart) {
-                    throw new IllegalStateException(
-                            "The DLR PostgreSQL datasource and Flyway must be inactive when MVStore is selected");
-                }
-                yield mvStoreStorage.get();
-            }
-            case "postgresql" -> {
-                if (!postgresqlActive || !flywayActive || !flywayMigrateAtStart) {
-                    throw new IllegalStateException(
-                            "PostgreSQL DLR storage requires the active 'dlr' datasource and Flyway migration");
-                }
-                selectedPostgresqlDataSource = postgresqlDataSource.get();
-                yield new PostgresqlDlrStorage(selectedPostgresqlDataSource);
-            }
-            default -> throw new IllegalStateException("Unsupported DLR storage backend: " + backend);
-        };
+        if (!postgresqlActive || !flywayActive || !flywayMigrateAtStart) {
+            throw new IllegalStateException(
+                    "PostgreSQL DLR storage requires the active 'dlr' datasource and Flyway migration");
+        }
+        selectedPostgresqlDataSource = postgresqlDataSource.get();
+        delegate = new PostgresqlDlrStorage(selectedPostgresqlDataSource);
 
         Gauge.builder("sendium.dlr.storage.selected", this, ignored -> 1.0)
-                .description("Selected Sendium DLR storage backend")
-                .tag("backend", backend)
+                .description("Active Sendium DLR storage backend")
+                .tag("backend", BACKEND)
                 .strongReference(true)
                 .register(meterRegistry);
     }
 
     String backend() {
-        return backend;
-    }
-
-    String mode() {
-        if (delegate instanceof MvStoreDlrStorage mvStore) {
-            return mvStore.isPersistent() ? "persistent" : "memory";
-        }
-        return "persistent";
+        return BACKEND;
     }
 
     void verifyPostgresqlSchema() throws SQLException {
@@ -186,7 +157,7 @@ public class ConfiguredDlrStorage implements DlrStorage {
     private Timer timer(String operation, String outcome) {
         return Timer.builder(METRIC_NAME)
                 .description("Sendium DLR storage operation latency")
-                .tags("backend", backend, "operation", operation, "outcome", outcome)
+                .tags("backend", BACKEND, "operation", operation, "outcome", outcome)
                 .register(meterRegistry);
     }
 }

@@ -27,10 +27,19 @@ cd sendium
 ```
 **2. Start the application in development mode:**
 
-PostgreSQL is the runtime default. To run locally without a database, explicitly select MVStore compatibility mode:
+Start a local PostgreSQL instance:
+
 ```bash
-SENDIUM_DLR_STORAGE=mvstore \
-SENDIUM_DLR_POSTGRESQL_ACTIVE=false \
+docker run --rm -d --name sendium-postgres-dev \
+  -e POSTGRES_DB=sendium \
+  -e POSTGRES_USER=sendium \
+  -e POSTGRES_PASSWORD=sendium-dev \
+  -p 5432:5432 \
+  postgres:17-alpine
+
+SENDIUM_DLR_POSTGRESQL_JDBC_URL=jdbc:postgresql://localhost:5432/sendium \
+SENDIUM_DLR_POSTGRESQL_USERNAME=sendium \
+SENDIUM_DLR_POSTGRESQL_PASSWORD=sendium-dev \
   ./mvnw -pl sendium-app -am quarkus:dev
 ```
 Note: This will start the server with live reload enabled. Any changes you make to the Java code will automatically trigger a compilation and reload.
@@ -38,8 +47,16 @@ Note: This will start the server with live reload enabled. Any changes you make 
 On Windows PowerShell:
 
 ```powershell
-$env:SENDIUM_DLR_STORAGE = "mvstore"
-$env:SENDIUM_DLR_POSTGRESQL_ACTIVE = "false"
+docker run --rm -d --name sendium-postgres-dev `
+  -e POSTGRES_DB=sendium `
+  -e POSTGRES_USER=sendium `
+  -e POSTGRES_PASSWORD=sendium-dev `
+  -p 5432:5432 `
+  postgres:17-alpine
+
+$env:SENDIUM_DLR_POSTGRESQL_JDBC_URL = "jdbc:postgresql://localhost:5432/sendium"
+$env:SENDIUM_DLR_POSTGRESQL_USERNAME = "sendium"
+$env:SENDIUM_DLR_POSTGRESQL_PASSWORD = "sendium-dev"
 .\mvnw.cmd -pl sendium-app -am quarkus:dev
 ```
 
@@ -47,15 +64,15 @@ $env:SENDIUM_DLR_POSTGRESQL_ACTIVE = "false"
 
 We value reliability. Before submitting any changes, please ensure all tests pass.
 
-You do not need Docker running locally to execute the default unit and integration suite. PostgreSQL-specific tests are skipped:
+Unit tests do not require Docker:
 ```bash
-./mvnw verify
+./mvnw test
 ```
 
-To include the PostgreSQL migration, adapter, and outage tests, start Docker and run:
+The complete verification suite includes PostgreSQL migration, adapter, Quarkus, outage, and protocol tests. Start Docker and run:
 
 ```bash
-./mvnw verify -Ppostgresql-tests
+./mvnw verify
 ```
 **4. 💅 Code Style & Linting**
 

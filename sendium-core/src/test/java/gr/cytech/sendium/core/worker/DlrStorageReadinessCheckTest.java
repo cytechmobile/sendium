@@ -13,23 +13,8 @@ import static org.mockito.Mockito.when;
 
 class DlrStorageReadinessCheckTest {
     @Test
-    void reportsMvStoreMode() {
-        ConfiguredDlrStorage storage = mock(ConfiguredDlrStorage.class);
-        when(storage.backend()).thenReturn("mvstore");
-        when(storage.mode()).thenReturn("memory");
-        DlrStorageReadinessCheck check = new DlrStorageReadinessCheck();
-        check.storage = storage;
-
-        HealthCheckResponse response = check.call();
-        Map<String, Object> data = response.getData().orElseThrow();
-
-        assertThat(response.getStatus()).isEqualTo(HealthCheckResponse.Status.UP);
-        assertThat(data).containsEntry("backend", "mvstore").containsEntry("mode", "memory");
-    }
-
-    @Test
     void reportsPostgresqlSchemaAsReady() throws SQLException {
-        ConfiguredDlrStorage storage = mock(ConfiguredDlrStorage.class);
+        ManagedDlrStorage storage = mock(ManagedDlrStorage.class);
         when(storage.backend()).thenReturn("postgresql");
         DlrStorageReadinessCheck check = new DlrStorageReadinessCheck();
         check.storage = storage;
@@ -43,7 +28,7 @@ class DlrStorageReadinessCheckTest {
 
     @Test
     void reportsSanitizedPostgresqlFailure() throws SQLException {
-        ConfiguredDlrStorage storage = mock(ConfiguredDlrStorage.class);
+        ManagedDlrStorage storage = mock(ManagedDlrStorage.class);
         when(storage.backend()).thenReturn("postgresql");
         doThrow(new SQLException("jdbc:postgresql://secret-host/database"))
                 .when(storage).verifyPostgresqlSchema();
