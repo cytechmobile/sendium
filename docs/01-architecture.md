@@ -157,7 +157,7 @@ Outbound HTTP messages can include a Kannel-style `dlr-url`. Sendium stores the 
 sequenceDiagram
     participant SMSC as Upstream SMSC
     participant Worker as SmppClientWorker
-    participant Tracker as InMemoryMessageTracker
+    participant Tracker as StandardMessageTracker
     participant Store as DlrStorage
     participant Router as Router queue
     participant DLRHook as ForwardDlrService
