@@ -11,26 +11,24 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
-public class InMemoryMessageTracker implements Tracker<StandardMessage> {
+public class StandardMessageTracker implements Tracker<StandardMessage> {
 
-    private static final Logger logger = LoggerFactory.getLogger(InMemoryMessageTracker.class);
+    private static final Logger logger = LoggerFactory.getLogger(StandardMessageTracker.class);
     AbstractOutWorker<StandardMessage> outWorker;
-    private final ConcurrentLinkedQueue<StandardMessage> dlrQueue = new ConcurrentLinkedQueue<>();
 
-    public InMemoryMessageTracker(AbstractOutWorker<StandardMessage> worker) {
+    public StandardMessageTracker(AbstractOutWorker<StandardMessage> worker) {
         this.outWorker = worker;
     }
 
     @Override
     public void init() {
-        logger.info("InMemoryMessageTracker initialized");
+        logger.info("StandardMessageTracker initialized");
     }
 
     @Override
     public boolean stop() {
-        logger.info("InMemoryMessageTracker stopping");
+        logger.info("StandardMessageTracker stopping");
         return true;
     }
 
@@ -125,11 +123,4 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
         return 0;
     }
 
-    public StandardMessage pollDlr() {
-        return dlrQueue.poll();
-    }
-
-    public int getDlrQueueSize() {
-        return dlrQueue.size();
-    }
 }

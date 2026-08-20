@@ -21,7 +21,7 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class InMemoryMessageTrackerTest {
+class StandardMessageTrackerTest {
 
     @Mock
     private AbstractOutWorker<StandardMessage> outWorker;
@@ -32,7 +32,7 @@ class InMemoryMessageTrackerTest {
     @Mock
     private DlrService dlrService;
 
-    private InMemoryMessageTracker tracker;
+    private StandardMessageTracker tracker;
 
     @BeforeEach
     void setUp() {
@@ -42,7 +42,7 @@ class InMemoryMessageTrackerTest {
         when(outWorker.getType()).thenReturn("testWorker");
         when(outWorker.getDlrProviderName()).thenReturn("provider-1");
 
-        tracker = new InMemoryMessageTracker(outWorker);
+        tracker = new StandardMessageTracker(outWorker);
     }
 
     @Test
@@ -180,8 +180,4 @@ class InMemoryMessageTrackerTest {
         verify(dlrService).resolveAndRemoveDlr("provider-1", "unknown", 0);
     }
 
-    @Test
-    void getDlrQueueSize_ReturnsQueueSize() {
-        assertEquals(0, tracker.getDlrQueueSize());
-    }
 }
