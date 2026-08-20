@@ -58,9 +58,9 @@ PostgreSQL is the only DLR persistence backend and is fail-closed. Startup requi
 
 ### Core Embedding
 
-`sendium.dlr.persistence.enabled` is a build-time setting. The `sendium-core` module defaults it to `false`, while the standalone `sendium-app` sets it to `true`.
+`sendium.dlr.persistence.enabled` is a build-time setting. The `sendium-core` module leaves it undefined, which means disabled; the standalone `sendium-app` sets it to `true`.
 
-When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. An application that embeds `sendium-core` must set the property to `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. Enabled persistence remains fail-closed.
+When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. Submissions are still accepted and routed, but no gateway DLR state is stored and Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` must declare the property as `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. Enabled persistence remains fail-closed.
 
 ## Logs
 

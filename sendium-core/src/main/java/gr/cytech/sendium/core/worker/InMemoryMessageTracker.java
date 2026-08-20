@@ -43,17 +43,27 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
     }
 
     @Override
-    public int updateSendStatusAndExtID(String smsid, StandardMessage pMsg, String smscid) {
-        smsid = pMsg.serial; //in our case no hash needed
-        if (smsid != null && !smsid.isEmpty() && smscid != null && !smscid.isEmpty()) {
-            outWorker.getWorkerResources().getDlrService().linkOperatorId(smsid, smscid);
-            if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_OPERATOR_LINKED)) {
-                logger.info("message.operator.linked operatorMsgId={} {}", MessageTrace.value(smscid), MessageTrace.identifiers(pMsg));
-            }
-            return 1;
+    public int updateSendStatusAndExtID(String hashedProviderMessageId, StandardMessage message,
+                                        String providerMessageId) {
+        String gatewayMessageId = message.serial;
+        String providerName = outWorker.getDlrProviderName();
+        if (gatewayMessageId == null || gatewayMessageId.isBlank() ||
+                providerName == null || providerName.isBlank() ||
+                providerMessageId == null || providerMessageId.isBlank()) {
+            logger.warn("Invalid DLR correlation identifiers");
+            return 0;
         }
-        logger.warn("Invalid parameters: smsid={}, smscid={}", smsid, smscid);
-        return 0;
+        if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
+            return 0;
+        }
+
+        outWorker.getWorkerResources().getDlrService()
+                .linkProviderMessageId(gatewayMessageId, providerName, providerMessageId);
+        if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_PROVIDER_LINKED)) {
+            logger.info("message.provider.linked providerMessageId={} {}", MessageTrace.value(providerMessageId),
+                    MessageTrace.identifiers(message));
+        }
+        return 1;
     }
 
     @Override
@@ -71,9 +81,15 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
     }
 
     @Override
-    public void createAndEnqueueDLR(int mqid, String smscid, String smsid, String from, String to,
+    public void createAndEnqueueDLR(int mqid, String providerMessageId, String hashedProviderMessageId,
+                                    String from, String to,
                                     String body, int state, String errorCode, HashMap<String, String> tlvs) {
-        Optional<MessageState> optState = outWorker.getWorkerResources().getDlrService().resolveAndRemoveDlr(smscid, state);
+        if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
+            return;
+        }
+
+        Optional<MessageState> optState = outWorker.getWorkerResources().getDlrService()
+                .resolveAndRemoveDlr(outWorker.getDlrProviderName(), providerMessageId, state);
 
         if (optState.isPresent()) {
             MessageState msgState = optState.get();
@@ -96,10 +112,11 @@ public class InMemoryMessageTracker implements Tracker<StandardMessage> {
                 outWorker.handleException(ie);
             }
             if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_DLR)) {
-                logger.info("message.dlr status={} operatorMsgId={} {}", state, MessageTrace.value(smscid), MessageTrace.identifiers(dlrMsg));
+                logger.info("message.dlr status={} providerMessageId={} {}", state,
+                        MessageTrace.value(providerMessageId), MessageTrace.identifiers(dlrMsg));
             }
         } else {
-            logger.warn("DLR received for unknown/expired message: smsid={}", smsid);
+            logger.warn("DLR received for unknown/expired provider message ID");
         }
     }
 

@@ -17,7 +17,7 @@ public final class MessageTrace {
     public static final String EVENT_DELIVERY_FAILED = "message.delivery.failed";
     public static final String EVENT_DELIVERY_RETRY = "message.delivery.retry";
     public static final String EVENT_ENQUEUED = "message.enqueued";
-    public static final String EVENT_OPERATOR_LINKED = "message.operator.linked";
+    public static final String EVENT_PROVIDER_LINKED = "message.provider.linked";
     public static final String EVENT_ROUTED = "message.routed";
     public static final String EVENT_ROUTING_MISS = "message.routing.miss";
     public static final String EVENT_SUBMITTED = "message.submitted";

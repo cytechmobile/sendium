@@ -139,7 +139,7 @@ public class NativeE2eSmoke {
             require(!gatewayId.isBlank(), "HTTP /sendsms did not return a gateway message id");
             require(upstream.awaitSubmitCount(expectedSubmitCount),
                     "Upstream SMPP server did not receive the HTTP-originated message");
-            awaitSuccessfulStorageOperation("link_operator");
+            awaitSuccessfulStorageOperation("link_provider");
 
             int boundSessionsBeforeRestart = upstream.boundSessionCount();
             stopContainer(containerName);
@@ -173,7 +173,7 @@ public class NativeE2eSmoke {
             gatewayId = response.getMessageId();
             require(gatewayId != null && !gatewayId.isBlank(), "SMPP restart submit_sm_resp did not contain a message id");
             require(upstream.awaitSubmitCount(1), "Upstream SMPP server did not receive the restart test message");
-            awaitSuccessfulStorageOperation("link_operator");
+            awaitSuccessfulStorageOperation("link_provider");
         }
 
         Thread.sleep(500);

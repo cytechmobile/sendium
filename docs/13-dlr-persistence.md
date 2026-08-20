@@ -8,7 +8,9 @@ This storage boundary does not make Sendium's message queues or all delivery pro
 
 The standalone `sendium-app` enables PostgreSQL DLR persistence and requires it to be available. Applications that embed `sendium-core` default to no Sendium-owned DLR subsystem and can run without a DLR database.
 
-The `sendium.dlr.persistence.enabled` build-time property controls this boundary. When it is `false`, the DLR services, PostgreSQL datasource, Flyway migration, and storage readiness check are absent. Set the property to `true` before Quarkus augmentation to opt into the complete DLR subsystem; partial or no-op persistence is not provided.
+The `sendium.dlr.persistence.enabled` build-time property controls this boundary. `sendium-core` leaves it undefined and an undefined property means disabled, so an embedding application opts in by declaring it as `true` itself before Quarkus augmentation. When it is not enabled, the DLR services, PostgreSQL datasource, Flyway migration, and storage readiness check are absent; partial or no-op persistence is not provided.
+
+Message paths degrade rather than fail when the subsystem is absent. HTTP and downstream SMPP submissions are accepted and routed without gateway DLR state, undelivered downstream receipts fall back to the worker's in-memory retry, and provider receipts are not correlated, so Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` without this subsystem is expected to supply its own `Tracker` and message store if it needs delivery receipts.
 
 ## Quick Start PostgreSQL
 
@@ -28,7 +30,7 @@ sh quick-start.sh
 
 `docker compose down` removes the containers and network but retains the PostgreSQL volume. Do not use `docker compose down --volumes` or manually delete the volume unless permanent database deletion is intended.
 
-Quick Start preserves the local database password during `--force` regeneration. PostgreSQL initialization variables cannot rotate the password of a role that already exists in a persistent data volume.
+Quick Start preserves the local database password during `--force` regeneration, including while an external database is temporarily selected. PostgreSQL initialization variables cannot rotate the password of a role that already exists in a persistent data volume. If the saved local password is lost, Quick Start fails with instructions to delete both the volume and its generated Compose marker before a new password is generated.
 
 ## Upgrade From MVStore Builds
 
@@ -94,17 +96,21 @@ Relevant metrics include storage-operation latency/counts tagged by backend, ope
 
 PostgreSQL is fail-closed. If required persistence is unavailable, new HTTP submissions return the retryable `503` response and new SMPP submissions return `ESME_RSYSERR`; Sendium does not fall back to local or in-memory storage.
 
+Provider message IDs are correlated within the outbound provider namespace rather than globally. The worker instance name is the default namespace; workers connected to the same SMSC account can share `msg.hash.prefix` when that SMSC may deliver their receipts interchangeably. Different providers may therefore return the same message ID without overwriting each other's state. The namespace must remain stable while correlations are outstanding: changing `msg.hash.prefix` or renaming a worker using the default makes earlier receipts unresolvable.
+
 ## Retention
 
 The V1 retention thresholds are fixed application behavior, not environment settings:
 
 | State | Eligible for cleanup after |
 | :--- | :--- |
-| Provider/operator correlation | 3 days |
+| Provider message correlation | 3 days |
 | Tracked gateway message | 7 days |
 | Unpushed downstream SMPP receipt | 7 days |
 
 Cleanup is triggered by storage activity and runs no more than once per hour. These values are therefore eligibility thresholds, not exact physical deletion deadlines: idle records can remain in the database longer, and an active deployment can retain newly eligible state until the next cleanup pass. A provider receipt cannot be matched after its correlation has been removed. Making the thresholds or cleanup schedule configurable is outside the V1 storage replacement.
+
+Cleanup is best-effort maintenance and is isolated from message handling. One caller at a time runs a pass while every other caller proceeds immediately, and a failed pass is logged and left until the next interval rather than rejecting the submission that triggered it.
 
 ## Durability Boundaries
 

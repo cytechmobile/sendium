@@ -21,8 +21,6 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-
-@ExtendWith(MockitoExtension.class)
 class InMemoryMessageTrackerTest {
 
     @Mock
@@ -39,8 +37,10 @@ class InMemoryMessageTrackerTest {
     @BeforeEach
     void setUp() {
         when(outWorker.getWorkerResources()).thenReturn(workerResources);
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(true);
         when(workerResources.getDlrService()).thenReturn(dlrService);
         when(outWorker.getType()).thenReturn("testWorker");
+        when(outWorker.getDlrProviderName()).thenReturn("provider-1");
 
         tracker = new InMemoryMessageTracker(outWorker);
     }
@@ -50,32 +50,77 @@ class InMemoryMessageTrackerTest {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = "gw-123";
 
-        int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, "op-456");
+        int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456");
 
         assertEquals(1, result);
-        verify(dlrService).linkOperatorId("gw-123", "op-456");
+        verify(dlrService).linkProviderMessageId("gw-123", "provider-1", "provider-message-456");
     }
 
     @Test
-    void updateSendStatusAndExtID_WithNullSmsid_Returns0() {
+    void updateSendStatusAndExtID_WithNullGatewayMessageId_Returns0() {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = null;
 
-        int result = tracker.updateSendStatusAndExtID(null, pMsg, "op-456");
+        int result = tracker.updateSendStatusAndExtID(null, pMsg, "provider-message-456");
 
         assertEquals(0, result);
-        verify(dlrService, never()).linkOperatorId(any(), any());
+        verify(dlrService, never()).linkProviderMessageId(any(), any(), any());
     }
 
     @Test
-    void updateSendStatusAndExtID_WithNullSmscid_Returns0() {
+    void updateSendStatusAndExtID_WithNullProviderMessageId_Returns0() {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = "gw-123";
 
         int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, null);
 
         assertEquals(0, result);
-        verify(dlrService, never()).linkOperatorId(any(), any());
+        verify(dlrService, never()).linkProviderMessageId(any(), any(), any());
+    }
+
+    @Test
+    void updateSendStatusAndExtID_WhenStorageFails_PropagatesToProtocolBoundary() {
+        StandardMessage pMsg = new StandardMessage();
+        pMsg.serial = "gw-123";
+        doThrow(new DlrStorageException("Failed to link provider DLR ID"))
+                .when(dlrService).linkProviderMessageId("gw-123", "provider-1", "provider-message-456");
+
+        assertThrows(DlrStorageException.class,
+                () -> tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456"));
+    }
+
+    @Test
+    void updateSendStatusAndExtID_WhenPersistenceDisabled_SkipsLinking() {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
+        StandardMessage pMsg = new StandardMessage();
+        pMsg.serial = "gw-123";
+
+        int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456");
+
+        assertEquals(0, result);
+        verify(workerResources, never()).getDlrService();
+    }
+
+    @Test
+    void createAndEnqueueDLR_WhenStorageFails_PropagatesToProtocolBoundary() throws InterruptedException {
+        when(dlrService.resolveAndRemoveDlr("provider-1", "provider-message-456", 0))
+                .thenThrow(new DlrStorageException("Failed to resolve DLR state"));
+
+        assertThrows(DlrStorageException.class, () -> tracker.createAndEnqueueDLR(
+                1, "provider-message-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>()));
+
+        verify(outWorker, never()).enqueueToRouter(any());
+    }
+
+    @Test
+    void createAndEnqueueDLR_WhenPersistenceDisabled_DoesNotResolve() throws InterruptedException {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
+
+        tracker.createAndEnqueueDLR(
+                1, "provider-message-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
+
+        verify(workerResources, never()).getDlrService();
+        verify(outWorker, never()).enqueueToRouter(any());
     }
 
     @Test
@@ -97,11 +142,13 @@ class InMemoryMessageTrackerTest {
     @Test
     void createAndEnqueueDLR_KnownMessage_ResolvesFromDlrService() throws InterruptedException {
         MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
-        when(dlrService.resolveAndRemoveDlr("op-456", 0)).thenReturn(java.util.Optional.of(state));
+        when(dlrService.resolveAndRemoveDlr("provider-1", "provider-message-456", 0))
+                .thenReturn(java.util.Optional.of(state));
 
-        tracker.createAndEnqueueDLR(1, "op-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
+        tracker.createAndEnqueueDLR(
+                1, "provider-message-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
 
-        verify(dlrService).resolveAndRemoveDlr("op-456", 0);
+        verify(dlrService).resolveAndRemoveDlr("provider-1", "provider-message-456", 0);
         ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
         verify(outWorker).enqueueToRouter(captor.capture());
         assertEquals("accountId", captor.getValue().owner_id);
@@ -112,9 +159,11 @@ class InMemoryMessageTrackerTest {
     void createAndEnqueueDLR_KnownReassembledMessage_RestoresPartIds() throws InterruptedException {
         MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
         state.setReassembledParts(new ArrayList<>(List.of("part-1", "part-2")));
-        when(dlrService.resolveAndRemoveDlr("op-456", 1)).thenReturn(java.util.Optional.of(state));
+        when(dlrService.resolveAndRemoveDlr("provider-1", "provider-message-456", 1))
+                .thenReturn(java.util.Optional.of(state));
 
-        tracker.createAndEnqueueDLR(1, "op-456", "gw-123", "from", "to", "test body", 1, "0", new HashMap<>());
+        tracker.createAndEnqueueDLR(
+                1, "provider-message-456", "gw-123", "from", "to", "test body", 1, "0", new HashMap<>());
 
         ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
         verify(outWorker).enqueueToRouter(captor.capture());
@@ -123,11 +172,12 @@ class InMemoryMessageTrackerTest {
 
     @Test
     void createAndEnqueueDLR_UnknownMessage_DoesNotEnqueue() {
-        when(dlrService.resolveAndRemoveDlr("unknown", 0)).thenReturn(java.util.Optional.empty());
+        when(dlrService.resolveAndRemoveDlr("provider-1", "unknown", 0))
+                .thenReturn(java.util.Optional.empty());
 
         tracker.createAndEnqueueDLR(1, "unknown", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
 
-        verify(dlrService).resolveAndRemoveDlr("unknown", 0);
+        verify(dlrService).resolveAndRemoveDlr("provider-1", "unknown", 0);
     }
 
     @Test

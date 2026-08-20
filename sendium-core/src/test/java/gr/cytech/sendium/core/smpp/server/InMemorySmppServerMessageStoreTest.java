@@ -41,6 +41,7 @@ class InMemorySmppServerMessageStoreTest {
     @BeforeEach
     void setUp() {
         when(worker.getWorkerResources()).thenReturn(workerResources);
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(true);
         when(workerResources.getDlrService()).thenReturn(dlrService);
         when(worker.getMaxRetries()).thenReturn(5);
 
@@ -146,6 +147,39 @@ class InMemorySmppServerMessageStoreTest {
         order.verify(worker).handlePersistedMessages(List.of(internal));
         order.verify(dlrService).saveInitialStates(anyList());
         order.verify(worker).handlePersistedMessages(List.of(secondClient));
+    }
+
+    @Test
+    void persistMessages_WhenPersistenceDisabled_AcknowledgesWithoutStoring() {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
+        List<InEvent<StandardMessage>> events = List.of(event("gw-1", new SubmitSm()));
+
+        assertTrue(messageStore.persistMessages(events).resultNow());
+
+        verify(workerResources, never()).getDlrService();
+        verify(worker).handlePersistedMessages(events);
+        verify(worker, never()).handleMessagePersistenceFailure(anyList());
+    }
+
+    @Test
+    void markAsUnpushed_WhenPersistenceDisabled_LeavesRetryToWorker() {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
+        StandardMessage msg = new StandardMessage();
+        msg.type = StandardMessage.MSG_DLR;
+
+        assertFalse(messageStore.markAsUnpushed(msg));
+
+        verify(workerResources, never()).getDlrService();
+    }
+
+    @Test
+    void onClientConnected_WhenPersistenceDisabled_DoesNotReplay() {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
+
+        messageStore.onClientConnected("sys1");
+
+        verify(workerResources, never()).getDlrService();
+        verify(worker, never()).enqueueNoExceptions(any());
     }
 
     @Test

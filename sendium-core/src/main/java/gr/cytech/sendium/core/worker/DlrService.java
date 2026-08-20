@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Optional;
 
 @ApplicationScoped
-@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class DlrService {
     @Inject
     DlrStorage storage;
@@ -25,12 +25,13 @@ public class DlrService {
         storage.saveInitialStates(states);
     }
 
-    public void linkOperatorId(String gatewayMsgId, String operatorMsgId) {
-        storage.linkOperatorId(gatewayMsgId, operatorMsgId);
+    public void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId) {
+        storage.linkProviderMessageId(gatewayMessageId, providerName, providerMessageId);
     }
 
-    public Optional<MessageState> resolveAndRemoveDlr(String operatorMsgId, int dlrState) {
-        Optional<MessageState> state = storage.resolveAndRemoveDlr(operatorMsgId, mapDlrState(dlrState));
+    public Optional<MessageState> resolveAndRemoveDlr(String providerName, String providerMessageId, int dlrState) {
+        Optional<MessageState> state = storage.resolveAndRemoveDlr(
+                providerName, providerMessageId, mapDlrState(dlrState));
         state.filter(messageState -> messageState.getForwardDlrUrl() != null)
                 .filter(messageState -> !messageState.getForwardDlrUrl().isEmpty())
                 .ifPresent(forwardDlrService::forwardDlr);

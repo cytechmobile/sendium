@@ -32,6 +32,7 @@ import gr.cytech.sendium.core.smpp.SmppConnectionManager;
 import gr.cytech.sendium.core.smpp.util.CustomCharset;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import gr.cytech.sendium.core.smpp.util.VFGRCharset;
+import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.core.worker.WorkerType;
@@ -422,6 +423,11 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     @Override
+    public String getDlrProviderName() {
+        return messageHashPrefix == null || messageHashPrefix.isBlank() ? getInstanceName() : messageHashPrefix;
+    }
+
+    @Override
     public boolean myPropertyChange(String key, String newValue, String oldValue) {
         if (key.equals(_srcAddrAutodetect[0]) ||
                 key.equals(_srcAddrTon[0]) ||
@@ -795,7 +801,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         //this allows to have multiple clients (multiple instances of the worker, not multiple connections within the worker)
         //connecting to the same SMSC (host/port/user) and dealing with the received DLRs (which the host might send to either instance)
         String prefix = configurationProvider.getPrpt(_msgHashPrefix);
-        if (Strings.isNullOrEmpty(prefix)) {
+        if (prefix == null || prefix.isBlank()) {
             this.messageHashPrefix = getInstanceName();
             logger.debug("No message hash prefix has been specified. Auto-created one using instance-name:{}",
                     this.messageHashPrefix);
@@ -988,13 +994,19 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             if (dlrBody.length() > 159) {
                 dlrBody = dlrBody.substring(0, 159);
             }
-            String smscid = decodeMessageID(true, receipt.getMessageId());
-            if (Strings.isNullOrEmpty(smscid)) {
-                logger.warn("Invalid smscid: null or empty, skipping unknown dlr {}", MessageTrace.pdu(deliverSm));
+            String providerMessageId = decodeMessageID(true, receipt.getMessageId());
+            if (Strings.isNullOrEmpty(providerMessageId)) {
+                logger.warn("Invalid provider message ID, skipping unknown DLR {}", MessageTrace.pdu(deliverSm));
                 return deliverSm.createGenericNack(SmppConstants.STATUS_SYSERR);
             }
             HashMap<String, String> tlvs = extractTlvs(this.tlvsDlrs, deliverSm);
-            messageTracker.createAndEnqueueDLR(0, smscid, getHashedMessageID(smscid), from, to, dlrBody, state, errcode, tlvs);
+            messageTracker.createAndEnqueueDLR(0, providerMessageId, getHashedMessageID(providerMessageId),
+                    from, to, dlrBody, state, errcode, tlvs);
+        } catch (DlrStorageException e) {
+            logger.warn("DLR storage unavailable while processing provider receipt {}", MessageTrace.pdu(deliverSm));
+            PduResponse resp = deliverSm.createResponse();
+            resp.setCommandStatus(SmppConstants.STATUS_SYSERR);
+            return resp;
         } catch (Exception e) {
             //our own extended delivery receipt parsing method will not throw exception for dlr field validation
             //so this means that something else went really wrong
@@ -1119,7 +1131,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
 
     public void handleResponse(SmppClientSessionHandler handler, int statusCode, String respMessageId, M msg) {
         if (printResps) {
-            logger.info("Received response:{}-{} with smscid:{} for msg:{}",
+            logger.info("Received response:{}-{} with providerMessageId:{} for msg:{}",
                     statusCode, handler.lookupResultMessage(statusCode), respMessageId, msg);
         }
 
@@ -1167,8 +1179,8 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     protected void successMessage(String respMessageId, M msg) {
-        String smscid = updateSendStatusAndSmscId(respMessageId, msg);
-        logSubmitResponse(SmppConstants.STATUS_OK, smscid, msg);
+        String providerMessageId = updateSendStatusAndProviderMessageId(respMessageId, msg);
+        logSubmitResponse(SmppConstants.STATUS_OK, providerMessageId, msg);
         try {
             onMessageSuccess(msg);
         } catch (Exception e) {
@@ -1182,9 +1194,9 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             return;
         }
 
-        String smscid = updateSendStatusAndSmscId(respMessageId, msg);
-        logSubmitResponse(commandStatus, smscid, msg);
-        String smsid = getHashedMessageID(smscid);
+        String providerMessageId = updateSendStatusAndProviderMessageId(respMessageId, msg);
+        logSubmitResponse(commandStatus, providerMessageId, msg);
+        String hashedProviderMessageId = getHashedMessageID(providerMessageId);
 
         String errorCode;
         if (respErrCodeMap != null && !respErrCodeMap.isEmpty()) {
@@ -1194,36 +1206,50 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             errorCode = String.valueOf(StandardMessage.DLR_ERR_SMS_FAILED);
         }
 
-        messageTracker.createAndEnqueueDLR(msg.msgId, smscid, smsid, msg.from, msg.to, "" + commandStatus,
-                StandardMessage.DLR_STAT_FAILED, errorCode, null);
-    }
-
-    protected void logSubmitResponse(int statusCode, String operatorMsgId, M msg) {
-        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_SUBMIT_RESPONSE)) {
-            logger.info("message.submit.response worker={} status={} operatorMsgId={} {}", getFullName(), statusCode,
-                    MessageTrace.value(operatorMsgId), MessageTrace.identifiers(msg));
+        try {
+            messageTracker.createAndEnqueueDLR(msg.msgId, providerMessageId, hashedProviderMessageId,
+                    msg.from, msg.to, "" + commandStatus, StandardMessage.DLR_STAT_FAILED, errorCode, null);
+        } catch (DlrStorageException e) {
+            // A submit_sm_resp cannot be rejected or retried by this client. Keep the session callback alive and
+            // leave the tracked state for retention rather than losing the upstream connection as well.
+            logger.error("Failed to create submission failure DLR providerMessageId={} {}: {}",
+                    MessageTrace.value(providerMessageId), MessageTrace.identifiers(msg), e.getMessage());
         }
     }
 
-    public String updateSendStatusAndSmscId(String respMessageId, M msg) {
+    protected void logSubmitResponse(int statusCode, String providerMessageId, M msg) {
+        if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_SUBMIT_RESPONSE)) {
+            logger.info("message.submit.response worker={} status={} providerMessageId={} {}", getFullName(),
+                    statusCode, MessageTrace.value(providerMessageId), MessageTrace.identifiers(msg));
+        }
+    }
+
+    public String updateSendStatusAndProviderMessageId(String respMessageId, M msg) {
         if (msg.msgId < 0) {
             return null;
         }
-        //message was sent, we need to record the mapping between smsid and mqid
-        final String smscid;
-        if (Strings.isNullOrEmpty(respMessageId)) {
-            smscid = getInternalSmscId(msg.msgId);
+        // The message was sent, so record its provider ID against the gateway message ID.
+        final String providerMessageId;
+        if (respMessageId == null || respMessageId.isBlank()) {
+            providerMessageId = getInternalProviderMessageId(msg.msgId);
         } else {
-            smscid = decodeMessageID(false, respMessageId);
+            providerMessageId = decodeMessageID(false, respMessageId);
         }
-        final String hashedMessageID = getHashedMessageID(smscid);
+        final String hashedProviderMessageId = getHashedMessageID(providerMessageId);
         int size = getThreadCount();
 
-        updateSendStatusAndExtID(hashedMessageID, msg, smscid);
-        return smscid;
+        try {
+            updateSendStatusAndExtID(hashedProviderMessageId, msg, providerMessageId);
+        } catch (DlrStorageException e) {
+            // The SMSC has already produced its response, so there is no protocol acknowledgement available to
+            // request a retry. Isolate the storage failure from Cloudhopper's response callback.
+            logger.error("Failed to link provider message ID {} {}: {}",
+                    MessageTrace.value(providerMessageId), MessageTrace.identifiers(msg), e.getMessage());
+        }
+        return providerMessageId;
     }
 
-    public String getInternalSmscId(int msgId) {
+    public String getInternalProviderMessageId(int msgId) {
         return getFullName() + "_internal_" + msgId;
     }
 
@@ -1274,7 +1300,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                 decoded = messageId;
             }
         }
-        logger.debug("Decoded SMSC ID from:{} to:{}", messageId, decoded);
+        logger.debug("Decoded provider message ID from:{} to:{}", messageId, decoded);
         return decoded;
     }
 

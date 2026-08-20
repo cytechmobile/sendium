@@ -17,7 +17,7 @@ class MessageTraceTest {
         StandardMessage message = new StandardMessage();
         message.serial = "gw-1";
         message.msgId = 17;
-        message.extrid = "operator-1";
+        message.extrid = "provider-message-1";
         message.type = StandardMessage.MSG_DLR;
         message.priority = StandardMessage.HIGH_PRIORITY;
         message.acked = true;
@@ -47,7 +47,7 @@ class MessageTraceTest {
         assertThat(trace).contains(
                 "serial=gw-1",
                 "msgId=17",
-                "extrid=operator-1",
+                "extrid=provider-message-1",
                 "type=l",
                 "typeId=18",
                 "priority=3",

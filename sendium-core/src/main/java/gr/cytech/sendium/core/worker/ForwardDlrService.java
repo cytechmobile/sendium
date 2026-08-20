@@ -13,7 +13,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 
 @ApplicationScoped
-@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
 

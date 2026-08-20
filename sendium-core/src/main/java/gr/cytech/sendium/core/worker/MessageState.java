@@ -15,7 +15,8 @@ public class MessageState implements Serializable {
     private String systemId;
     private String sourceAddr;
     private String destAddr;
-    private String operatorMsgId;
+    private String providerName;
+    private String providerMessageId;
     private String forwardDlrUrl;
     private List<String> reassembledParts;
     private MessageStatus status;
@@ -34,7 +35,8 @@ public class MessageState implements Serializable {
         this.systemId = systemId;
         this.sourceAddr = sourceAddr;
         this.destAddr = destAddr;
-        this.operatorMsgId = null;
+        this.providerName = null;
+        this.providerMessageId = null;
         this.status = MessageStatus.ACCEPTED;
         this.timestamp = System.currentTimeMillis();
         this.forwardDlrUrl = forwardDlrUrl;
@@ -60,8 +62,12 @@ public class MessageState implements Serializable {
         return destAddr;
     }
 
-    public String getOperatorMsgId() {
-        return operatorMsgId;
+    public String getProviderMessageId() {
+        return providerMessageId;
+    }
+
+    public String getProviderName() {
+        return providerName;
     }
 
     public String getForwardDlrUrl() {
@@ -80,8 +86,12 @@ public class MessageState implements Serializable {
         return timestamp;
     }
 
-    public void setOperatorMsgId(String operatorMsgId) {
-        this.operatorMsgId = operatorMsgId;
+    public void setProviderMessageId(String providerMessageId) {
+        this.providerMessageId = providerMessageId;
+    }
+
+    public void setProviderName(String providerName) {
+        this.providerName = providerName;
     }
 
     public void setStatus(MessageStatus status) {
