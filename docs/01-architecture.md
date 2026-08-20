@@ -103,7 +103,7 @@ sequenceDiagram
     Router->>Worker: Enqueue to selected worker
     Worker->>SMSC: submit_sm
     SMSC-->>Worker: submit_sm_resp
-    Worker->>DLR: Link gateway UUID to operator message ID
+    Worker->>DLR: Link gateway UUID to provider message ID
 ```
 
 ## SMPP Server Flow
@@ -151,7 +151,7 @@ sequenceDiagram
 
 ## DLR Handling
 
-Outbound HTTP messages can include a Kannel-style `dlr-url`. Sendium stores the gateway message ID and later links it to the operator/SMSC message ID returned by the SMPP provider. When a DLR arrives, the DLR service resolves the correlation and forwards the callback.
+Outbound HTTP messages can include a Kannel-style `dlr-url`. Sendium stores the gateway message ID and later links it to the message ID returned by the SMPP provider. Provider message IDs are scoped by the outbound provider name, so different providers may reuse the same ID without overwriting each other's correlation. When a DLR arrives, the DLR service resolves the provider and message-ID pair and forwards the callback.
 
 ```mermaid
 sequenceDiagram
@@ -165,7 +165,7 @@ sequenceDiagram
 
     SMSC->>Worker: deliver_sm delivery receipt
     Worker->>Tracker: createAndEnqueueDLR
-    Tracker->>Store: Resolve operator message ID
+    Tracker->>Store: Resolve provider name and provider message ID
     Store->>DLRHook: Forward DLR callback if URL exists
     DLRHook->>App: HTTP GET callback
     Tracker->>Router: Enqueue internal MSG_DLR

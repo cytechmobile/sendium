@@ -43,19 +43,28 @@ class MessageStateTest {
     }
 
     @Test
-    void getOperatorMsgId_InitiallyNull() {
+    void getProviderMessageId_InitiallyNull() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
 
-        assertNull(state.getOperatorMsgId());
+        assertNull(state.getProviderMessageId());
     }
 
     @Test
-    void setOperatorMsgId_UpdatesValue() {
+    void setProviderMessageId_UpdatesValue() {
         MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
 
-        state.setOperatorMsgId("op-456");
+        state.setProviderMessageId("provider-message-456");
 
-        assertEquals("op-456", state.getOperatorMsgId());
+        assertEquals("provider-message-456", state.getProviderMessageId());
+    }
+
+    @Test
+    void setProviderName_UpdatesValue() {
+        MessageState state = new MessageState("gw-123", "systemId", "from", "to", null);
+
+        state.setProviderName("provider-1");
+
+        assertEquals("provider-1", state.getProviderName());
     }
 
     @Test
