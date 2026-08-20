@@ -20,6 +20,7 @@ database_username=${SENDIUM_DLR_POSTGRESQL_USERNAME-}
 database_password=${SENDIUM_DLR_POSTGRESQL_PASSWORD-}
 unset SENDIUM_UPSTREAM_PASSWORD
 unset SENDIUM_DLR_POSTGRESQL_PASSWORD
+unset SENDIUM_LOCAL_POSTGRESQL_PASSWORD
 
 usage() {
     cat <<'EOF'
@@ -394,6 +395,32 @@ if [ "$upstream_enabled" = true ]; then
     upstream_password=$(escape_property_value "$upstream_password")
 fi
 
+existing_bundled_database=false
+local_database_password=''
+if [ "$force" = true ]; then
+    if [ -f "$target_dir/compose.yml" ] && \
+        grep -q 'postgres-data:/var/lib/postgresql/data' "$target_dir/compose.yml"; then
+        existing_bundled_database=true
+    fi
+    if [ -f "$target_dir/.sendium.env" ]; then
+        local_database_password=$(sed -n "s/^SENDIUM_LOCAL_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$target_dir/.sendium.env")
+        if [ "${#local_database_password}" -ne 64 ] && [ "$existing_bundled_database" = true ]; then
+            local_database_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$target_dir/.sendium.env")
+        fi
+        if [ "${#local_database_password}" -ne 64 ] && [ "$existing_bundled_database" = true ]; then
+            local_database_password=$(sed -n "s/^POSTGRES_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$target_dir/.sendium.env")
+        fi
+    fi
+    if [ "$existing_bundled_database" = true ] && [ "${#local_database_password}" -ne 64 ]; then
+        fail \
+"the existing PostgreSQL volume requires the password recorded in $target_dir/.sendium.env, which could not be read.
+Restore that file, or permanently delete the database and its generated Compose marker with:
+  docker compose -f \"$target_dir/compose.yml\" --project-directory \"$target_dir\" down --volumes
+  rm -f \"$target_dir/compose.yml\"
+Then rerun Quick Start with --force."
+    fi
+fi
+
 external_database=false
 if [ -n "$database_jdbc_url" ] || [ -n "$database_username" ] || [ -n "$database_password" ]; then
     [ -n "$database_jdbc_url" ] && [ -n "$database_username" ] && [ -n "$database_password" ] || \
@@ -409,15 +436,13 @@ if [ -n "$database_jdbc_url" ] || [ -n "$database_username" ] || [ -n "$database
 else
     database_jdbc_url='jdbc:postgresql://postgres:5432/sendium'
     database_username='sendium'
-    if [ "$force" = true ] && [ -f "$target_dir/.sendium.env" ]; then
-        existing_database_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$target_dir/.sendium.env")
-        if [ "${#existing_database_password}" -eq 64 ]; then
-            database_password=$existing_database_password
-        fi
+    if [ "${#local_database_password}" -eq 64 ]; then
+        database_password=$local_database_password
     fi
     if [ -z "$database_password" ]; then
         database_password=$(generate_secret 32)
     fi
+    local_database_password=$database_password
 fi
 
 mkdir -p "$target_dir/conf" "$target_dir/logs"
@@ -458,6 +483,12 @@ SENDIUM_DLR_POSTGRESQL_JDBC_URL='$database_jdbc_url'
 SENDIUM_DLR_POSTGRESQL_USERNAME='$database_username'
 SENDIUM_DLR_POSTGRESQL_PASSWORD='$database_password'
 EOF
+
+if [ -n "$local_database_password" ]; then
+    cat >> "$staging_dir/.sendium.env" <<EOF
+SENDIUM_LOCAL_POSTGRESQL_PASSWORD='$local_database_password'
+EOF
+fi
 
 if [ "$external_database" != true ]; then
     cat >> "$staging_dir/.sendium.env" <<EOF
@@ -574,6 +605,7 @@ fi
 
 cat >> "$staging_dir/compose.yml" <<'EOF'
     environment:
+      SENDIUM_LOCAL_POSTGRESQL_PASSWORD: ''
       QUARKUS_LOG_FILE_ENABLE: "true"
       QUARKUS_LOG_CONSOLE_ENABLE: "true"
       QUARKUS_LOG_FILE_PATH: /work/logs/smsg.log

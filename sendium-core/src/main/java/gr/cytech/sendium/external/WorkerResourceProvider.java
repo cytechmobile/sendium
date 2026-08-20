@@ -41,6 +41,15 @@ public class WorkerResourceProvider {
         return credentialFileWatcher;
     }
 
+    /**
+     * Whether Sendium owns the DLR persistence lifecycle in this build. Callers on message paths must check this
+     * before {@link #getDlrService()}: an application embedding {@code sendium-core} can leave
+     * {@code sendium.dlr.persistence.enabled} unset and take over DLR tracking itself.
+     */
+    public boolean isDlrPersistenceEnabled() {
+        return !dlrServices.isUnsatisfied();
+    }
+
     public DlrService getDlrService() {
         if (dlrServices.isUnsatisfied()) {
             throw new IllegalStateException("Sendium DLR persistence is disabled");

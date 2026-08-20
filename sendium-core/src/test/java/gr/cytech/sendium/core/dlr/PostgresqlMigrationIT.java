@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -58,18 +59,21 @@ class PostgresqlMigrationIT {
         try (Connection connection = connection()) {
             assertThat(loadNames(connection,
                     "SELECT table_name FROM information_schema.tables WHERE table_schema = 'sendium_dlr'"))
-                    .containsExactlyInAnyOrder("tracked_message", "operator_correlation", "unpushed_dlr");
+                    .containsExactlyInAnyOrder("tracked_message", "provider_correlation", "unpushed_dlr");
             assertThat(loadNames(connection,
                     "SELECT indexname FROM pg_indexes WHERE schemaname = 'sendium_dlr'"))
                     .contains("tracked_message_created_at_idx",
-                            "operator_correlation_created_at_idx",
-                            "operator_correlation_gateway_message_idx",
+                            "tracked_message_provider_message_id_idx",
+                            "provider_correlation_created_at_idx",
+                            "provider_correlation_gateway_message_idx",
                             "unpushed_dlr_system_created_at_idx",
                             "unpushed_dlr_created_at_idx");
             assertThat(loadColumnType(connection, "tracked_message", "gateway_message_id"))
                     .isEqualTo("uuid");
-            assertThat(loadColumnType(connection, "operator_correlation", "gateway_message_id"))
+            assertThat(loadColumnType(connection, "provider_correlation", "gateway_message_id"))
                     .isEqualTo("uuid");
+            assertThat(loadColumnType(connection, "provider_correlation", "provider_name"))
+                    .isEqualTo("text");
         }
     }
 
@@ -95,11 +99,32 @@ class PostgresqlMigrationIT {
     }
 
     @Test
+    void providerCorrelationFieldsRejectBlankValues() throws SQLException {
+        try (Connection connection = connection()) {
+            for (String blank : List.of("", "   ", "\t\n")) {
+                assertThatThrownBy(() -> insertTrackedMessageWithProvider(
+                        connection, UUID.randomUUID(), blank, "provider-message"))
+                        .isInstanceOf(SQLException.class);
+                assertThatThrownBy(() -> insertTrackedMessageWithProvider(
+                        connection, UUID.randomUUID(), "provider", blank))
+                        .isInstanceOf(SQLException.class);
+            }
+
+            UUID gatewayMessageId = UUID.randomUUID();
+            insertTrackedMessage(connection, gatewayMessageId);
+            assertThatThrownBy(() -> insertCorrelation(connection, "   ", "provider-message", gatewayMessageId))
+                    .isInstanceOf(SQLException.class);
+            assertThatThrownBy(() -> insertCorrelation(connection, "provider", "\t\n", gatewayMessageId))
+                    .isInstanceOf(SQLException.class);
+        }
+    }
+
+    @Test
     void correlationIsDeletedWithTrackedMessage() throws SQLException {
         try (Connection connection = connection()) {
             insertTrackedMessage(connection, CORRELATION_GATEWAY_ID);
-            insertCorrelation(connection, "operator-1", CORRELATION_GATEWAY_ID);
-            insertCorrelation(connection, "operator-2", CORRELATION_GATEWAY_ID);
+            insertCorrelation(connection, "provider-1", "provider-message-1", CORRELATION_GATEWAY_ID);
+            insertCorrelation(connection, "provider-1", "provider-message-2", CORRELATION_GATEWAY_ID);
 
             try (PreparedStatement statement = connection.prepareStatement("""
                     DELETE FROM sendium_dlr.tracked_message WHERE gateway_message_id = ?
@@ -131,7 +156,7 @@ class PostgresqlMigrationIT {
             insertCompleteUnpushedDlr(connection);
 
             try (PreparedStatement statement = connection.prepareStatement("""
-                         SELECT gateway_message_id, operator_message_id, reassembled_parts, created_at, updated_at
+                         SELECT gateway_message_id, provider_message_id, reassembled_parts, created_at, updated_at
                          FROM sendium_dlr.tracked_message
                          WHERE gateway_message_id = ?
                          """)) {
@@ -140,7 +165,7 @@ class PostgresqlMigrationIT {
                     assertThat(resultSet.next()).isTrue();
                     assertThat(resultSet.getObject("gateway_message_id", UUID.class))
                             .isEqualTo(COMPLETE_GATEWAY_ID);
-                    assertThat(resultSet.getString("operator_message_id")).isNull();
+                    assertThat(resultSet.getString("provider_message_id")).isNull();
                     assertThat((String[]) resultSet.getArray("reassembled_parts").getArray())
                             .containsExactly("part-1", "part-2");
                     assertThat(resultSet.getObject("created_at")).isNotNull();
@@ -193,15 +218,31 @@ class PostgresqlMigrationIT {
         }
     }
 
-    private static void insertCorrelation(Connection connection, String operatorMessageId,
-                                          UUID gatewayMessageId) throws SQLException {
+    private static void insertTrackedMessageWithProvider(Connection connection, UUID gatewayMessageId,
+                                                          String providerName,
+                                                          String providerMessageId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.operator_correlation
-                    (operator_message_id, gateway_message_id)
-                VALUES (?, ?)
+                INSERT INTO sendium_dlr.tracked_message
+                    (gateway_message_id, provider_name, provider_message_id, status)
+                VALUES (?, ?, ?, 'ACCEPTED')
                 """)) {
-            statement.setString(1, operatorMessageId);
-            statement.setObject(2, gatewayMessageId);
+            statement.setObject(1, gatewayMessageId);
+            statement.setString(2, providerName);
+            statement.setString(3, providerMessageId);
+            statement.executeUpdate();
+        }
+    }
+
+    private static void insertCorrelation(Connection connection, String providerName, String providerMessageId,
+                                           UUID gatewayMessageId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO sendium_dlr.provider_correlation
+                    (provider_name, provider_message_id, gateway_message_id)
+                VALUES (?, ?, ?)
+                """)) {
+            statement.setString(1, providerName);
+            statement.setString(2, providerMessageId);
+            statement.setObject(3, gatewayMessageId);
             statement.executeUpdate();
         }
     }
@@ -264,7 +305,7 @@ class PostgresqlMigrationIT {
     private static int countCorrelations(Connection connection, UUID gatewayMessageId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT COUNT(*)
-                FROM sendium_dlr.operator_correlation
+                FROM sendium_dlr.provider_correlation
                 WHERE gateway_message_id = ?
                 """)) {
             statement.setObject(1, gatewayMessageId);

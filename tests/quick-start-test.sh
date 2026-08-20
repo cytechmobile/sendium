@@ -149,6 +149,25 @@ assert_equals 48 "${#http_password}" "regenerated HTTP password length"
 assert_equals "$old_database_password" "$database_password" "preserved PostgreSQL password"
 pass "explicit regeneration preserves unrelated files"
 
+unrecoverable_dir="$test_root/unrecoverable-postgresql"
+sh "$quick_start" --directory "$unrecoverable_dir" --provider local --no-start > "$test_root/unrecoverable-setup.out" 2>&1
+grep -v '^SENDIUM_DLR_POSTGRESQL_PASSWORD=' "$unrecoverable_dir/.sendium.env" > "$unrecoverable_dir/.sendium.env.stripped"
+mv "$unrecoverable_dir/.sendium.env.stripped" "$unrecoverable_dir/.sendium.env"
+grep -v '^SENDIUM_LOCAL_POSTGRESQL_PASSWORD=' "$unrecoverable_dir/.sendium.env" > "$unrecoverable_dir/.sendium.env.stripped"
+mv "$unrecoverable_dir/.sendium.env.stripped" "$unrecoverable_dir/.sendium.env"
+grep -v '^POSTGRES_PASSWORD=' "$unrecoverable_dir/.sendium.env" > "$unrecoverable_dir/.sendium.env.stripped"
+mv "$unrecoverable_dir/.sendium.env.stripped" "$unrecoverable_dir/.sendium.env"
+expect_failure "unrecoverable PostgreSQL password" "$test_root/unrecoverable-postgresql.out" \
+    sh "$quick_start" --directory "$unrecoverable_dir" --provider local --force --no-start
+assert_contains 'the existing PostgreSQL volume requires the password' "$test_root/unrecoverable-postgresql.out"
+assert_contains 'down --volumes' "$test_root/unrecoverable-postgresql.out"
+assert_contains 'rm -f' "$test_root/unrecoverable-postgresql.out"
+rm -f "$unrecoverable_dir/compose.yml"
+sh "$quick_start" --directory "$unrecoverable_dir" --provider local --force --no-start > "$test_root/recovered-postgresql.out" 2>&1
+recovered_password=$(sed -n "s/^SENDIUM_LOCAL_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$unrecoverable_dir/.sendium.env")
+assert_equals 64 "${#recovered_password}" "recovered PostgreSQL password length"
+pass "unrecoverable local PostgreSQL password stops regeneration"
+
 external_dir="$test_root/external-postgresql"
 SENDIUM_DLR_POSTGRESQL_JDBC_URL='jdbc:postgresql://database.example.test:5432/sendium?sslmode=require' \
 SENDIUM_DLR_POSTGRESQL_USERNAME='external-user' \
@@ -161,7 +180,23 @@ assert_not_contains 'image: postgres:17-alpine' "$external_dir/compose.yml"
 assert_not_contains 'condition: service_healthy' "$external_dir/compose.yml"
 assert_not_contains 'postgres-data:' "$external_dir/compose.yml"
 assert_not_contains 'external-password' "$external_dir/compose.yml"
+assert_contains "SENDIUM_LOCAL_POSTGRESQL_PASSWORD: ''" "$external_dir/compose.yml"
 pass "external PostgreSQL configuration"
+
+switched_dir="$test_root/switched-postgresql"
+sh "$quick_start" --directory "$switched_dir" --provider local --no-start > "$test_root/switched-local-setup.out" 2>&1
+original_local_password=$(sed -n "s/^SENDIUM_LOCAL_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$switched_dir/.sendium.env")
+SENDIUM_DLR_POSTGRESQL_JDBC_URL='jdbc:postgresql://database.example.test:5432/sendium' \
+SENDIUM_DLR_POSTGRESQL_USERNAME='external-user' \
+SENDIUM_DLR_POSTGRESQL_PASSWORD='external-password' \
+    sh "$quick_start" --directory "$switched_dir" --provider local --force --no-start > "$test_root/switched-external.out" 2>&1
+assert_contains "SENDIUM_LOCAL_POSTGRESQL_PASSWORD='$original_local_password'" "$switched_dir/.sendium.env"
+sh "$quick_start" --directory "$switched_dir" --provider local --force --no-start > "$test_root/switched-postgresql.out" 2>&1
+switched_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$switched_dir/.sendium.env")
+assert_equals 64 "${#switched_password}" "regenerated PostgreSQL password length"
+assert_equals "$original_local_password" "$switched_password" "preserved PostgreSQL password after mode switch"
+assert_contains 'image: postgres:17-alpine' "$switched_dir/compose.yml"
+pass "local PostgreSQL password survives an external database round trip"
 
 expect_failure "partial external PostgreSQL configuration" "$test_root/partial-postgresql.out" \
     env SENDIUM_DLR_POSTGRESQL_JDBC_URL='jdbc:postgresql://database.example.test:5432/sendium' \

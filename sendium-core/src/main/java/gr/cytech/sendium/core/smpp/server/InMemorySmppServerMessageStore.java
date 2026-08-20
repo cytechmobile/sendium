@@ -59,6 +59,10 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
         if (eventsQueue.isEmpty()) {
             return true;
         }
+        if (!isDlrPersistenceEnabled()) {
+            worker.handlePersistedMessages(eventsQueue);
+            return true;
+        }
         List<MessageState> states = new ArrayList<>(eventsQueue.size());
         for (InEvent<StandardMessage> event : eventsQueue) {
             if (event == null) {
@@ -87,6 +91,11 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
         return true;
     }
 
+    /**
+     * Acknowledgement and router admission are always deferred to
+     * {@link SmppServerWorker#handlePersistedMessages(List)}, so the worker must drain the ingress queue on shutdown
+     * even when Sendium-owned DLR persistence is disabled and the persist step itself is a no-op.
+     */
     @Override
     public boolean persistsBeforeAcknowledgement() {
         return true;
@@ -95,6 +104,10 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
     @Override
     public boolean markAsUnpushed(StandardMessage msg) {
         if (msg == null || msg.type != StandardMessage.MSG_DLR) {
+            return false;
+        }
+        if (!isDlrPersistenceEnabled()) {
+            //let the worker retry in memory, as documented on SmppServerMessageStore#markAsUnpushed
             return false;
         }
 
@@ -112,6 +125,10 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
 
     @Override
     public void onClientConnected(String systemId) {
+        if (!isDlrPersistenceEnabled()) {
+            return;
+        }
+
         DlrService dlrService = getDlrService();
         List<StandardMessage> unpushedDlrs = dlrService.claimUnpushedDlrs(systemId);
         if (unpushedDlrs.isEmpty()) {
@@ -132,6 +149,10 @@ public class InMemorySmppServerMessageStore implements SmppServerMessageStore<St
                 logger.warn("Failed to re-enqueue unpushed DLR {}", MessageTrace.identifiers(msg), e);
             }
         }
+    }
+
+    private boolean isDlrPersistenceEnabled() {
+        return worker.getWorkerResources().isDlrPersistenceEnabled();
     }
 
     private DlrService getDlrService() {
