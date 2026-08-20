@@ -25,7 +25,7 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class InMemorySmppServerMessageStoreTest {
+class StandardSmppServerMessageStoreTest {
 
     @Mock
     private SmppServerWorker<StandardMessage> worker;
@@ -36,7 +36,7 @@ class InMemorySmppServerMessageStoreTest {
     @Mock
     private DlrService dlrService;
 
-    private InMemorySmppServerMessageStore messageStore;
+    private StandardSmppServerMessageStore messageStore;
 
     @BeforeEach
     void setUp() {
@@ -45,7 +45,7 @@ class InMemorySmppServerMessageStoreTest {
         when(workerResources.getDlrService()).thenReturn(dlrService);
         when(worker.getMaxRetries()).thenReturn(5);
 
-        messageStore = new InMemorySmppServerMessageStore(worker);
+        messageStore = new StandardSmppServerMessageStore(worker);
     }
 
     @Test
@@ -191,7 +191,7 @@ class InMemorySmppServerMessageStoreTest {
 
     @Test
     void getMaxAttempts_DefaultsTo3_WhenNoWorker() {
-        InMemorySmppServerMessageStore storeWithNullWorker = new InMemorySmppServerMessageStore(null);
+        StandardSmppServerMessageStore storeWithNullWorker = new StandardSmppServerMessageStore(null);
 
         int result = storeWithNullWorker.getMaxAttempts(true);
 

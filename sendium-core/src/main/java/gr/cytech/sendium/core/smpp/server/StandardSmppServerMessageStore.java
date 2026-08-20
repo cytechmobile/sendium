@@ -15,24 +15,24 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
-public class InMemorySmppServerMessageStore implements SmppServerMessageStore<StandardMessage> {
-    private static final Logger logger = LoggerFactory.getLogger(InMemorySmppServerMessageStore.class);
+public class StandardSmppServerMessageStore implements SmppServerMessageStore<StandardMessage> {
+    private static final Logger logger = LoggerFactory.getLogger(StandardSmppServerMessageStore.class);
 
     private final SmppServerWorker<StandardMessage> worker;
 
     @Inject
-    public InMemorySmppServerMessageStore(SmppServerWorker<StandardMessage> worker) {
+    public StandardSmppServerMessageStore(SmppServerWorker<StandardMessage> worker) {
         this.worker = worker;
     }
 
     @Override
     public void start() {
-        logger.info("InMemorySmppServerMessageStore started");
+        logger.info("StandardSmppServerMessageStore started");
     }
 
     @Override
     public void stop() {
-        logger.info("InMemorySmppServerMessageStore stopped");
+        logger.info("StandardSmppServerMessageStore stopped");
     }
 
     @Override
