@@ -341,15 +341,20 @@ public class NativeE2eSmoke {
         throw new IllegalStateException("Timed out waiting for successful DLR storage operation: " + operation);
     }
 
-    private static boolean hasSuccessfulStorageOperation(String metrics, String operation) {
+    static boolean hasSuccessfulStorageOperation(String metrics, String operation) {
         return metrics.lines()
                 .filter(line -> line.startsWith("sendium_dlr_storage_operation_seconds_count"))
                 .filter(line -> line.contains("backend=\"postgresql\""))
                 .filter(line -> line.contains("operation=\"" + operation + "\""))
                 .filter(line -> line.contains("outcome=\"success\""))
                 .map(line -> line.substring(line.lastIndexOf(' ') + 1))
-                .mapToDouble(Double::parseDouble)
-                .anyMatch(count -> count >= 1.0);
+                .anyMatch(value -> {
+                    try {
+                        return Double.parseDouble(value) >= 1.0;
+                    } catch (NumberFormatException ignored) {
+                        return false;
+                    }
+                });
     }
 
     private static HttpResponse<String> get(String path) throws IOException, InterruptedException {
