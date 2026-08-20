@@ -29,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PostgresqlDlrStorageIT {
     private static final String MIGRATION_LOCATION = "classpath:db/sendium-dlr/postgresql";
+    private static final String PROVIDER = "provider-1";
     private static final PostgreSQLContainer POSTGRESQL = new PostgreSQLContainer("postgres:17-alpine")
             .withDatabaseName("sendium")
             .withUsername("sendium")
@@ -71,7 +72,8 @@ class PostgresqlDlrStorageIT {
     @Test
     void saveInitialStateRoundTripsAllFields() {
         MessageState state = newState();
-        state.setOperatorMsgId("operator-initial");
+        state.setProviderName(PROVIDER);
+        state.setProviderMessageId("provider-message-initial");
         state.setReassembledParts(List.of("part-1", "part-2"));
 
         storage.saveInitialState(state);
@@ -80,7 +82,8 @@ class PostgresqlDlrStorageIT {
                 .get()
                 .usingRecursiveComparison()
                 .isEqualTo(state);
-        assertThat(storage.resolveAndRemoveDlr("operator-initial", MessageState.MessageStatus.DELIVERED))
+        assertThat(storage.resolveAndRemoveDlr(
+                PROVIDER, "provider-message-initial", MessageState.MessageStatus.DELIVERED))
                 .isPresent();
     }
 
@@ -99,36 +102,63 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
-    void saveInitialStatesRollsBackWholeBatchOnCorrelationConflict() {
+    void saveInitialStatesRebindsCorrelationToNewestBatchMessage() throws SQLException {
         MessageState owner = newState();
-        owner.setOperatorMsgId("shared-operator");
+        owner.setProviderName(PROVIDER);
+        owner.setProviderMessageId("shared-provider-message");
         storage.saveInitialState(owner);
         MessageState innocent = newState();
         MessageState conflict = newState();
-        conflict.setOperatorMsgId("shared-operator");
+        conflict.setProviderName(PROVIDER);
+        conflict.setProviderMessageId("shared-provider-message");
 
-        assertThatThrownBy(() -> storage.saveInitialStates(List.of(innocent, conflict)))
-                .isInstanceOf(DlrStorageException.class);
+        storage.saveInitialStates(List.of(innocent, conflict));
 
-        assertThat(storage.getState(innocent.getGatewayMsgId())).isEmpty();
-        assertThat(storage.getState(conflict.getGatewayMsgId())).isEmpty();
-        assertThat(storage.getState(owner.getGatewayMsgId())).isPresent();
+        assertThat(storage.getState(innocent.getGatewayMsgId())).isPresent();
+        assertThat(storage.getState(conflict.getGatewayMsgId())).isPresent();
+        assertThat(storage.getState(owner.getGatewayMsgId()).orElseThrow().getProviderMessageId()).isNull();
+        assertThat(countCorrelations(owner.getGatewayMsgId())).isZero();
+        assertThat(countCorrelations(conflict.getGatewayMsgId())).isOne();
+        assertThat(storage.resolveAndRemoveDlr(
+                PROVIDER, "shared-provider-message", MessageState.MessageStatus.DELIVERED))
+                .get()
+                .extracting(MessageState::getGatewayMsgId)
+                .isEqualTo(conflict.getGatewayMsgId());
+    }
+
+    @Test
+    void saveInitialStatesUsesFinalStateForDuplicateGatewayMessage() throws SQLException {
+        MessageState correlated = newState();
+        correlated.setProviderName(PROVIDER);
+        correlated.setProviderMessageId("superseded-provider-message");
+        MessageState replacement = new MessageState(correlated.getGatewayMsgId(), "replacement-account",
+                "replacement-system", "replacement-source", "replacement-destination", null);
+
+        storage.saveInitialStates(List.of(correlated, replacement));
+
+        assertThat(storage.getState(replacement.getGatewayMsgId()))
+                .get()
+                .usingRecursiveComparison()
+                .isEqualTo(replacement);
+        assertThat(countCorrelations(replacement.getGatewayMsgId())).isZero();
+        assertThat(storage.resolveAndRemoveDlr(
+                PROVIDER, "superseded-provider-message", MessageState.MessageStatus.DELIVERED)).isEmpty();
     }
 
     @Test
     void trackedStateAndCorrelationSurviveAdapterRecreation() {
         MessageState state = newState();
         storage.saveInitialState(state);
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-after-restart");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-after-restart");
 
         PostgresqlDlrStorage recreated = new PostgresqlDlrStorage(dataSource);
 
         assertThat(recreated.getState(state.getGatewayMsgId()))
                 .get()
-                .extracting(MessageState::getOperatorMsgId, MessageState::getStatus)
-                .containsExactly("operator-after-restart", MessageState.MessageStatus.SENT);
+                .extracting(MessageState::getProviderMessageId, MessageState::getStatus)
+                .containsExactly("provider-message-after-restart", MessageState.MessageStatus.SENT);
         assertThat(recreated.resolveAndRemoveDlr(
-                "operator-after-restart", MessageState.MessageStatus.DELIVERED))
+                PROVIDER, "provider-message-after-restart", MessageState.MessageStatus.DELIVERED))
                 .get()
                 .extracting(MessageState::getGatewayMsgId, MessageState::getStatus)
                 .containsExactly(state.getGatewayMsgId(), MessageState.MessageStatus.DELIVERED);
@@ -138,7 +168,7 @@ class PostgresqlDlrStorageIT {
     void saveInitialStateOverwritesExistingState() throws SQLException {
         MessageState initial = newState();
         storage.saveInitialState(initial);
-        storage.linkOperatorId(initial.getGatewayMsgId(), "operator-old");
+        storage.linkProviderMessageId(initial.getGatewayMsgId(), PROVIDER, "provider-message-old");
 
         MessageState replacement = new MessageState(initial.getGatewayMsgId(), "replacement-account",
                 "replacement-system", "replacement-source", "replacement-destination", null);
@@ -150,96 +180,247 @@ class PostgresqlDlrStorageIT {
                 .usingRecursiveComparison()
                 .isEqualTo(replacement);
         assertThat(countCorrelations(initial.getGatewayMsgId())).isZero();
-        assertThat(storage.resolveAndRemoveDlr("operator-old", MessageState.MessageStatus.DELIVERED))
+        assertThat(storage.resolveAndRemoveDlr(
+                PROVIDER, "provider-message-old", MessageState.MessageStatus.DELIVERED))
                 .isEmpty();
     }
 
     @Test
-    void saveInitialStateRollsBackOnCorrelationOwnedByAnotherMessage() throws SQLException {
+    void saveInitialStateRebindsCorrelationOwnedByAnotherMessage() throws SQLException {
         MessageState owner = newState();
         storage.saveInitialState(owner);
-        storage.linkOperatorId(owner.getGatewayMsgId(), "shared-operator");
+        storage.linkProviderMessageId(owner.getGatewayMsgId(), PROVIDER, "shared-provider-message");
 
         MessageState target = newState();
         storage.saveInitialState(target);
-        storage.linkOperatorId(target.getGatewayMsgId(), "target-operator");
-        MessageState targetBeforeReplacement = storage.getState(target.getGatewayMsgId()).orElseThrow();
-
+        storage.linkProviderMessageId(target.getGatewayMsgId(), PROVIDER, "target-provider-message");
         MessageState replacement = new MessageState(target.getGatewayMsgId(), "replacement-account",
                 "replacement-system", "replacement-source", "replacement-destination", null);
-        replacement.setOperatorMsgId("shared-operator");
-        assertThatThrownBy(() -> storage.saveInitialState(replacement))
-                .isInstanceOf(DlrStorageException.class);
+        replacement.setProviderName(PROVIDER);
+        replacement.setProviderMessageId("shared-provider-message");
+        storage.saveInitialState(replacement);
 
         assertThat(storage.getState(target.getGatewayMsgId()))
                 .get()
                 .usingRecursiveComparison()
-                .isEqualTo(targetBeforeReplacement);
-        assertThat(storage.getState(owner.getGatewayMsgId()).orElseThrow().getOperatorMsgId())
-                .isEqualTo("shared-operator");
+                .isEqualTo(replacement);
+        assertThat(storage.getState(owner.getGatewayMsgId()).orElseThrow().getProviderMessageId())
+                .isNull();
         assertThat(countCorrelations(target.getGatewayMsgId())).isOne();
-        assertThat(countCorrelations(owner.getGatewayMsgId())).isOne();
+        assertThat(countCorrelations(owner.getGatewayMsgId())).isZero();
 
         MessageState newConflict = newState();
-        newConflict.setOperatorMsgId("shared-operator");
-        assertThatThrownBy(() -> storage.saveInitialState(newConflict))
-                .isInstanceOf(DlrStorageException.class);
-        assertThat(storage.getState(newConflict.getGatewayMsgId())).isEmpty();
+        newConflict.setProviderName(PROVIDER);
+        newConflict.setProviderMessageId("shared-provider-message");
+        storage.saveInitialState(newConflict);
+
+        assertThat(storage.getState(target.getGatewayMsgId()).orElseThrow().getProviderMessageId()).isNull();
+        assertThat(countCorrelations(target.getGatewayMsgId())).isZero();
+        assertThat(countCorrelations(newConflict.getGatewayMsgId())).isOne();
     }
 
     @Test
-    void linkOperatorIdUpdatesStateAndKeepsMultipleCorrelations() throws SQLException {
+    void linkProviderMessageIdUpdatesStateAndKeepsMultipleCorrelations() throws SQLException {
         MessageState state = newState();
         storage.saveInitialState(state);
 
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-1");
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-2");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-1");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-2");
 
         MessageState linked = storage.getState(state.getGatewayMsgId()).orElseThrow();
         assertThat(linked.getStatus()).isEqualTo(MessageState.MessageStatus.SENT);
-        assertThat(linked.getOperatorMsgId()).isEqualTo("operator-2");
+        assertThat(linked.getProviderMessageId()).isEqualTo("provider-message-2");
         assertThat(countCorrelations(state.getGatewayMsgId())).isEqualTo(2);
     }
 
     @Test
-    void linkOperatorIdRollsBackStateWhenCorrelationInsertFails() {
+    void linkProviderMessageIdRejectsInvalidCorrelation() {
         MessageState state = newState();
         storage.saveInitialState(state);
 
-        assertThatThrownBy(() -> storage.linkOperatorId(state.getGatewayMsgId(), null))
-                .isInstanceOf(DlrStorageException.class);
+        assertThatThrownBy(() -> storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, null))
+                .isInstanceOf(IllegalArgumentException.class);
 
         MessageState unchanged = storage.getState(state.getGatewayMsgId()).orElseThrow();
         assertThat(unchanged.getStatus()).isEqualTo(MessageState.MessageStatus.ACCEPTED);
-        assertThat(unchanged.getOperatorMsgId()).isNull();
+        assertThat(unchanged.getProviderMessageId()).isNull();
     }
 
     @Test
-    void linkOperatorIdRejectsCorrelationOwnedByAnotherMessage() throws SQLException {
+    void linkProviderMessageIdRebindsCorrelationToNewestMessage() throws SQLException {
+        MessageState first = new MessageState(UUID.randomUUID().toString(), "first-account", "first-system",
+                "first-source", "first-destination", null);
+        MessageState second = new MessageState(UUID.randomUUID().toString(), "second-account", "second-system",
+                "second-source", "second-destination", null);
+        storage.saveInitialState(first);
+        storage.saveInitialState(second);
+        storage.linkProviderMessageId(first.getGatewayMsgId(), PROVIDER, "shared-provider-message");
+
+        storage.linkProviderMessageId(second.getGatewayMsgId(), PROVIDER, "shared-provider-message");
+
+        assertThat(storage.getState(first.getGatewayMsgId()).orElseThrow().getProviderMessageId())
+                .isNull();
+        MessageState linked = storage.getState(second.getGatewayMsgId()).orElseThrow();
+        assertThat(linked.getStatus()).isEqualTo(MessageState.MessageStatus.SENT);
+        assertThat(linked.getProviderMessageId()).isEqualTo("shared-provider-message");
+        assertThat(countCorrelations(first.getGatewayMsgId())).isZero();
+        assertThat(countCorrelations(second.getGatewayMsgId())).isOne();
+
+        assertThat(storage.resolveAndRemoveDlr(
+                PROVIDER, "shared-provider-message", MessageState.MessageStatus.DELIVERED))
+                .get()
+                .extracting(MessageState::getGatewayMsgId, MessageState::getAccountId)
+                .containsExactly(second.getGatewayMsgId(), "second-account");
+        assertThat(storage.getState(first.getGatewayMsgId())).isPresent();
+    }
+
+    @Test
+    void sameMessageIdFromDifferentProvidersResolvesIndependently() {
+        MessageState first = newState();
+        MessageState second = newState();
+        storage.saveInitialStates(List.of(first, second));
+
+        storage.linkProviderMessageId(first.getGatewayMsgId(), "provider-a", "shared-provider-message");
+        storage.linkProviderMessageId(second.getGatewayMsgId(), "provider-b", "shared-provider-message");
+
+        assertThat(storage.resolveAndRemoveDlr(
+                "provider-a", "shared-provider-message", MessageState.MessageStatus.DELIVERED))
+                .get()
+                .extracting(MessageState::getGatewayMsgId, MessageState::getProviderName,
+                        MessageState::getProviderMessageId)
+                .containsExactly(first.getGatewayMsgId(), "provider-a", "shared-provider-message");
+        assertThat(storage.resolveAndRemoveDlr(
+                "provider-b", "shared-provider-message", MessageState.MessageStatus.DELIVERED))
+                .get()
+                .extracting(MessageState::getGatewayMsgId, MessageState::getProviderName,
+                        MessageState::getProviderMessageId)
+                .containsExactly(second.getGatewayMsgId(), "provider-b", "shared-provider-message");
+    }
+
+    @Test
+    void concurrentProviderMessageIdRebindLeavesOneConsistentOwner() throws Exception {
         MessageState first = newState();
         MessageState second = newState();
         storage.saveInitialState(first);
         storage.saveInitialState(second);
-        storage.linkOperatorId(first.getGatewayMsgId(), "shared-operator");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
 
-        assertThatThrownBy(() -> storage.linkOperatorId(second.getGatewayMsgId(), "shared-operator"))
-                .isInstanceOf(DlrStorageException.class);
+        try {
+            Future<?> firstLink = executor.submit(() -> {
+                linkWhenReleased(first.getGatewayMsgId(), "shared-provider-message", ready, start);
+                return null;
+            });
+            Future<?> secondLink = executor.submit(() -> {
+                linkWhenReleased(second.getGatewayMsgId(), "shared-provider-message", ready, start);
+                return null;
+            });
+            ready.await();
+            start.countDown();
+            firstLink.get();
+            secondLink.get();
 
-        assertThat(storage.getState(first.getGatewayMsgId()).orElseThrow().getOperatorMsgId())
-                .isEqualTo("shared-operator");
-        MessageState unchanged = storage.getState(second.getGatewayMsgId()).orElseThrow();
-        assertThat(unchanged.getStatus()).isEqualTo(MessageState.MessageStatus.ACCEPTED);
-        assertThat(unchanged.getOperatorMsgId()).isNull();
-        assertThat(countCorrelations(first.getGatewayMsgId())).isOne();
-        assertThat(countCorrelations(second.getGatewayMsgId())).isZero();
+            MessageState firstAfter = storage.getState(first.getGatewayMsgId()).orElseThrow();
+            MessageState secondAfter = storage.getState(second.getGatewayMsgId()).orElseThrow();
+            assertThat(List.of(firstAfter, secondAfter).stream()
+                    .filter(state -> "shared-provider-message".equals(state.getProviderMessageId())))
+                    .hasSize(1);
+            assertThat(countCorrelations(first.getGatewayMsgId()) + countCorrelations(second.getGatewayMsgId()))
+                    .isOne();
+            String owner = storage.resolveAndRemoveDlr(
+                    PROVIDER, "shared-provider-message", MessageState.MessageStatus.DELIVERED)
+                    .orElseThrow()
+                    .getGatewayMsgId();
+            assertThat(owner).isIn(first.getGatewayMsgId(), second.getGatewayMsgId());
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
-    void linkOperatorIdFailsWhenGatewayStateDoesNotAppear() {
+    void concurrentRebindAndResolveCompleteWithoutDeadlock() throws Exception {
+        MessageState first = newState();
+        MessageState second = newState();
+        storage.saveInitialStates(List.of(first, second));
+        storage.linkProviderMessageId(first.getGatewayMsgId(), PROVIDER, "shared-provider-message");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> rebind = executor.submit(() -> {
+                linkWhenReleased(second.getGatewayMsgId(), "shared-provider-message", ready, start);
+                return null;
+            });
+            Future<Optional<MessageState>> resolve = executor.submit(
+                    () -> resolveWhenReleased("shared-provider-message", ready, start));
+            ready.await();
+            start.countDown();
+
+            rebind.get();
+            assertThat(resolve.get()).isPresent();
+            assertThat(countCorrelations(first.getGatewayMsgId())
+                    + countCorrelations(second.getGatewayMsgId())).isLessThanOrEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentCrossedRebindsLockMessagesInConsistentOrder() throws Exception {
+        MessageState first = newState();
+        MessageState second = newState();
+        storage.saveInitialState(first);
+        storage.saveInitialState(second);
+        storage.linkProviderMessageId(first.getGatewayMsgId(), PROVIDER, "provider-message-2");
+        storage.linkProviderMessageId(second.getGatewayMsgId(), PROVIDER, "provider-message-1");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> firstLink = executor.submit(() -> {
+                linkWhenReleased(first.getGatewayMsgId(), "provider-message-1", ready, start);
+                return null;
+            });
+            Future<?> secondLink = executor.submit(() -> {
+                linkWhenReleased(second.getGatewayMsgId(), "provider-message-2", ready, start);
+                return null;
+            });
+            ready.await();
+            start.countDown();
+            firstLink.get();
+            secondLink.get();
+
+            assertThat(storage.getState(first.getGatewayMsgId()).orElseThrow().getProviderMessageId())
+                    .isEqualTo("provider-message-1");
+            assertThat(storage.getState(second.getGatewayMsgId()).orElseThrow().getProviderMessageId())
+                    .isEqualTo("provider-message-2");
+            assertThat(countCorrelations(first.getGatewayMsgId())).isOne();
+            assertThat(countCorrelations(second.getGatewayMsgId())).isOne();
+            assertThat(storage.resolveAndRemoveDlr(
+                    PROVIDER, "provider-message-1", MessageState.MessageStatus.DELIVERED))
+                    .get()
+                    .extracting(MessageState::getGatewayMsgId)
+                    .isEqualTo(first.getGatewayMsgId());
+            assertThat(storage.resolveAndRemoveDlr(
+                    PROVIDER, "provider-message-2", MessageState.MessageStatus.DELIVERED))
+                    .get()
+                    .extracting(MessageState::getGatewayMsgId)
+                    .isEqualTo(second.getGatewayMsgId());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void linkProviderMessageIdFailsWhenGatewayStateDoesNotAppear() {
         PostgresqlDlrStorage noRetryStorage =
                 new PostgresqlDlrStorage(dataSource, 1, 0);
 
-        assertThatThrownBy(() -> noRetryStorage.linkOperatorId(UUID.randomUUID().toString(), "operator"))
+        assertThatThrownBy(() -> noRetryStorage.linkProviderMessageId(
+                UUID.randomUUID().toString(), PROVIDER, "provider-message"))
                 .isInstanceOf(DlrStorageException.class)
                 .hasMessageContaining("not found");
     }
@@ -248,16 +429,16 @@ class PostgresqlDlrStorageIT {
     void resolveAndRemoveDlrReturnsUpdatedStateAndDeletesAllCorrelations() throws SQLException {
         MessageState state = newState();
         storage.saveInitialState(state);
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-1");
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-2");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-1");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-2");
         long beforeResolve = System.currentTimeMillis();
 
         Optional<MessageState> resolved = storage.resolveAndRemoveDlr(
-                "operator-1", MessageState.MessageStatus.DELIVERED);
+                PROVIDER, "provider-message-1", MessageState.MessageStatus.DELIVERED);
 
         assertThat(resolved).isPresent();
         assertThat(resolved.orElseThrow().getStatus()).isEqualTo(MessageState.MessageStatus.DELIVERED);
-        assertThat(resolved.orElseThrow().getOperatorMsgId()).isEqualTo("operator-1");
+        assertThat(resolved.orElseThrow().getProviderMessageId()).isEqualTo("provider-message-1");
         assertThat(resolved.orElseThrow().getTimestamp()).isGreaterThanOrEqualTo(beforeResolve);
         assertThat(storage.getState(state.getGatewayMsgId())).isEmpty();
         assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
@@ -267,17 +448,17 @@ class PostgresqlDlrStorageIT {
     void concurrentResolveAcrossCorrelationsReturnsStateOnlyOnce() throws Exception {
         MessageState state = newState();
         storage.saveInitialState(state);
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-1");
-        storage.linkOperatorId(state.getGatewayMsgId(), "operator-2");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-1");
+        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-2");
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
 
         try {
             Future<Optional<MessageState>> first = executor.submit(
-                    () -> resolveWhenReleased("operator-1", ready, start));
+                    () -> resolveWhenReleased("provider-message-1", ready, start));
             Future<Optional<MessageState>> second = executor.submit(
-                    () -> resolveWhenReleased("operator-2", ready, start));
+                    () -> resolveWhenReleased("provider-message-2", ready, start));
             ready.await();
             start.countDown();
 
@@ -305,7 +486,7 @@ class PostgresqlDlrStorageIT {
     void expiryRemovesOldCorrelationsAndMessages() throws SQLException {
         MessageState correlationState = newState();
         storage.saveInitialState(correlationState);
-        storage.linkOperatorId(correlationState.getGatewayMsgId(), "old-correlation");
+        storage.linkProviderMessageId(correlationState.getGatewayMsgId(), PROVIDER, "old-correlation");
         ageCorrelation("old-correlation");
 
         PostgresqlDlrStorage correlationCleanup = new PostgresqlDlrStorage(dataSource);
@@ -421,6 +602,29 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
+    void staleClaimCannotRemoveOrReleaseReplacementGeneration() {
+        StandardMessage original = newDlr("account-1", "system-1");
+        storage.saveUnpushedDlr(original);
+        StandardMessage staleClaim = storage.claimUnpushedDlrs(original.systemId).getFirst();
+        StandardMessage replacement = newDlr("account-2", original.systemId);
+        replacement.serial = original.serial;
+        replacement.msgId = original.msgId;
+        replacement.state = original.state;
+        replacement.errcode = original.errcode;
+        storage.saveUnpushedDlr(replacement);
+
+        assertThat(storage.removeUnpushedDlr(staleClaim)).isFalse();
+        List<StandardMessage> replacementClaim = storage.claimUnpushedDlrs(original.systemId);
+        assertThat(replacementClaim).hasSize(1);
+        assertThat(replacementClaim.getFirst().owner_id).isEqualTo("account-2");
+
+        storage.releaseUnpushedDlrClaim(staleClaim);
+        assertThat(storage.claimUnpushedDlrs(original.systemId)).isEmpty();
+        storage.releaseUnpushedDlrClaim(replacementClaim.getFirst());
+        assertThat(storage.claimUnpushedDlrs(original.systemId)).hasSize(1);
+    }
+
+    @Test
     void concurrentClaimsReturnReceiptOnlyOnce() throws Exception {
         StandardMessage dlr = newDlr("account-1", "system-1");
         storage.saveUnpushedDlr(dlr);
@@ -459,11 +663,18 @@ class PostgresqlDlrStorageIT {
         assertThat(storage.claimUnpushedDlrs(dlr.systemId)).isEmpty();
     }
 
-    private Optional<MessageState> resolveWhenReleased(String operatorMsgId, CountDownLatch ready,
-                                                        CountDownLatch start) throws InterruptedException {
+    private Optional<MessageState> resolveWhenReleased(String providerMessageId, CountDownLatch ready,
+                                                         CountDownLatch start) throws InterruptedException {
         ready.countDown();
         start.await();
-        return storage.resolveAndRemoveDlr(operatorMsgId, MessageState.MessageStatus.DELIVERED);
+        return storage.resolveAndRemoveDlr(PROVIDER, providerMessageId, MessageState.MessageStatus.DELIVERED);
+    }
+
+    private void linkWhenReleased(String gatewayMsgId, String providerMessageId, CountDownLatch ready,
+                                  CountDownLatch start) throws InterruptedException {
+        ready.countDown();
+        start.await();
+        storage.linkProviderMessageId(gatewayMsgId, PROVIDER, providerMessageId);
     }
 
     private List<StandardMessage> claimWhenReleased(String systemId, CountDownLatch ready,
@@ -499,7 +710,7 @@ class PostgresqlDlrStorageIT {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      SELECT COUNT(*)
-                     FROM sendium_dlr.operator_correlation
+                     FROM sendium_dlr.provider_correlation
                      WHERE gateway_message_id = ?
                      """)) {
             statement.setObject(1, UUID.fromString(gatewayMsgId));
@@ -519,14 +730,15 @@ class PostgresqlDlrStorageIT {
         }
     }
 
-    private void ageCorrelation(String operatorMsgId) throws SQLException {
+    private void ageCorrelation(String providerMessageId) throws SQLException {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     UPDATE sendium_dlr.operator_correlation
-                     SET created_at = CURRENT_TIMESTAMP - INTERVAL '4 days'
-                     WHERE operator_message_id = ?
-                     """)) {
-            statement.setString(1, operatorMsgId);
+                      UPDATE sendium_dlr.provider_correlation
+                      SET created_at = CURRENT_TIMESTAMP - INTERVAL '4 days'
+                      WHERE provider_name = ? AND provider_message_id = ?
+                      """)) {
+            statement.setString(1, PROVIDER);
+            statement.setString(2, providerMessageId);
             statement.executeUpdate();
         }
     }

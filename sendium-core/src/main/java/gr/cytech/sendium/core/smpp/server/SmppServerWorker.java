@@ -241,7 +241,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         keepOnRunning = false;
         messagePartsHandler.stop();
         boolean drainPersistedIngress = messageStore != null && messageStore.persistsBeforeAcknowledgement();
-        if (!drainPersistedIngress) {
+        if (!drainPersistedIngress && messageStore != null) {
             messageStore.stop();
         }
         if (inactivityTimeFuture != null) {

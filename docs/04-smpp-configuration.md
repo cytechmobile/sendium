@@ -247,6 +247,7 @@ The SMPP Client worker (`WorkerType: smppclient`) allows the application to conn
 | `dcs.charset.ext` | `""` | Override or add extra DCS-to-Charset mappings (Format: `DCS_CHARSET`). |
 | `dlr.charset.fixed` | `""` | Forces a specific character set for decoding Delivery Receipts. |
 | `msg.id.type` | `0` | Determines how the SMSC Message ID is parsed (0=StringLiteral, 1=SubmitRespHexDlrDec, 2=SubmitRespDecDlrHex). |
+| `msg.hash.prefix` | Worker instance name | Stable provider namespace used for DLR correlation. Configure the same value on multiple workers only when one SMSC account may deliver their receipts interchangeably. Changing it strands outstanding correlations under the previous value. |
 
 ## 🚦 Error Handling & Routing Policies
 
@@ -272,7 +273,7 @@ The SMPP Client worker (`WorkerType: smppclient`) allows the application to conn
 
 ## 📊 Logging & Diagnostics
 
-SMPP client PDU, response, and MO diagnostics are disabled by default. These logs can include bind passwords, phone numbers, provider message IDs, callback data, and message bodies, so enable them only when the log destination is access-controlled and retention is appropriate. Default `message.trace.mode = necessary` preserves submit and DLR milestones without logging payloads; use `all` for submit-response and operator-link details.
+SMPP client PDU, response, and MO diagnostics are disabled by default. These logs can include bind passwords, phone numbers, provider message IDs, callback data, and message bodies, so enable them only when the log destination is access-controlled and retention is appropriate. Default `message.trace.mode = necessary` preserves submit and DLR milestones without logging payloads; use `all` for submit-response and provider-link details.
 
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
