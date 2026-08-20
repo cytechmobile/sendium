@@ -8,9 +8,9 @@ import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
-import gr.cytech.sendium.core.smpp.server.InMemorySmppServerMessageStore;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
-import gr.cytech.sendium.core.worker.InMemoryMessageTracker;
+import gr.cytech.sendium.core.smpp.server.StandardSmppServerMessageStore;
+import gr.cytech.sendium.core.worker.StandardMessageTracker;
 import gr.cytech.sendium.core.worker.WorkerType;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import gr.cytech.sendium.external.filter.InMessageFiltering;
@@ -203,10 +203,10 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             }
             worker = selectedWorker.get();
             worker.setupInstance(configurationHandler, instName, queueProvider.getRouterQueue());
-            worker.init(workerResourceProvider, new InMemoryMessageTracker(worker));
+            worker.init(workerResourceProvider, new StandardMessageTracker(worker));
             if (SmppServerWorker.TYPE_SMPP_SERVER.equals(worker.getType())) {
                 var smppServer = (SmppServerWorker<StandardMessage>) worker;
-                smppServer.setMessageStore(new InMemorySmppServerMessageStore(smppServer));
+                smppServer.setMessageStore(new StandardSmppServerMessageStore(smppServer));
             }
         } catch (Exception e) {
             logger.error("Could not start worker {} {}", workerTypeString, instName, e);
