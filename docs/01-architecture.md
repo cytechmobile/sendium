@@ -151,24 +151,46 @@ sequenceDiagram
 
 ## DLR Handling
 
-Outbound HTTP messages can include a Kannel-style `dlr-url`. Sendium stores the gateway message ID and later links it to the message ID returned by the SMPP provider. Provider message IDs are scoped by the outbound provider name, so different providers may reuse the same ID without overwriting each other's correlation. When a DLR arrives, the DLR service resolves the provider and message-ID pair and forwards the callback.
+Outbound HTTP messages can include a Kannel-style `dlr-url`. Before accepting a submission, Sendium stores its gateway message ID. After the upstream SMSC returns `submit_sm_resp`, the client worker links that gateway ID to the exact `(provider name, provider message ID)` pair. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
+
+Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Link and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Resolving a receipt transactionally consumes the tracked message and all of its correlations before callback forwarding or internal DLR queueing.
 
 ```mermaid
 sequenceDiagram
-    participant SMSC as Upstream SMSC
-    participant Worker as SmppClientWorker
-    participant Tracker as StandardMessageTracker
-    participant Store as DlrStorage
+    participant Ingress as HTTP/SMPP ingress
     participant Router as Router queue
+    participant Worker as SmppClientWorker
+    participant SMSC as Upstream SMSC
+    participant Tracker as StandardMessageTracker
+    participant Service as DlrService
+    participant Database as PostgreSQL DLR storage
     participant DLRHook as ForwardDlrService
     participant App as Originating application
 
+    Ingress->>Service: saveInitialState(gateway message ID)
+    Service->>Database: Insert tracked message
+    Database-->>Service: Commit
+    Service-->>Ingress: State persisted
+    Ingress->>Router: Enqueue accepted message
+    Router->>Worker: Route outbound message
+    Worker->>SMSC: submit_sm
+    SMSC-->>Worker: submit_sm_resp(provider message ID)
+    Worker->>Tracker: linkProviderMessageId
+    Tracker->>Service: Link gateway ID and provider pair
+    Service->>Database: Lock and upsert provider correlation
+
     SMSC->>Worker: deliver_sm delivery receipt
     Worker->>Tracker: createAndEnqueueDLR
-    Tracker->>Store: Resolve provider name and provider message ID
-    Store->>DLRHook: Forward DLR callback if URL exists
-    DLRHook->>App: HTTP GET callback
+    Tracker->>Service: resolveAndRemoveDlr(provider pair)
+    Service->>Database: Lock, resolve, and delete tracked state
+    Database-->>Service: Resolved message state
+    opt DLR callback URL exists
+        Service->>DLRHook: Forward DLR callback
+        DLRHook->>App: HTTP GET callback
+    end
+    Service-->>Tracker: Resolved message state
     Tracker->>Router: Enqueue internal MSG_DLR
+    Worker-->>SMSC: deliver_sm_resp
 ```
 
 ## MO Handling
