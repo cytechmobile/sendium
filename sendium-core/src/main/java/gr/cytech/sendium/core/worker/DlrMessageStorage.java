@@ -10,13 +10,15 @@ public interface DlrMessageStorage {
         states.forEach(this::saveInitialState);
     }
 
-    void linkOperatorId(String gatewayMsgId, String operatorMsgId);
+    void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId);
 
     /**
      * Resolves and removes one provider correlation and its tracked message.
-     * The returned state must contain the supplied status, the linked operator ID, and an updated timestamp.
+     * The returned state must contain the supplied status, provider name, linked provider message ID, and an updated
+     * timestamp.
      */
-    Optional<MessageState> resolveAndRemoveDlr(String operatorMsgId, MessageState.MessageStatus status);
+    Optional<MessageState> resolveAndRemoveDlr(String providerName, String providerMessageId,
+                                               MessageState.MessageStatus status);
 
     Optional<MessageState> getState(String gatewayMsgId);
 

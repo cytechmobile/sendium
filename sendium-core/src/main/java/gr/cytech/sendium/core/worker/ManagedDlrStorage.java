@@ -18,12 +18,14 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 @Startup
 @ApplicationScoped
-@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true")
+@IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class ManagedDlrStorage implements DlrStorage {
     private static final String METRIC_NAME = "sendium.dlr.storage.operation";
     private static final String BACKEND = "postgresql";
@@ -47,6 +49,8 @@ public class ManagedDlrStorage implements DlrStorage {
 
     @Inject
     MeterRegistry meterRegistry;
+
+    private final Map<String, Timer> timers = new ConcurrentHashMap<>();
 
     private DlrStorage delegate;
     private AgroalDataSource selectedPostgresqlDataSource;
@@ -93,13 +97,15 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     @Override
-    public void linkOperatorId(String gatewayMsgId, String operatorMsgId) {
-        timed("link_operator", () -> delegate.linkOperatorId(gatewayMsgId, operatorMsgId));
+    public void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId) {
+        timed("link_provider", () -> delegate.linkProviderMessageId(
+                gatewayMessageId, providerName, providerMessageId));
     }
 
     @Override
-    public Optional<MessageState> resolveAndRemoveDlr(String operatorMsgId, MessageState.MessageStatus status) {
-        return timed("resolve", () -> delegate.resolveAndRemoveDlr(operatorMsgId, status));
+    public Optional<MessageState> resolveAndRemoveDlr(String providerName, String providerMessageId,
+                                                      MessageState.MessageStatus status) {
+        return timed("resolve", () -> delegate.resolveAndRemoveDlr(providerName, providerMessageId, status));
     }
 
     @Override
@@ -157,9 +163,9 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     private Timer timer(String operation, String outcome) {
-        return Timer.builder(METRIC_NAME)
+        return timers.computeIfAbsent(operation + '/' + outcome, ignored -> Timer.builder(METRIC_NAME)
                 .description("Sendium DLR storage operation latency")
                 .tags("backend", BACKEND, "operation", operation, "outcome", outcome)
-                .register(meterRegistry);
+                .register(meterRegistry));
     }
 }

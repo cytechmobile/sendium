@@ -347,6 +347,10 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         return fullName;
     }
 
+    public String getDlrProviderName() {
+        return getFullName();
+    }
+
     public long getAlertMaxPendingQueue() {
         return alertMaxPendingQueue;
     }
@@ -566,10 +570,10 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         return messageTracker;
     }
 
-    public int updateSendStatusAndExtID(String smsid, M pMsg, String smscid) {
-        pMsg.extrid = smscid;
-        pMsg.field1 = smsid;
-        return messageTracker.updateSendStatusAndExtID(smsid, pMsg, smscid);
+    public int updateSendStatusAndExtID(String hashedProviderMessageId, M message, String providerMessageId) {
+        message.extrid = providerMessageId;
+        message.field1 = hashedProviderMessageId;
+        return messageTracker.updateSendStatusAndExtID(hashedProviderMessageId, message, providerMessageId);
     }
 
     public String getHashedMessageID(String messageId) {

@@ -44,7 +44,7 @@ sendium/
 
 `.sendium.env`, `credentials.yml`, and `smsg.properties` contain secrets. The generated `.gitignore` excludes them, but they still require access-controlled storage and backups. The local PostgreSQL service is private to the Compose network and does not publish a database port.
 
-Using `--force` regenerates the HTTP/SMPP credentials and configuration while preserving the generated local database password required by the existing PostgreSQL volume. When startup is enabled, Quick Start recreates the containers so the new credentials and worker configuration take effect together. With `--no-start`, it prints the required `docker compose up -d --force-recreate --remove-orphans` command instead.
+Using `--force` regenerates the HTTP/SMPP credentials and configuration while preserving the generated local database password required by the existing PostgreSQL volume. The local password is retained separately from an external database password, so switching to an external database and later returning to the bundled database does not break authentication. When startup is enabled, Quick Start recreates the containers so the new credentials and worker configuration take effect together. With `--no-start`, it prints the required `docker compose up -d --force-recreate --remove-orphans` command instead.
 
 To use an operator-managed PostgreSQL database, set `SENDIUM_DLR_POSTGRESQL_JDBC_URL`, `SENDIUM_DLR_POSTGRESQL_USERNAME`, and `SENDIUM_DLR_POSTGRESQL_PASSWORD` together before running Quick Start. The generated Compose file then omits the local PostgreSQL service. See [DLR Persistence](13-dlr-persistence.md) for TLS, permissions, retention, and durability guidance.
 
