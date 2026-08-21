@@ -103,7 +103,7 @@ class StandardMessageTrackerTest {
 
     @Test
     void createAndEnqueueDLR_WhenStorageFails_PropagatesToProtocolBoundary() throws InterruptedException {
-        when(dlrService.resolveAndRemoveDlr("provider-1", "provider-message-456", 0))
+        when(dlrService.resolveDlr("provider-1", "provider-message-456", 0, "0"))
                 .thenThrow(new DlrStorageException("Failed to resolve DLR state"));
 
         assertThrows(DlrStorageException.class, () -> tracker.createAndEnqueueDLR(
@@ -140,15 +140,16 @@ class StandardMessageTrackerTest {
     }
 
     @Test
-    void createAndEnqueueDLR_KnownMessage_ResolvesFromDlrService() throws InterruptedException {
+    void createAndEnqueueDLR_SmppMessage_ResolvesAndEnqueues() throws InterruptedException {
         MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
-        when(dlrService.resolveAndRemoveDlr("provider-1", "provider-message-456", 0))
+        state.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        when(dlrService.resolveDlr("provider-1", "provider-message-456", 0, "0"))
                 .thenReturn(java.util.Optional.of(state));
 
         tracker.createAndEnqueueDLR(
                 1, "provider-message-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
 
-        verify(dlrService).resolveAndRemoveDlr("provider-1", "provider-message-456", 0);
+        verify(dlrService).resolveDlr("provider-1", "provider-message-456", 0, "0");
         ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
         verify(outWorker).enqueueToRouter(captor.capture());
         assertEquals("accountId", captor.getValue().owner_id);
@@ -158,8 +159,9 @@ class StandardMessageTrackerTest {
     @Test
     void createAndEnqueueDLR_KnownReassembledMessage_RestoresPartIds() throws InterruptedException {
         MessageState state = new MessageState("gw-123", "accountId", "systemId", "from", "to", null);
+        state.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
         state.setReassembledParts(new ArrayList<>(List.of("part-1", "part-2")));
-        when(dlrService.resolveAndRemoveDlr("provider-1", "provider-message-456", 1))
+        when(dlrService.resolveDlr("provider-1", "provider-message-456", 1, "0"))
                 .thenReturn(java.util.Optional.of(state));
 
         tracker.createAndEnqueueDLR(
@@ -171,13 +173,40 @@ class StandardMessageTrackerTest {
     }
 
     @Test
+    void createAndEnqueueDLR_HttpMessage_DoesNotEnqueue() throws InterruptedException {
+        MessageState state = new MessageState("gw-http", "accountId", "systemId", "from", "to",
+                "https://example.test/dlr");
+        state.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
+        when(dlrService.resolveDlr("provider-1", "provider-http", 1, "0"))
+                .thenReturn(java.util.Optional.of(state));
+
+        tracker.createAndEnqueueDLR(
+                1, "provider-http", "gw-http", "from", "to", "test body", 1, "0", new HashMap<>());
+
+        verify(outWorker, never()).enqueueToRouter(any());
+    }
+
+    @Test
+    void createAndEnqueueDLR_NoneMessage_DoesNotEnqueue() throws InterruptedException {
+        MessageState state = new MessageState("gw-none", "accountId", "systemId", "from", "to", null);
+        state.setDeliveryChannel(MessageState.DeliveryChannel.NONE);
+        when(dlrService.resolveDlr("provider-1", "provider-none", 1, "0"))
+                .thenReturn(java.util.Optional.of(state));
+
+        tracker.createAndEnqueueDLR(
+                1, "provider-none", "gw-none", "from", "to", "test body", 1, "0", new HashMap<>());
+
+        verify(outWorker, never()).enqueueToRouter(any());
+    }
+
+    @Test
     void createAndEnqueueDLR_UnknownMessage_DoesNotEnqueue() {
-        when(dlrService.resolveAndRemoveDlr("provider-1", "unknown", 0))
+        when(dlrService.resolveDlr("provider-1", "unknown", 0, "0"))
                 .thenReturn(java.util.Optional.empty());
 
         tracker.createAndEnqueueDLR(1, "unknown", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>());
 
-        verify(dlrService).resolveAndRemoveDlr("provider-1", "unknown", 0);
+        verify(dlrService).resolveDlr("provider-1", "unknown", 0, "0");
     }
 
 }

@@ -4,6 +4,7 @@ import com.cloudhopper.commons.util.HexUtil;
 import com.cloudhopper.smpp.PduAsyncResponse;
 import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.SmppSession;
+import com.cloudhopper.smpp.pdu.DeliverSmResp;
 import com.cloudhopper.smpp.pdu.GenericNack;
 import com.cloudhopper.smpp.pdu.PartialPdu;
 import com.cloudhopper.smpp.pdu.Pdu;
@@ -33,6 +34,9 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class SmppServerSessionHandler<M extends StandardMessage> implements SmsgSmppSessionHandler {
     public static final String DATE_FORMAT = "yyyy-MMM-dd HH:mm:ss.SS+z";
@@ -49,6 +53,8 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
     private final RateLimiter rateController;
     private final SmppSessionContext sessionContext;
     private final SubmitSmProcessor<M> submitProcessor;
+    private final Set<DlrDeliveryBatch<?>> activeDlrBatches = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean closed = new AtomicBoolean();
     private String apiProduct;
 
     public SmppServerSessionHandler(SmppServerWorker<M> worker,
@@ -134,6 +140,10 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
         logger.info("{}: received expired request PDU {}", this, MessageTrace.pdu(pduRequest));
 
         if (pduRequest.getCommandId() == SmppConstants.CMD_ID_DELIVER_SM) {
+            if (pduRequest.getReferenceObject() instanceof DlrDeliverSmReference<?> reference) {
+                reference.batch().fail("timeout");
+                return;
+            }
             try {
                 Object[] arr = (Object[]) pduRequest.getReferenceObject();
                 M original = (M) arr[1];
@@ -153,6 +163,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
      */
     public void fireChannelUnexpectedlyClosed() {
         logger.warn("{}: closed unexpectedly", this);
+        failActiveDlrBatches();
         worker.getBindHandler().getConnections().removeConnection(this);
     }
 
@@ -171,6 +182,21 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
      */
     public void fireExpectedPduResponseReceived(PduAsyncResponse pduAsyncResponse) {
         logger.trace("{}: received expected response PDU: {}", this, pduAsyncResponse.getResponse());
+
+        if (pduAsyncResponse.getRequest() != null &&
+                pduAsyncResponse.getRequest().getReferenceObject() instanceof DlrDeliverSmReference<?> reference) {
+            PduResponse response = pduAsyncResponse.getResponse();
+            if (response instanceof GenericNack) {
+                reference.batch().fail("generic_nack");
+            } else if (!(response instanceof DeliverSmResp)) {
+                reference.batch().fail("wrong_response");
+            } else if (response.getCommandStatus() != SmppConstants.STATUS_OK) {
+                reference.batch().fail("non_ok_response");
+            } else {
+                reference.batch().partSucceeded(reference.partOrdinal());
+            }
+            return;
+        }
 
         /*
          * Its possible the response PDU really isn't the correct PDU we were waiting for,
@@ -205,6 +231,7 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
      * @param e The exception
      */
     public void fireUnrecoverablePduException(UnrecoverablePduException e) {
+        failActiveDlrBatches();
         getSession().destroy();
         logger.warn("{}: destroyed because of unrecoverable pdu exception", this, e);
     }
@@ -366,6 +393,30 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
 
     public SmppServerWorker<M> getWorker() {
         return worker;
+    }
+
+    public boolean registerDlrBatch(DlrDeliveryBatch<?> batch) {
+        if (closed.get()) {
+            batch.fail("session_closed");
+            return false;
+        }
+        activeDlrBatches.add(batch);
+        if (closed.get() && activeDlrBatches.remove(batch)) {
+            batch.fail("session_closed");
+            return false;
+        }
+        return true;
+    }
+
+    public void unregisterDlrBatch(DlrDeliveryBatch<?> batch) {
+        activeDlrBatches.remove(batch);
+    }
+
+    public void failActiveDlrBatches() {
+        closed.set(true);
+        for (DlrDeliveryBatch<?> batch : activeDlrBatches) {
+            batch.fail("session_closed");
+        }
     }
 
     public void handleSubmitSm(SubmitSm submitSm) {
