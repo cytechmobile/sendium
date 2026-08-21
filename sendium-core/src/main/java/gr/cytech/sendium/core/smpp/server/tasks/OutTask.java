@@ -28,6 +28,7 @@ public class OutTask<M extends StandardMessage> implements Runnable {
         boolean success;
         DlrDeliverSmReference<?> dlrReference =
                 pdu.getReferenceObject() instanceof DlrDeliverSmReference<?> reference ? reference : null;
+        StandardMessage durableDlr = dlrReference == null ? null : dlrReference.batch().getMessage();
         if (dlrReference != null && !dlrReference.batch().isActive()) {
             return;
         }
@@ -65,14 +66,18 @@ public class OutTask<M extends StandardMessage> implements Runnable {
 
         if (!success) {
             if (dlrReference != null) {
+                if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_FAILED)) {
+                    logger.warn("message.deliver.failed worker={} {}", worker.getFullName(),
+                            MessageTrace.identifiers(durableDlr));
+                }
                 dlrReference.batch().fail("send_failed");
             } else {
                 worker.outTaskFailed(pdu, msg);
             }
-        } else if (!pdu.isResponse() && msg != null) {
+        } else if (!pdu.isResponse() && (msg != null || durableDlr != null)) {
             if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_SENT)) {
                 logger.info("message.deliver.sent worker={} deliverMsgId={} {}", worker.getFullName(),
-                        MessageTrace.value(deliverMsgId), MessageTrace.identifiers(msg));
+                        MessageTrace.value(deliverMsgId), MessageTrace.identifiers(msg != null ? msg : durableDlr));
             }
         }
     }
