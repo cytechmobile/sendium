@@ -151,9 +151,9 @@ sequenceDiagram
 
 ## DLR Handling
 
-Outbound HTTP messages can include a Kannel-style `dlr-url`. Before accepting a submission, Sendium stores its gateway message ID. After the upstream SMSC returns `submit_sm_resp`, the client worker links that gateway ID to the exact `(provider name, provider message ID)` pair. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
+Outbound HTTP messages can include a Kannel-style `dlr-url`, while downstream SMPP submissions request receipts through `registered_delivery`. Before accepting either submission, Sendium stores one `dlr_message` row containing the gateway message ID and downstream delivery target. After the upstream SMSC returns `submit_sm_resp`, the client worker links that gateway ID to the exact `(provider name, provider message ID)` pair in `provider_correlation`. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
 
-Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Link and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Resolving a receipt transactionally consumes the tracked message and all of its correlations before callback forwarding or internal DLR queueing.
+Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Link and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged without invoking the tracker or consuming correlation. The first terminal receipt records its exact state and error, consumes every correlation for the gateway message, and either deletes a `NONE` delivery row or retains an HTTP/SMPP row as `PENDING`.
 
 ```mermaid
 sequenceDiagram
@@ -164,8 +164,9 @@ sequenceDiagram
     participant Tracker as StandardMessageTracker
     participant Service as DlrService
     participant Database as PostgreSQL DLR storage
-    participant DLRHook as ForwardDlrService
-    participant App as Originating application
+    participant HTTP as HTTP DLR dispatcher
+    participant App as Originating HTTP application
+    participant SMPPApp as Originating SMPP client
 
     Ingress->>Service: saveInitialState(gateway message ID)
     Service->>Database: Insert DLR message
@@ -187,15 +188,28 @@ sequenceDiagram
         Tracker->>Service: resolveDlr(provider pair, exact state/error)
         Service->>Database: Lock, resolve, consume correlations, retain pending delivery
         Database-->>Service: Resolved message state
-        opt DLR callback URL exists
-            Service->>DLRHook: Forward DLR callback
-            DLRHook->>App: HTTP GET callback
+        alt persistence succeeds
+            Worker-->>SMSC: deliver_sm_resp (success)
+        else persistence fails
+            Worker-->>SMSC: deliver_sm_resp (SYSERR)
         end
-        Service-->>Tracker: Resolved message state
+    end
+
+    alt HTTP delivery channel
+        loop Poll durable due rows
+            HTTP->>Database: Start fenced attempt
+            HTTP->>App: HTTP GET callback
+            HTTP->>Database: Delete on success or persist retry/failure
+        end
+    else SMPP delivery channel
         Tracker->>Router: Enqueue internal MSG_DLR
-        Worker-->>SMSC: deliver_sm_resp
+        Router->>SMPPApp: deliver_sm receipt part(s)
+        SMPPApp-->>Router: deliver_sm_resp for every part
+        Router->>Database: Delete only after all responses succeed
     end
 ```
+
+HTTP and SMPP delivery are acknowledgement-driven and at-least-once. A crash after the receiver accepts a callback or response can cause the same receipt, including already acknowledged multipart SMPP parts, to be delivered again.
 
 ## MO Handling
 
