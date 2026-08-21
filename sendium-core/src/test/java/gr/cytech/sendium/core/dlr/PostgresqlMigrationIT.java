@@ -22,12 +22,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PostgresqlMigrationIT {
     private static final String MIGRATION_LOCATION = "classpath:db/sendium-dlr/postgresql";
-    private static final UUID INVALID_STATUS_GATEWAY_ID =
-            UUID.fromString("00000000-0000-0000-0000-000000000001");
-    private static final UUID CORRELATION_GATEWAY_ID =
-            UUID.fromString("00000000-0000-0000-0000-000000000002");
-    private static final UUID COMPLETE_GATEWAY_ID =
-            UUID.fromString("00000000-0000-0000-0000-000000000003");
     private static final PostgreSQLContainer POSTGRESQL = new PostgreSQLContainer("postgres:17-alpine")
             .withDatabaseName("sendium")
             .withUsername("sendium")
@@ -52,28 +46,36 @@ class PostgresqlMigrationIT {
     }
 
     @Test
-    void migrationCreatesExpectedTablesAndIndexes() throws SQLException {
+    void migrationCreatesDlrMessageSchemaAndPartialIndexes() throws SQLException {
         assertThat(initialMigration.success).isTrue();
         assertThat(initialMigration.migrationsExecuted).isOne();
 
         try (Connection connection = connection()) {
             assertThat(loadNames(connection,
                     "SELECT table_name FROM information_schema.tables WHERE table_schema = 'sendium_dlr'"))
-                    .containsExactlyInAnyOrder("tracked_message", "provider_correlation", "unpushed_dlr");
+                    .containsExactlyInAnyOrder("dlr_message", "provider_correlation");
             assertThat(loadNames(connection,
                     "SELECT indexname FROM pg_indexes WHERE schemaname = 'sendium_dlr'"))
-                    .contains("tracked_message_created_at_idx",
-                            "tracked_message_provider_message_id_idx",
+                    .contains("dlr_message_created_at_idx",
+                            "dlr_message_provider_message_id_idx",
+                            "dlr_message_http_due_idx",
+                            "dlr_message_smpp_replay_idx",
                             "provider_correlation_created_at_idx",
-                            "provider_correlation_gateway_message_idx",
-                            "unpushed_dlr_system_created_at_idx",
-                            "unpushed_dlr_created_at_idx");
-            assertThat(loadColumnType(connection, "tracked_message", "gateway_message_id"))
-                    .isEqualTo("uuid");
-            assertThat(loadColumnType(connection, "provider_correlation", "gateway_message_id"))
-                    .isEqualTo("uuid");
-            assertThat(loadColumnType(connection, "provider_correlation", "provider_name"))
-                    .isEqualTo("text");
+                            "provider_correlation_gateway_message_idx");
+            assertThat(loadIndexDefinition(connection, "dlr_message_http_due_idx"))
+                    .contains("next_attempt_at")
+                    .contains("delivery_channel = 'HTTP'")
+                    .contains("delivery_status = 'PENDING'");
+            assertThat(loadIndexDefinition(connection, "dlr_message_smpp_replay_idx"))
+                    .contains("system_id", "resolved_at")
+                    .contains("delivery_channel = 'SMPP'")
+                    .contains("delivery_status = 'PENDING'");
+            assertThat(loadColumnType(connection, "dlr_message", "gateway_message_id")).isEqualTo("uuid");
+            assertThat(loadColumnNames(connection, "dlr_message"))
+                    .contains("dlr_state", "error_code", "delivery_channel", "delivery_status",
+                            "delivery_attempt_count", "last_attempt_at", "next_attempt_at",
+                            "last_delivery_result", "resolved_at")
+                    .doesNotContain("generation_id");
         }
     }
 
@@ -86,109 +88,100 @@ class PostgresqlMigrationIT {
     }
 
     @Test
-    void trackedMessageRejectsUnknownStatus() throws SQLException {
-        try (Connection connection = connection();
-             PreparedStatement statement = connection.prepareStatement("""
-                     INSERT INTO sendium_dlr.tracked_message
-                         (gateway_message_id, account_id, system_id, status)
-                     VALUES (?, 'account', 'system', 'UNKNOWN')
-                     """)) {
-            statement.setObject(1, INVALID_STATUS_GATEWAY_ID);
-            assertThatThrownBy(statement::executeUpdate).isInstanceOf(SQLException.class);
+    void schemaRejectsInvalidProviderAndDeliveryStates() throws SQLException {
+        try (Connection connection = connection()) {
+            assertInvalidMessage(connection, "UNKNOWN", "NONE", "WAITING_PROVIDER", 0, null, null);
+            assertInvalidMessage(connection, "ACCEPTED", "MAIL", "WAITING_PROVIDER", 0, null, null);
+            assertInvalidMessage(connection, "ACCEPTED", "NONE", "DONE", 0, null, null);
+            assertInvalidMessage(connection, "ACCEPTED", "NONE", "WAITING_PROVIDER", -1, null, null);
         }
     }
 
     @Test
-    void providerCorrelationFieldsRejectBlankValues() throws SQLException {
+    void schemaRequiresValidChannelTargets() throws SQLException {
         try (Connection connection = connection()) {
             for (String blank : List.of("", "   ", "\t\n")) {
-                assertThatThrownBy(() -> insertTrackedMessageWithProvider(
-                        connection, UUID.randomUUID(), blank, "provider-message"))
-                        .isInstanceOf(SQLException.class);
-                assertThatThrownBy(() -> insertTrackedMessageWithProvider(
-                        connection, UUID.randomUUID(), "provider", blank))
-                        .isInstanceOf(SQLException.class);
+                assertInvalidMessage(connection, "ACCEPTED", "HTTP", "WAITING_PROVIDER", 0, "system", blank);
+                assertInvalidMessage(connection, "ACCEPTED", "SMPP", "WAITING_PROVIDER", 0, blank,
+                        "https://example.test/dlr");
             }
-
-            UUID gatewayMessageId = UUID.randomUUID();
-            insertTrackedMessage(connection, gatewayMessageId);
-            assertThatThrownBy(() -> insertCorrelation(connection, "   ", "provider-message", gatewayMessageId))
-                    .isInstanceOf(SQLException.class);
-            assertThatThrownBy(() -> insertCorrelation(connection, "provider", "\t\n", gatewayMessageId))
-                    .isInstanceOf(SQLException.class);
+            assertInvalidMessage(connection, "ACCEPTED", "HTTP", "WAITING_PROVIDER", 0, "system", null);
+            assertInvalidMessage(connection, "ACCEPTED", "SMPP", "WAITING_PROVIDER", 0, null,
+                    "https://example.test/dlr");
         }
     }
 
     @Test
-    void correlationIsDeletedWithTrackedMessage() throws SQLException {
+    void providerCorrelationReferencesDlrMessageAndCascades() throws SQLException {
+        UUID gatewayId = UUID.randomUUID();
         try (Connection connection = connection()) {
-            insertTrackedMessage(connection, CORRELATION_GATEWAY_ID);
-            insertCorrelation(connection, "provider-1", "provider-message-1", CORRELATION_GATEWAY_ID);
-            insertCorrelation(connection, "provider-1", "provider-message-2", CORRELATION_GATEWAY_ID);
-
+            insertMessage(connection, gatewayId);
             try (PreparedStatement statement = connection.prepareStatement("""
-                    DELETE FROM sendium_dlr.tracked_message WHERE gateway_message_id = ?
+                    INSERT INTO sendium_dlr.provider_correlation
+                        (provider_name, provider_message_id, gateway_message_id)
+                    VALUES ('provider', 'message', ?)
                     """)) {
-                statement.setObject(1, CORRELATION_GATEWAY_ID);
+                statement.setObject(1, gatewayId);
                 statement.executeUpdate();
             }
-
-            assertThat(countCorrelations(connection, CORRELATION_GATEWAY_ID)).isZero();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?")) {
+                statement.setObject(1, gatewayId);
+                statement.executeUpdate();
+            }
+            assertThat(loadCount(connection, "sendium_dlr.provider_correlation")).isZero();
         }
     }
 
     @Test
-    void unpushedDlrRequiresNonBlankSystemId() throws SQLException {
+    void defaultsWaitingProviderWithNoAttempts() throws SQLException {
+        UUID gatewayId = UUID.randomUUID();
         try (Connection connection = connection()) {
-            assertThatThrownBy(() -> insertMinimalUnpushedDlr(connection, "empty-system", ""))
-                    .isInstanceOf(SQLException.class);
-            assertThatThrownBy(() -> insertMinimalUnpushedDlr(connection, "whitespace-system", "   "))
-                    .isInstanceOf(SQLException.class);
-            assertThatThrownBy(() -> insertMinimalUnpushedDlr(connection, "control-whitespace-system", "\t\n"))
-                    .isInstanceOf(SQLException.class);
-        }
-    }
-
-    @Test
-    void typedColumnsStoreCurrentDlrState() throws SQLException {
-        try (Connection connection = connection()) {
-            insertCompleteTrackedMessage(connection);
-            insertCompleteUnpushedDlr(connection);
-
+            insertMessage(connection, gatewayId);
             try (PreparedStatement statement = connection.prepareStatement("""
-                         SELECT gateway_message_id, provider_message_id, reassembled_parts, created_at, updated_at
-                         FROM sendium_dlr.tracked_message
-                         WHERE gateway_message_id = ?
-                         """)) {
-                statement.setObject(1, COMPLETE_GATEWAY_ID);
+                    SELECT delivery_channel, delivery_status, delivery_attempt_count
+                    FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?
+                    """)) {
+                statement.setObject(1, gatewayId);
                 try (ResultSet resultSet = statement.executeQuery()) {
                     assertThat(resultSet.next()).isTrue();
-                    assertThat(resultSet.getObject("gateway_message_id", UUID.class))
-                            .isEqualTo(COMPLETE_GATEWAY_ID);
-                    assertThat(resultSet.getString("provider_message_id")).isNull();
-                    assertThat((String[]) resultSet.getArray("reassembled_parts").getArray())
-                            .containsExactly("part-1", "part-2");
-                    assertThat(resultSet.getObject("created_at")).isNotNull();
-                    assertThat(resultSet.getObject("updated_at")).isNotNull();
+                    assertThat(resultSet.getString("delivery_channel")).isEqualTo("NONE");
+                    assertThat(resultSet.getString("delivery_status")).isEqualTo("WAITING_PROVIDER");
+                    assertThat(resultSet.getInt("delivery_attempt_count")).isZero();
                 }
             }
+        }
+    }
 
-            try (Statement statement = connection.createStatement();
-                 ResultSet resultSet = statement.executeQuery("""
-                         SELECT account_id, message_id, dlr_state, error_code, acked, priority, reassembled_parts
-                         FROM sendium_dlr.unpushed_dlr
-                         WHERE dlr_key = 'dlr-complete'
-                         """)) {
-                assertThat(resultSet.next()).isTrue();
-                assertThat(resultSet.getString("account_id")).isEqualTo("account");
-                assertThat(resultSet.getInt("message_id")).isEqualTo(123);
-                assertThat(resultSet.getInt("dlr_state")).isEqualTo(1);
-                assertThat(resultSet.getString("error_code")).isEqualTo("0");
-                assertThat(resultSet.getBoolean("acked")).isTrue();
-                assertThat(resultSet.getInt("priority")).isEqualTo(2);
-                assertThat((String[]) resultSet.getArray("reassembled_parts").getArray())
-                        .containsExactly("part-1", "part-2");
+    private static void assertInvalidMessage(Connection connection, String providerStatus, String channel,
+                                             String deliveryStatus, int attempts, String systemId,
+                                             String callbackUrl) {
+        assertThatThrownBy(() -> {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    INSERT INTO sendium_dlr.dlr_message
+                        (gateway_message_id, provider_status, delivery_channel, delivery_status,
+                         delivery_attempt_count, system_id, forward_dlr_url)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                statement.setObject(1, UUID.randomUUID());
+                statement.setString(2, providerStatus);
+                statement.setString(3, channel);
+                statement.setString(4, deliveryStatus);
+                statement.setInt(5, attempts);
+                statement.setString(6, systemId);
+                statement.setString(7, callbackUrl);
+                statement.executeUpdate();
             }
+        }).isInstanceOf(SQLException.class);
+    }
+
+    private static void insertMessage(Connection connection, UUID gatewayId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO sendium_dlr.dlr_message (gateway_message_id, provider_status)
+                VALUES (?, 'ACCEPTED')
+                """)) {
+            statement.setObject(1, gatewayId);
+            statement.executeUpdate();
         }
     }
 
@@ -207,123 +200,27 @@ class PostgresqlMigrationIT {
         return names;
     }
 
-    private static void insertTrackedMessage(Connection connection, UUID gatewayMessageId) throws SQLException {
+    private static Set<String> loadColumnNames(Connection connection, String tableName) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.tracked_message
-                    (gateway_message_id, account_id, system_id, status)
-                VALUES (?, 'account', 'system', 'ACCEPTED')
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'sendium_dlr' AND table_name = ?
                 """)) {
-            statement.setObject(1, gatewayMessageId);
-            statement.executeUpdate();
-        }
-    }
-
-    private static void insertTrackedMessageWithProvider(Connection connection, UUID gatewayMessageId,
-                                                          String providerName,
-                                                          String providerMessageId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.tracked_message
-                    (gateway_message_id, provider_name, provider_message_id, status)
-                VALUES (?, ?, ?, 'ACCEPTED')
-                """)) {
-            statement.setObject(1, gatewayMessageId);
-            statement.setString(2, providerName);
-            statement.setString(3, providerMessageId);
-            statement.executeUpdate();
-        }
-    }
-
-    private static void insertCorrelation(Connection connection, String providerName, String providerMessageId,
-                                           UUID gatewayMessageId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.provider_correlation
-                    (provider_name, provider_message_id, gateway_message_id)
-                VALUES (?, ?, ?)
-                """)) {
-            statement.setString(1, providerName);
-            statement.setString(2, providerMessageId);
-            statement.setObject(3, gatewayMessageId);
-            statement.executeUpdate();
-        }
-    }
-
-    private static void insertMinimalUnpushedDlr(Connection connection, String key,
-                                                 String systemId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.unpushed_dlr
-                    (dlr_key, system_id, message_id, dlr_state, acked, priority)
-                VALUES (?, ?, 1, 1, FALSE, 0)
-                """)) {
-            statement.setString(1, key);
-            statement.setString(2, systemId);
-            statement.executeUpdate();
-        }
-    }
-
-    private static void insertCompleteTrackedMessage(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.tracked_message
-                    (gateway_message_id, account_id, system_id, source_address, destination_address,
-                     forward_dlr_url, reassembled_parts, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """)) {
-            statement.setObject(1, COMPLETE_GATEWAY_ID);
-            statement.setString(2, "account");
-            statement.setString(3, "system");
-            statement.setString(4, "source");
-            statement.setString(5, "destination");
-            statement.setString(6, "https://example.test/dlr");
-            statement.setArray(7, connection.createArrayOf("text", new String[]{"part-1", "part-2"}));
-            statement.setString(8, "ACCEPTED");
-            statement.executeUpdate();
-        }
-    }
-
-    private static void insertCompleteUnpushedDlr(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.unpushed_dlr
-                    (dlr_key, system_id, account_id, source_address, destination_address, serial,
-                     message_id, dlr_state, error_code, acked, priority, reassembled_parts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """)) {
-            statement.setString(1, "dlr-complete");
-            statement.setString(2, "system");
-            statement.setString(3, "account");
-            statement.setString(4, "source");
-            statement.setString(5, "destination");
-            statement.setString(6, "serial");
-            statement.setInt(7, 123);
-            statement.setInt(8, 1);
-            statement.setString(9, "0");
-            statement.setBoolean(10, true);
-            statement.setInt(11, 2);
-            statement.setArray(12, connection.createArrayOf("text", new String[]{"part-1", "part-2"}));
-            statement.executeUpdate();
-        }
-    }
-
-    private static int countCorrelations(Connection connection, UUID gatewayMessageId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT COUNT(*)
-                FROM sendium_dlr.provider_correlation
-                WHERE gateway_message_id = ?
-                """)) {
-            statement.setObject(1, gatewayMessageId);
+            statement.setString(1, tableName);
+            Set<String> names = new HashSet<>();
             try (ResultSet resultSet = statement.executeQuery()) {
-                resultSet.next();
-                return resultSet.getInt(1);
+                while (resultSet.next()) {
+                    names.add(resultSet.getString(1));
+                }
             }
+            return names;
         }
     }
 
     private static String loadColumnType(Connection connection, String tableName,
                                          String columnName) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT data_type
-                FROM information_schema.columns
-                WHERE table_schema = 'sendium_dlr'
-                    AND table_name = ?
-                    AND column_name = ?
+                SELECT data_type FROM information_schema.columns
+                WHERE table_schema = 'sendium_dlr' AND table_name = ? AND column_name = ?
                 """)) {
             statement.setString(1, tableName);
             statement.setString(2, columnName);
@@ -331,6 +228,26 @@ class PostgresqlMigrationIT {
                 assertThat(resultSet.next()).isTrue();
                 return resultSet.getString(1);
             }
+        }
+    }
+
+    private static String loadIndexDefinition(Connection connection, String indexName) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT indexdef FROM pg_indexes WHERE schemaname = 'sendium_dlr' AND indexname = ?
+                """)) {
+            statement.setString(1, indexName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                assertThat(resultSet.next()).isTrue();
+                return resultSet.getString(1);
+            }
+        }
+    }
+
+    private static int loadCount(Connection connection, String table) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+            resultSet.next();
+            return resultSet.getInt(1);
         }
     }
 }

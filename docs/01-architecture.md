@@ -168,7 +168,7 @@ sequenceDiagram
     participant App as Originating application
 
     Ingress->>Service: saveInitialState(gateway message ID)
-    Service->>Database: Insert tracked message
+    Service->>Database: Insert DLR message
     Database-->>Service: Commit
     Service-->>Ingress: State persisted
     Ingress->>Router: Enqueue accepted message
@@ -180,17 +180,21 @@ sequenceDiagram
     Service->>Database: Lock and upsert provider correlation
 
     SMSC->>Worker: deliver_sm delivery receipt
-    Worker->>Tracker: createAndEnqueueDLR
-    Tracker->>Service: resolveAndRemoveDlr(provider pair)
-    Service->>Database: Lock, resolve, and delete tracked state
-    Database-->>Service: Resolved message state
-    opt DLR callback URL exists
-        Service->>DLRHook: Forward DLR callback
-        DLRHook->>App: HTTP GET callback
+    alt ACCEPTD or ENROUTE receipt
+        Worker-->>SMSC: deliver_sm_resp (success)
+    else Terminal receipt
+        Worker->>Tracker: createAndEnqueueDLR
+        Tracker->>Service: resolveDlr(provider pair, exact state/error)
+        Service->>Database: Lock, resolve, consume correlations, retain pending delivery
+        Database-->>Service: Resolved message state
+        opt DLR callback URL exists
+            Service->>DLRHook: Forward DLR callback
+            DLRHook->>App: HTTP GET callback
+        end
+        Service-->>Tracker: Resolved message state
+        Tracker->>Router: Enqueue internal MSG_DLR
+        Worker-->>SMSC: deliver_sm_resp
     end
-    Service-->>Tracker: Resolved message state
-    Tracker->>Router: Enqueue internal MSG_DLR
-    Worker-->>SMSC: deliver_sm_resp
 ```
 
 ## MO Handling
@@ -238,9 +242,9 @@ Sendium expects runtime files in the configured `conf` directory.
 
 ## Persistence Boundaries
 
-Most runtime queues are in memory. DLR tracking, provider correlations, and unpushed downstream SMPP receipts use PostgreSQL. Sendium completes the required storage operation before HTTP routing or successful downstream SMPP acknowledgement. Queued and in-flight messages remain process-local.
+Most runtime queues are in memory. DLR messages, provider correlations, and terminal HTTP/SMPP delivery state use PostgreSQL. Sendium completes the required storage operation before HTTP routing or successful downstream SMPP acknowledgement. Queued and in-flight messages remain process-local.
 
-PostgreSQL does not make multipart assembly, replay claims, callback retries, or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, and the remaining crash windows.
+PostgreSQL does not make multipart assembly or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, and the remaining crash windows.
 
 ## Related Documentation
 

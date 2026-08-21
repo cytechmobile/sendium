@@ -4,7 +4,6 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.MessageState;
-import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SensitiveLogSanitizer;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -12,6 +11,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
@@ -71,6 +71,9 @@ public class StandardSmppServerMessageStore implements SmppServerMessageStore<St
             StandardMessage msg = event.pMsg;
             if (msg != null) {
                 MessageState state = new MessageState(msg.serial, msg.owner_id, msg.systemId, msg.from, msg.to, null);
+                state.setDeliveryChannel(msg.acked && worker.isForwardDlrs() ?
+                        MessageState.DeliveryChannel.SMPP
+                        : MessageState.DeliveryChannel.NONE);
                 state.setReassembledParts(msg.reassembledParts);
                 states.add(state);
             }
@@ -103,24 +106,33 @@ public class StandardSmppServerMessageStore implements SmppServerMessageStore<St
 
     @Override
     public boolean markAsUnpushed(StandardMessage msg) {
-        if (msg == null || msg.type != StandardMessage.MSG_DLR) {
-            return false;
-        }
-        if (!isDlrPersistenceEnabled()) {
-            //let the worker retry in memory, as documented on SmppServerMessageStore#markAsUnpushed
-            return false;
-        }
+        return msg != null && msg.type == StandardMessage.MSG_DLR && isDlrPersistenceEnabled();
+    }
 
-        try {
-            boolean saved = getDlrService().saveUnpushedDlr(msg);
-            if (!saved) {
-                logger.warn("Failed to save unpushed DLR {}", MessageTrace.identifiers(msg));
-            }
-            return saved;
-        } catch (Exception e) {
-            logger.warn("Exception while saving unpushed DLR {}", MessageTrace.identifiers(msg), e);
-            return false;
+    @Override
+    public boolean tracksDlrDeliveryAttempts() {
+        return isDlrPersistenceEnabled();
+    }
+
+    @Override
+    public OptionalInt startDlrDeliveryAttempt(StandardMessage msg) {
+        if (!isDlrPersistenceEnabled()) {
+            return SmppServerMessageStore.super.startDlrDeliveryAttempt(msg);
         }
+        return getDlrService().startDeliveryAttempt(msg.serial, MessageState.DeliveryChannel.SMPP)
+                .map(state -> OptionalInt.of(state.getDeliveryAttemptCount()))
+                .orElseGet(OptionalInt::empty);
+    }
+
+    @Override
+    public boolean completeDlrDeliveryAttempt(StandardMessage msg, int attempt) {
+        return !isDlrPersistenceEnabled() || getDlrService().completeDelivery(msg.serial, attempt);
+    }
+
+    @Override
+    public boolean releaseDlrDeliveryAttempt(StandardMessage msg, int attempt, String result) {
+        return !isDlrPersistenceEnabled() ||
+                getDlrService().retryDelivery(msg.serial, attempt, result, System.currentTimeMillis());
     }
 
     @Override
@@ -128,27 +140,35 @@ public class StandardSmppServerMessageStore implements SmppServerMessageStore<St
         if (!isDlrPersistenceEnabled()) {
             return;
         }
-
-        DlrService dlrService = getDlrService();
-        List<StandardMessage> unpushedDlrs = dlrService.claimUnpushedDlrs(systemId);
-        if (unpushedDlrs.isEmpty()) {
-            logger.info("Unpushed DLR(s) not found for systemId:{}", systemId);
-            return;
-        }
-
-        logger.info("Re-enqueuing {} unpushed DLR(s) for systemId:{}", unpushedDlrs.size(), systemId);
-        for (StandardMessage msg : unpushedDlrs) {
+        List<MessageState> pending = getDlrService().listPendingSmppDeliveries(systemId);
+        for (MessageState state : pending) {
+            StandardMessage dlr = toDlrMessage(state);
             try {
-                if (worker.enqueueNoExceptions(msg)) {
-                    dlrService.removeUnpushedDlr(msg);
-                } else {
-                    dlrService.releaseUnpushedDlrClaim(msg);
-                }
-            } catch (Exception e) {
-                dlrService.releaseUnpushedDlrClaim(msg);
-                logger.warn("Failed to re-enqueue unpushed DLR {}", MessageTrace.identifiers(msg), e);
+                worker.enqueue(dlr);
+                logger.info("SMPP DLR replay enqueued gatewayMsgId={}", state.getGatewayMsgId());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("SMPP DLR replay enqueue interrupted gatewayMsgId={}", state.getGatewayMsgId());
+                return;
+            } catch (RuntimeException e) {
+                logger.warn("SMPP DLR replay enqueue failed gatewayMsgId={}", state.getGatewayMsgId(), e);
             }
         }
+    }
+
+    private StandardMessage toDlrMessage(MessageState state) {
+        StandardMessage dlr = new StandardMessage();
+        dlr.serial = state.getGatewayMsgId();
+        dlr.from = state.getDestAddr();
+        dlr.to = state.getSourceAddr();
+        dlr.state = state.getDlrState();
+        dlr.errcode = state.getErrorCode();
+        dlr.systemId = state.getSystemId();
+        dlr.owner_id = state.getAccountId();
+        List<String> reassembledParts = state.getReassembledParts();
+        dlr.reassembledParts = reassembledParts == null ? null : new ArrayList<>(reassembledParts);
+        dlr.type = StandardMessage.MSG_DLR;
+        return dlr;
     }
 
     private boolean isDlrPersistenceEnabled() {

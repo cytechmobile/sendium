@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
+import gr.cytech.sendium.core.message.StandardMessage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -9,8 +10,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -18,56 +19,54 @@ class DlrServiceTest {
     @Mock
     DlrStorage storage;
 
-    @Mock
-    ForwardDlrService forwardDlrService;
-
     @InjectMocks
     DlrService service;
 
     @Test
-    void resolveAndRemoveDlrMapsDeliveredStateAndForwardsCallback() {
+    void resolveDlrPassesExactDeliveredOutcome() {
         MessageState state = stateWithCallback();
-        when(storage.resolveAndRemoveDlr("provider-1", "provider-message-1", MessageState.MessageStatus.DELIVERED))
-                .thenReturn(Optional.of(state));
+        when(storage.resolveDlr("provider-1", "provider-message-1", MessageState.MessageStatus.DELIVERED,
+                StandardMessage.DLR_STAT_DELIVRD, "007")).thenReturn(Optional.of(state));
 
-        Optional<MessageState> result = service.resolveAndRemoveDlr("provider-1", "provider-message-1", 1);
+        Optional<MessageState> result = service.resolveDlr(
+                "provider-1", "provider-message-1", StandardMessage.DLR_STAT_DELIVRD, "007");
 
         assertThat(result).containsSame(state);
-        verify(forwardDlrService).forwardDlr(state);
+        verify(storage).resolveDlr("provider-1", "provider-message-1", MessageState.MessageStatus.DELIVERED,
+                StandardMessage.DLR_STAT_DELIVRD, "007");
     }
 
     @Test
-    void resolveAndRemoveDlrMapsAcceptedState() {
+    void resolveDlrPreservesFinalOnlyGuard() {
+        assertThat(service.resolveDlr(
+                "provider-1", "accepted", StandardMessage.DLR_STAT_ACCEPTD, "000")).isEmpty();
+        assertThat(service.resolveDlr(
+                "provider-1", "buffered", StandardMessage.DLR_STAT_BUFFRED, "000")).isEmpty();
+
+        verifyNoInteractions(storage);
+    }
+
+    @Test
+    void resolveDlrMapsTerminalFailureAndPassesExactError() {
         MessageState state = stateWithoutCallback();
-        when(storage.resolveAndRemoveDlr("provider-1", "provider-message-1", MessageState.MessageStatus.ACCEPTED))
-                .thenReturn(Optional.of(state));
+        when(storage.resolveDlr("provider-1", "provider-message-1", MessageState.MessageStatus.FAILED,
+                StandardMessage.DLR_STAT_REJECTD, "  exact  ")).thenReturn(Optional.of(state));
 
-        Optional<MessageState> result = service.resolveAndRemoveDlr("provider-1", "provider-message-1", 9);
-
-        assertThat(result).containsSame(state);
-        verify(forwardDlrService, never()).forwardDlr(state);
-    }
-
-    @Test
-    void resolveAndRemoveDlrMapsUnknownStateToFailed() {
-        MessageState state = stateWithoutCallback();
-        when(storage.resolveAndRemoveDlr("provider-1", "provider-message-1", MessageState.MessageStatus.FAILED))
-                .thenReturn(Optional.of(state));
-
-        Optional<MessageState> result = service.resolveAndRemoveDlr("provider-1", "provider-message-1", 0);
+        Optional<MessageState> result = service.resolveDlr(
+                "provider-1", "provider-message-1", StandardMessage.DLR_STAT_REJECTD, "  exact  ");
 
         assertThat(result).containsSame(state);
     }
 
     @Test
-    void resolveAndRemoveDlrDoesNotForwardMissingState() {
-        when(storage.resolveAndRemoveDlr("provider-1", "unknown", MessageState.MessageStatus.DELIVERED))
-                .thenReturn(Optional.empty());
+    void resolveDlrReturnsMissingState() {
+        when(storage.resolveDlr("provider-1", "unknown", MessageState.MessageStatus.DELIVERED,
+                StandardMessage.DLR_STAT_SEEN, null)).thenReturn(Optional.empty());
 
-        Optional<MessageState> result = service.resolveAndRemoveDlr("provider-1", "unknown", 15);
+        Optional<MessageState> result = service.resolveDlr(
+                "provider-1", "unknown", StandardMessage.DLR_STAT_SEEN, null);
 
         assertThat(result).isEmpty();
-        verify(forwardDlrService, never()).forwardDlr(org.mockito.ArgumentMatchers.any());
     }
 
     private MessageState stateWithCallback() {

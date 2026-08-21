@@ -47,8 +47,10 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -637,6 +639,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
         boolean hasSystemId = !Strings.isNullOrEmpty(pMsg.systemId);
         if ((hasSystemId && !bindHandler.isSystemIdReachable(pMsg.owner_id, pMsg.systemId)) || !bindHandler.isConnectionReachable(pMsg.owner_id)) {
+            if (isDlr && messageStore.tracksDlrDeliveryAttempts()) {
+                return null;
+            }
             if (markAsUnpushed(pMsg)) {
                 return null;
             }
@@ -646,6 +651,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         var handler = bindHandler.getHandlerForSending(pMsg.owner_id, pMsg.systemId);
         var session = handler != null ? handler.getSession() : null;
         if (session == null || !session.isBound()) {
+            if (isDlr && messageStore.tracksDlrDeliveryAttempts()) {
+                return null;
+            }
             if (markAsUnpushed(pMsg)) {
                 return null;
             }
@@ -664,6 +672,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             return isDlr ? null : pMsg;
         }
 
+        if (isDlr && messageStore.tracksDlrDeliveryAttempts()) {
+            enqueueDlrBatch(handler, pMsg, requests);
+            return null;
+        }
+
         for (DeliverSm deliverSm : requests) {
             Object deliverMsgId = deliverSm.getReferenceObject();
             if (deliverMsgId instanceof String msgId) {
@@ -679,7 +692,50 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         return null;
     }
 
-    protected List<DeliverSm> generateDeliverSmForDLR(M pMsg) {
+    private void enqueueDlrBatch(SmppServerSessionHandler<M> handler, M message, List<DeliverSm> requests) {
+        OptionalInt started;
+        try {
+            started = messageStore.startDlrDeliveryAttempt(message);
+        } catch (RuntimeException e) {
+            logger.error("Failed to start SMPP DLR attempt gatewayMsgId={}", message.serial, e);
+            return;
+        }
+        if (started.isEmpty()) {
+            logger.debug("SMPP DLR attempt already active gatewayMsgId={}", message.serial);
+            return;
+        }
+
+        Set<Integer> expectedParts = new HashSet<>();
+        for (int i = 0; i < requests.size(); i++) {
+            expectedParts.add(i);
+        }
+        DlrDeliveryBatch<M> batch = new DlrDeliveryBatch<>(
+                message, started.getAsInt(), expectedParts, messageStore, handler);
+        for (int i = 0; i < requests.size(); i++) {
+            DeliverSm deliverSm = requests.get(i);
+            String receiptMessageId = (String) deliverSm.getReferenceObject();
+            deliverSm.setReferenceObject(new DlrDeliverSmReference<>(handler, batch, i, receiptMessageId));
+        }
+        if (!handler.registerDlrBatch(batch)) {
+            return;
+        }
+
+        for (DeliverSm deliverSm : requests) {
+            try {
+                enqueueOut(deliverSm);
+                if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_ENQUEUED)) {
+                    logger.info("message.deliver.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(message));
+                }
+            } catch (RuntimeException e) {
+                logger.warn("Failed to enqueue SMPP DLR gatewayMsgId={} attempt={}",
+                        message.serial, started.getAsInt(), e);
+                batch.fail("enqueue_failed");
+                return;
+            }
+        }
+    }
+
+    protected List<DeliverSm> generateDeliverSmForDLR(M pMsg) throws SmppInvalidArgumentException {
         Address sender = new Address(SmppConstants.TON_UNKNOWN, SmppConstants.NPI_UNKNOWN, pMsg.from);
         Address receiver = new Address(SmppConstants.TON_UNKNOWN, SmppConstants.NPI_UNKNOWN, pMsg.to);
 
@@ -709,7 +765,8 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     protected DeliverSm getDeliverSm(M pMsg, String messageId, int errorCode, Address sender, Address receiver,
-                                   byte coding, byte requestDelivery, String charset) {
+                                     byte coding, byte requestDelivery, String charset)
+            throws SmppInvalidArgumentException {
         var submitDate = ZonedDateTime.now(ZoneOffset.UTC); // Ideally fetch from pMsg if populated
         var doneDate = ZonedDateTime.now(ZoneOffset.UTC);
 
@@ -724,13 +781,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         deliverSm.setPriority((byte) (pMsg.priority >= StandardMessage.LOW_PRIORITY && pMsg.priority <= StandardMessage.HIGH_PRIORITY ?
                 pMsg.priority : StandardMessage.NORMAL_PRIORITY));
 
-        try {
-            deliverSm.setShortMessage(CharsetUtil.encode(deliveryReceipt.toShortMessage(), charset));
-        } catch (SmppInvalidArgumentException e) {
-            logger.warn("Caught SmppInvalidArgumentException", e);
-            markAsUnpushed(pMsg);
-            return null;
-        }
+        deliverSm.setShortMessage(CharsetUtil.encode(deliveryReceipt.toShortMessage(), charset));
 
         deliverSm.setEsmClass(SmppConstants.ESM_CLASS_MT_SMSC_DELIVERY_RECEIPT);
         deliverSm.setReferenceObject(messageId);

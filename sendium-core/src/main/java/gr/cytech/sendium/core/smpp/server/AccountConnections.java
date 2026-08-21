@@ -38,6 +38,7 @@ public class AccountConnections extends SmppConnectionManager<SmppServerSessionH
                     "[SystemID:" + handler.getSession().getConfiguration().getSystemId() + "]",
                     currentInactiveTime);
             if (handler.getSession() != null && SmppSession.Type.SERVER.equals(handler.getSession().getLocalType())) {
+                handler.failActiveDlrBatches();
                 handler.getSession().destroy();
                 serverConnections.removeConnection(handler);
             }

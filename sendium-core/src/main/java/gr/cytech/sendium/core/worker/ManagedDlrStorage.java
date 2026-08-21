@@ -1,6 +1,5 @@
 package gr.cytech.sendium.core.worker;
 
-import gr.cytech.sendium.core.message.StandardMessage;
 import io.agroal.api.AgroalDataSource;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -31,7 +30,7 @@ public class ManagedDlrStorage implements DlrStorage {
     private static final String BACKEND = "postgresql";
     private static final String POSTGRESQL_PROBE_SQL = """
             SELECT 1
-            FROM sendium_dlr.tracked_message
+            FROM sendium_dlr.dlr_message
             WHERE FALSE
             """;
 
@@ -103,9 +102,10 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     @Override
-    public Optional<MessageState> resolveAndRemoveDlr(String providerName, String providerMessageId,
-                                                      MessageState.MessageStatus status) {
-        return timed("resolve", () -> delegate.resolveAndRemoveDlr(providerName, providerMessageId, status));
+    public Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
+                                             MessageState.MessageStatus status, int dlrState, String errorCode) {
+        return timed("resolve", () -> delegate.resolveDlr(
+                providerName, providerMessageId, status, dlrState, errorCode));
     }
 
     @Override
@@ -114,33 +114,40 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     @Override
-    public boolean markAsFailed(String gatewayMsgId) {
-        return timed("mark_failed", () -> delegate.markAsFailed(gatewayMsgId));
+    public List<MessageState> listPendingSmppDeliveries(String systemId) {
+        return timed("list_pending_smpp", () -> delegate.listPendingSmppDeliveries(systemId));
     }
 
     @Override
-    public boolean saveUnpushedDlr(StandardMessage message) {
-        return timed("save_unpushed", () -> delegate.saveUnpushedDlr(message));
+    public List<MessageState> listDueHttpDeliveries(int limit) {
+        return timed("list_due_http", () -> delegate.listDueHttpDeliveries(limit));
     }
 
     @Override
-    public List<StandardMessage> getUnpushedDlrs(String systemId) {
-        return timed("get_unpushed", () -> delegate.getUnpushedDlrs(systemId));
+    public Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
+                                                       MessageState.DeliveryChannel expectedChannel) {
+        return timed("start_delivery", () -> delegate.startDeliveryAttempt(gatewayMsgId, expectedChannel));
     }
 
     @Override
-    public List<StandardMessage> claimUnpushedDlrs(String systemId) {
-        return timed("claim_unpushed", () -> delegate.claimUnpushedDlrs(systemId));
+    public boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
+        return timed("complete_delivery", () -> delegate.completeDelivery(gatewayMsgId, expectedAttempt));
     }
 
     @Override
-    public boolean removeUnpushedDlr(StandardMessage message) {
-        return timed("remove_unpushed", () -> delegate.removeUnpushedDlr(message));
+    public boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
+        return timed("retry_delivery", () -> delegate.retryDelivery(
+                gatewayMsgId, expectedAttempt, result, nextAttemptAt));
     }
 
     @Override
-    public void releaseUnpushedDlrClaim(StandardMessage message) {
-        timed("release_claim", () -> delegate.releaseUnpushedDlrClaim(message));
+    public boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        return timed("fail_delivery", () -> delegate.failDelivery(gatewayMsgId, expectedAttempt, result));
+    }
+
+    @Override
+    public boolean failInvalidDelivery(String gatewayMsgId, String result) {
+        return timed("fail_invalid_delivery", () -> delegate.failInvalidDelivery(gatewayMsgId, result));
     }
 
     private <T> T timed(String operation, Supplier<T> action) {

@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.smpp.server;
 
 import com.cloudhopper.commons.charset.CharsetUtil;
 import com.cloudhopper.smpp.SmppConstants;
+import com.cloudhopper.smpp.SmppSession;
 import com.cloudhopper.smpp.pdu.DeliverSm;
 import com.cloudhopper.smpp.pdu.Pdu;
 import com.cloudhopper.smpp.pdu.SubmitSm;
@@ -17,14 +18,14 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 class SmppServerWorkerReassemblyTest {
 
@@ -113,6 +114,115 @@ class SmppServerWorkerReassemblyTest {
         assertThat(bodies).anySatisfy(body -> assertThat(body).contains("id:part-1"));
         assertThat(bodies).anySatisfy(body -> assertThat(body).contains("id:part-2"));
         assertThat(bodies).anySatisfy(body -> assertThat(body).contains("id:part-3"));
+    }
+
+    @Test
+    void multipartDlrStartsOneAttemptAndUsesTypedPartReferences() throws Exception {
+        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
+        SmppServerSessionHandler<StandardMessage> handler = reachableHandler(worker);
+        worker.setMessageStore(store);
+        when(store.tracksDlrDeliveryAttempts()).thenReturn(true);
+        when(store.startDlrDeliveryAttempt(any())).thenReturn(OptionalInt.of(9));
+        StandardMessage dlr = dlrMessage();
+        dlr.reassembledParts = new ArrayList<>(List.of("part-1", "part-2", "part-3"));
+
+        assertThat(worker.doMessage(0, dlr)).isNull();
+
+        verify(store, times(1)).startDlrDeliveryAttempt(dlr);
+        assertThat(worker.outgoingPdus).hasSize(3).allSatisfy(pdu -> {
+            assertThat(pdu.getReferenceObject()).isInstanceOf(DlrDeliverSmReference.class);
+            DlrDeliverSmReference<?> reference = (DlrDeliverSmReference<?>) pdu.getReferenceObject();
+            assertThat(reference.handler()).isSameAs(handler);
+            assertThat(reference.batch().getAttempt()).isEqualTo(9);
+        });
+        assertThat(worker.outgoingPdus.stream()
+                .map(pdu -> ((DlrDeliverSmReference<?>) pdu.getReferenceObject()).receiptMessageId()))
+                .containsExactly("part-1", "part-2", "part-3");
+    }
+
+    @Test
+    void dlrWithoutReachableSessionLeavesPendingWithoutStartingAttempt() throws Exception {
+        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
+        SmppServerBindHandler<StandardMessage> bindHandler = mock(SmppServerBindHandler.class);
+        worker.setMessageStore(store);
+        worker.setBindHandler(bindHandler);
+        when(store.tracksDlrDeliveryAttempts()).thenReturn(true);
+
+        assertThat(worker.doMessage(0, dlrMessage())).isNull();
+
+        verify(store, never()).startDlrDeliveryAttempt(any());
+        verify(store, never()).markAsUnpushed(any());
+        assertThat(worker.outgoingPdus).isEmpty();
+    }
+
+    @Test
+    void duplicateDlrAttemptDoesNotSend() throws Exception {
+        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
+        reachableHandler(worker);
+        worker.setMessageStore(store);
+        when(store.tracksDlrDeliveryAttempts()).thenReturn(true);
+        when(store.startDlrDeliveryAttempt(any())).thenReturn(OptionalInt.empty());
+
+        assertThat(worker.doMessage(0, dlrMessage())).isNull();
+
+        assertThat(worker.outgoingPdus).isEmpty();
+        verify(store, never()).releaseDlrDeliveryAttempt(any(), anyInt(), anyString());
+    }
+
+    @Test
+    void enqueueFailureReleasesStartedAttempt() throws Exception {
+        TestSmppServerWorker worker = new TestSmppServerWorker(
+                new TestConfigurationProvider(), new Queue<>(), true);
+        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
+        reachableHandler(worker);
+        worker.setMessageStore(store);
+        when(store.tracksDlrDeliveryAttempts()).thenReturn(true);
+        when(store.startDlrDeliveryAttempt(any())).thenReturn(OptionalInt.of(10));
+        when(store.releaseDlrDeliveryAttempt(any(), eq(10), eq("enqueue_failed"))).thenReturn(true);
+        StandardMessage dlr = dlrMessage();
+        dlr.reassembledParts = new ArrayList<>(List.of("part-1", "part-2"));
+
+        assertThat(worker.doMessage(0, dlr)).isNull();
+
+        verify(store).releaseDlrDeliveryAttempt(dlr, 10, "enqueue_failed");
+        assertThat(worker.outgoingPdus).hasSize(1);
+        assertThat(((DlrDeliverSmReference<?>) worker.outgoingPdus.getFirst().getReferenceObject())
+                .batch().isActive()).isFalse();
+    }
+
+    @Test
+    void generationFailureDoesNotStartOrMutateDurableAttempt() throws Exception {
+        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
+        reachableHandler(worker);
+        worker.setMessageStore(store);
+        when(store.tracksDlrDeliveryAttempts()).thenReturn(true);
+        StandardMessage dlr = dlrMessage();
+        dlr.errcode = "not-a-number";
+
+        assertThat(worker.doMessage(0, dlr)).isNull();
+
+        verify(store, never()).startDlrDeliveryAttempt(any());
+        verify(store, never()).releaseDlrDeliveryAttempt(any(), anyInt(), anyString());
+        assertThat(worker.outgoingPdus).isEmpty();
+    }
+
+    @Test
+    void dlrWithoutDurableTrackingKeepsExistingInMemoryRetryBehavior() throws Exception {
+        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
+        SmppServerBindHandler<StandardMessage> bindHandler = mock(SmppServerBindHandler.class);
+        worker.setMessageStore(store);
+        worker.setBindHandler(bindHandler);
+        StandardMessage dlr = dlrMessage();
+
+        assertThat(worker.doMessage(0, dlr)).isSameAs(dlr);
+
+        verify(store).markAsUnpushed(dlr);
+        verify(store, never()).startDlrDeliveryAttempt(any());
     }
 
     @Test
@@ -260,12 +370,50 @@ class SmppServerWorkerReassemblyTest {
         return message;
     }
 
+    private static StandardMessage dlrMessage() {
+        StandardMessage dlr = new StandardMessage();
+        dlr.serial = "gateway-1";
+        dlr.owner_id = "account-a";
+        dlr.systemId = "system-a";
+        dlr.from = "306900000001";
+        dlr.to = "sender";
+        dlr.type = StandardMessage.MSG_DLR;
+        dlr.state = StandardMessage.DLR_STAT_DELIVRD;
+        dlr.errcode = "0";
+        return dlr;
+    }
+
+    private SmppServerSessionHandler<StandardMessage> reachableHandler(TestSmppServerWorker worker) {
+        SmppServerBindHandler<StandardMessage> bindHandler = mock(SmppServerBindHandler.class);
+        SmppServerSessionHandler<StandardMessage> handler = mock(SmppServerSessionHandler.class);
+        SmppSession session = mock(SmppSession.class);
+        when(bindHandler.isConnectionReachable("account-a")).thenReturn(true);
+        when(bindHandler.isSystemIdReachable("account-a", "system-a")).thenReturn(true);
+        when(bindHandler.getHandlerForSending("account-a", "system-a")).thenReturn(handler);
+        when(handler.getSession()).thenReturn(session);
+        when(session.isBound()).thenReturn(true);
+        when(handler.registerDlrBatch(any())).thenReturn(true);
+        worker.setBindHandler(bindHandler);
+        return handler;
+    }
+
     private static class TestSmppServerWorker extends SmppServerWorker<StandardMessage> {
         private final List<StandardMessage> workerQueueMessages = new ArrayList<>();
         private final List<Pdu> outgoingPdus = new ArrayList<>();
+        private final boolean failSecondDlrEnqueue;
 
         TestSmppServerWorker(SendiumConfigurationProvider configurationProvider, Queue<StandardMessage> routerQueue) {
+            this(configurationProvider, routerQueue, false);
+        }
+
+        TestSmppServerWorker(SendiumConfigurationProvider configurationProvider, Queue<StandardMessage> routerQueue,
+                             boolean failSecondDlrEnqueue) {
             super(configurationProvider, "smpp", routerQueue);
+            this.failSecondDlrEnqueue = failSecondDlrEnqueue;
+        }
+
+        void setBindHandler(SmppServerBindHandler<StandardMessage> bindHandler) {
+            this.bindHandler = bindHandler;
         }
 
         @Override
@@ -275,6 +423,9 @@ class SmppServerWorkerReassemblyTest {
 
         @Override
         public void enqueueOut(Pdu event) {
+            if (failSecondDlrEnqueue && outgoingPdus.size() == 1) {
+                throw new IllegalStateException("queue rejected");
+            }
             outgoingPdus.add(event);
         }
 
