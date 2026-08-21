@@ -141,7 +141,7 @@ public class SmppServerBindHandler<M extends StandardMessage> implements SmppSer
         return connections.isSystemIdReachable(accountId, systemId);
     }
 
-    public SmppServerSessionHandler getHandlerForSending(String accountId, String systemId) {
+    public SmppServerSessionHandler<M> getHandlerForSending(String accountId, String systemId) {
         return connections.getHandlerForSending(accountId, systemId);
     }
 

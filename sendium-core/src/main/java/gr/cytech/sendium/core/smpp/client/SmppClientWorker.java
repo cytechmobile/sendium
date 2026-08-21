@@ -32,6 +32,7 @@ import gr.cytech.sendium.core.smpp.SmppConnectionManager;
 import gr.cytech.sendium.core.smpp.util.CustomCharset;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import gr.cytech.sendium.core.smpp.util.VFGRCharset;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import gr.cytech.sendium.core.worker.Tracker;
@@ -989,7 +990,6 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             // the original parseShortMessage method will throw an exception if err field is more than 3 chars
             // among other validations it performs. The extended one does not throw exception for invalid fields
             var receipt = DeliveryReceipt.parseShortMessage(dlrBody, ZoneOffset.UTC, false, false);
-            String errcode = extractErrorCode(receipt.getRawErrorCode(), receipt.getErrorCode());
             int state = SmppServerUtil.decodeFinalState(receipt.getState());
             if (dlrBody.length() > 159) {
                 dlrBody = dlrBody.substring(0, 159);
@@ -999,6 +999,12 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                 logger.warn("Invalid provider message ID, skipping unknown DLR {}", MessageTrace.pdu(deliverSm));
                 return deliverSm.createGenericNack(SmppConstants.STATUS_SYSERR);
             }
+            if (!DlrService.isTerminalDlrState(state)) {
+                logger.debug("Ignoring intermediate DLR state={} providerMessageId={}", state,
+                        MessageTrace.value(providerMessageId));
+                return deliverSm.createResponse();
+            }
+            String errcode = extractErrorCode(receipt.getRawErrorCode(), receipt.getErrorCode());
             HashMap<String, String> tlvs = extractTlvs(this.tlvsDlrs, deliverSm);
             messageTracker.createAndEnqueueDLR(0, providerMessageId, getHashedMessageID(providerMessageId),
                     from, to, dlrBody, state, errcode, tlvs);

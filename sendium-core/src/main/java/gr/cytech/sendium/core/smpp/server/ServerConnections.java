@@ -38,6 +38,9 @@ public class ServerConnections {
     }
 
     public synchronized boolean removeConnection(SmppServerSessionHandler handler, SmppSession session) {
+        if (handler != null) {
+            handler.failActiveDlrBatches();
+        }
         if (session == null) {
             logger.warn("trying to remove a null session from account connections, rejecting");
             return false;

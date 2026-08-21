@@ -87,10 +87,13 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         }
 
         Optional<MessageState> optState = outWorker.getWorkerResources().getDlrService()
-                .resolveAndRemoveDlr(outWorker.getDlrProviderName(), providerMessageId, state);
+                .resolveDlr(outWorker.getDlrProviderName(), providerMessageId, state, errorCode);
 
         if (optState.isPresent()) {
             MessageState msgState = optState.get();
+            if (msgState.getDeliveryChannel() != MessageState.DeliveryChannel.SMPP) {
+                return;
+            }
 
             StandardMessage dlrMsg = new StandardMessage();
             dlrMsg.serial = msgState.getGatewayMsgId();

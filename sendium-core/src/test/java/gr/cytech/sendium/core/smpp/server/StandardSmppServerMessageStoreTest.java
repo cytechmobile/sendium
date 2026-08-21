@@ -44,6 +44,7 @@ class StandardSmppServerMessageStoreTest {
         when(workerResources.isDlrPersistenceEnabled()).thenReturn(true);
         when(workerResources.getDlrService()).thenReturn(dlrService);
         when(worker.getMaxRetries()).thenReturn(5);
+        when(worker.isForwardDlrs()).thenReturn(true);
 
         messageStore = new StandardSmppServerMessageStore(worker);
     }
@@ -58,6 +59,7 @@ class StandardSmppServerMessageStoreTest {
         msg1.systemId = "sys1";
         msg1.from = "from1";
         msg1.to = "to1";
+        msg1.acked = true;
 
         StandardMessage msg2 = new StandardMessage();
         msg2.serial = "gw-2";
@@ -65,6 +67,7 @@ class StandardSmppServerMessageStoreTest {
         msg2.systemId = "sys2";
         msg2.from = "from2";
         msg2.to = "to2";
+        msg2.acked = true;
 
         InEvent<StandardMessage> event1 = new InEvent<>(msg1, new SubmitSm(), 1,
                 new Timestamp(System.currentTimeMillis()));
@@ -82,8 +85,10 @@ class StandardSmppServerMessageStoreTest {
         order.verify(worker).handlePersistedMessages(events);
         assertEquals("account1", captor.getValue().get(0).getAccountId());
         assertEquals("sys1", captor.getValue().get(0).getSystemId());
+        assertEquals(MessageState.DeliveryChannel.SMPP, captor.getValue().get(0).getDeliveryChannel());
         assertEquals("account2", captor.getValue().get(1).getAccountId());
         assertEquals("sys2", captor.getValue().get(1).getSystemId());
+        assertEquals(MessageState.DeliveryChannel.SMPP, captor.getValue().get(1).getDeliveryChannel());
     }
 
     @Test
@@ -101,6 +106,91 @@ class StandardSmppServerMessageStoreTest {
         ArgumentCaptor<List<MessageState>> captor = ArgumentCaptor.forClass(List.class);
         verify(dlrService).saveInitialStates(captor.capture());
         assertEquals(List.of("part-1", "part-2"), captor.getValue().getFirst().getReassembledParts());
+    }
+
+    @Test
+    void persistMessages_UsesNoneChannelWhenDlrWasNotRequested() {
+        StandardMessage msg = new StandardMessage();
+        msg.serial = "gw-1";
+        msg.systemId = "sys1";
+
+        messageStore.persistMessages(List.of(new InEvent<>(
+                msg, new SubmitSm(), 1, new Timestamp(System.currentTimeMillis()))));
+
+        ArgumentCaptor<List<MessageState>> captor = ArgumentCaptor.forClass(List.class);
+        verify(dlrService).saveInitialStates(captor.capture());
+        assertEquals(MessageState.DeliveryChannel.NONE,
+                captor.getValue().getFirst().getDeliveryChannel());
+    }
+
+    @Test
+    void persistMessages_UsesNoneChannelWhenDlrForwardingIsDisabled() {
+        when(worker.isForwardDlrs()).thenReturn(false);
+        StandardMessage msg = new StandardMessage();
+        msg.serial = "gw-1";
+        msg.systemId = "sys1";
+        msg.acked = true;
+
+        messageStore.persistMessages(List.of(new InEvent<>(
+                msg, new SubmitSm(), 1, new Timestamp(System.currentTimeMillis()))));
+
+        ArgumentCaptor<List<MessageState>> captor = ArgumentCaptor.forClass(List.class);
+        verify(dlrService).saveInitialStates(captor.capture());
+        assertEquals(MessageState.DeliveryChannel.NONE,
+                captor.getValue().getFirst().getDeliveryChannel());
+    }
+
+    @Test
+    void durableDlrAttemptsFollowPersistenceBoundary() {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false, true);
+
+        assertFalse(messageStore.tracksDlrDeliveryAttempts());
+        assertTrue(messageStore.tracksDlrDeliveryAttempts());
+    }
+
+    @Test
+    void markAsUnpushedFallsBackWhenPersistenceIsDisabled() {
+        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
+        StandardMessage dlr = new StandardMessage();
+        dlr.type = StandardMessage.MSG_DLR;
+
+        assertFalse(messageStore.markAsUnpushed(dlr));
+    }
+
+    @Test
+    void onClientConnected_ReconstructsAndEnqueuesPendingDlrWithoutCompletingIt() throws Exception {
+        MessageState state = pendingState();
+        when(dlrService.listPendingSmppDeliveries("sys1")).thenReturn(List.of(state));
+
+        messageStore.onClientConnected("sys1");
+
+        ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
+        verify(worker).enqueue(captor.capture());
+        StandardMessage replay = captor.getValue();
+        assertAll(
+                () -> assertEquals(StandardMessage.MSG_DLR, replay.type),
+                () -> assertEquals("gw-1", replay.serial),
+                () -> assertEquals("destination", replay.from),
+                () -> assertEquals("source", replay.to),
+                () -> assertEquals(StandardMessage.DLR_STAT_UNDELIV, replay.state),
+                () -> assertEquals("42", replay.errcode),
+                () -> assertEquals("account1", replay.owner_id),
+                () -> assertEquals("sys1", replay.systemId),
+                () -> assertEquals(List.of("part-1", "part-2"), replay.reassembledParts));
+        verify(dlrService, never()).completeDelivery(anyString(), anyInt());
+    }
+
+    @Test
+    void onClientConnected_WhenEnqueueFailsRetainsPendingDlr() throws Exception {
+        MessageState state = pendingState();
+        when(dlrService.listPendingSmppDeliveries("sys1")).thenReturn(List.of(state));
+        doThrow(new InterruptedException("queue stopped")).when(worker).enqueue(any());
+
+        messageStore.onClientConnected("sys1");
+
+        verify(dlrService, never()).completeDelivery(anyString(), anyInt());
+        verify(dlrService, never()).retryDelivery(anyString(), anyInt(), anyString(), anyLong());
+        assertTrue(Thread.interrupted());
     }
 
     @Test
@@ -162,27 +252,6 @@ class StandardSmppServerMessageStoreTest {
     }
 
     @Test
-    void markAsUnpushed_WhenPersistenceDisabled_LeavesRetryToWorker() {
-        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
-        StandardMessage msg = new StandardMessage();
-        msg.type = StandardMessage.MSG_DLR;
-
-        assertFalse(messageStore.markAsUnpushed(msg));
-
-        verify(workerResources, never()).getDlrService();
-    }
-
-    @Test
-    void onClientConnected_WhenPersistenceDisabled_DoesNotReplay() {
-        when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
-
-        messageStore.onClientConnected("sys1");
-
-        verify(workerResources, never()).getDlrService();
-        verify(worker, never()).enqueueNoExceptions(any());
-    }
-
-    @Test
     void getMaxAttempts_DelegatesToWorker() {
         int result = messageStore.getMaxAttempts(true);
 
@@ -204,54 +273,15 @@ class StandardSmppServerMessageStoreTest {
         return new InEvent<>(message, submitSm, 1, new Timestamp(System.currentTimeMillis()));
     }
 
-    @Test
-    void markAsUnpushed_Dlr_SavesToDlrService() {
-        StandardMessage msg = new StandardMessage();
-        msg.type = StandardMessage.MSG_DLR;
-        when(dlrService.saveUnpushedDlr(msg)).thenReturn(true);
-
-        boolean result = messageStore.markAsUnpushed(msg);
-
-        assertTrue(result);
-        verify(dlrService).saveUnpushedDlr(msg);
+    private MessageState pendingState() {
+        MessageState state = new MessageState(
+                "gw-1", "account1", "sys1", "source", "destination", null);
+        state.setDlrState(StandardMessage.DLR_STAT_UNDELIV);
+        state.setErrorCode("42");
+        state.setReassembledParts(List.of("part-1", "part-2"));
+        state.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        state.setDeliveryStatus(MessageState.DeliveryStatus.PENDING);
+        return state;
     }
 
-    @Test
-    void markAsUnpushed_NonDlr_ReturnsFalse() {
-        StandardMessage msg = new StandardMessage();
-        msg.type = StandardMessage.MSG_TEXT;
-
-        boolean result = messageStore.markAsUnpushed(msg);
-
-        assertFalse(result);
-        verify(dlrService, never()).saveUnpushedDlr(any());
-    }
-
-    @Test
-    void onClientConnected_ReEnqueuesAndRemovesMatchingDlrs() {
-        StandardMessage dlr = new StandardMessage();
-        dlr.type = StandardMessage.MSG_DLR;
-        dlr.owner_id = "account1";
-        dlr.systemId = "sys1";
-        when(dlrService.claimUnpushedDlrs("sys1")).thenReturn(List.of(dlr));
-        when(worker.enqueueNoExceptions(dlr)).thenReturn(true);
-
-        messageStore.onClientConnected("sys1");
-
-        verify(worker).enqueueNoExceptions(dlr);
-        verify(dlrService).removeUnpushedDlr(dlr);
-    }
-
-    @Test
-    void onClientConnected_LeavesDlrStoredWhenReEnqueueFails() {
-        StandardMessage dlr = new StandardMessage();
-        dlr.type = StandardMessage.MSG_DLR;
-        when(dlrService.claimUnpushedDlrs("sys1")).thenReturn(List.of(dlr));
-        when(worker.enqueueNoExceptions(dlr)).thenReturn(false);
-
-        messageStore.onClientConnected("sys1");
-
-        verify(dlrService, never()).removeUnpushedDlr(any());
-        verify(dlrService).releaseUnpushedDlrClaim(dlr);
-    }
 }

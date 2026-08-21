@@ -74,6 +74,18 @@ class KannelResourceTest {
         assertThat(response.getEntity()).isEqualTo(message.serial).isEqualTo(state.getGatewayMsgId());
         assertThat(message.acked).isTrue();
         assertThat(state.getForwardDlrUrl()).isNull();
+        assertThat(state.getDeliveryChannel()).isEqualTo(MessageState.DeliveryChannel.NONE);
+    }
+
+    @Test
+    void callbackSubmissionUsesHttpDeliveryChannel() {
+        ArgumentCaptor<MessageState> stateCaptor = ArgumentCaptor.forClass(MessageState.class);
+
+        Response response = submit("https://callback.test/dlr");
+
+        assertThat(response.getStatus()).isEqualTo(Response.Status.ACCEPTED.getStatusCode());
+        verify(dlrService).saveInitialState(stateCaptor.capture());
+        assertThat(stateCaptor.getValue().getDeliveryChannel()).isEqualTo(MessageState.DeliveryChannel.HTTP);
     }
 
     @Test
