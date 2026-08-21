@@ -58,6 +58,10 @@ public final class DlrDeliveryBatch<M extends StandardMessage> {
         return message.serial;
     }
 
+    public M getMessage() {
+        return message;
+    }
+
     public void partSucceeded(int partOrdinal) {
         boolean complete = false;
         synchronized (this) {

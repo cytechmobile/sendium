@@ -18,7 +18,7 @@ For a local Docker or development run, verify the endpoint with:
 curl http://localhost:8080/q/metrics
 ```
 
-The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. Sendium-specific business metrics require explicit instrumentation in code, such as counters, timers, or gauges registered through Micrometer.
+The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. Sendium's PostgreSQL DLR subsystem also registers its selected-backend gauge and storage-operation timers.
 
 ## Prometheus Configuration
 

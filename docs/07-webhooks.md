@@ -4,7 +4,7 @@ Sendium can call external HTTP endpoints for delivery receipts and mobile-origin
 
 ## Delivery Receipt Callbacks
 
-HTTP submissions can include a `dlr-url` query parameter. Sendium stores the callback URL with the submitted message and calls it when the message state changes.
+HTTP submissions can include a `dlr-url` query parameter. Sendium stores the callback URL with the submitted message and calls it for the first terminal provider outcome. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
 
 Example HTTP submission:
 
@@ -31,10 +31,12 @@ curl -G http://localhost:8080/sendsms \
 | :--- | :--- |
 | `1` | Delivered. |
 | `2` | Failed. |
-| `4` | Buffered or accepted for processing. |
-| `8` | Submitted to SMSC. |
+| `4` | Buffered or accepted for processing; retained as a compatibility mapping and not normally emitted by final-only receipt handling. |
+| `8` | Submitted to SMSC; retained as a compatibility mapping and not normally emitted by final-only receipt handling. |
 
-DLR callbacks are sent as HTTP `GET` requests. HTTP status codes from `200` to `399` are treated as successful. Sendium makes up to 10 attempts with a 120 second delay between failed attempts. The retry schedule is process-local and does not survive a Sendium restart.
+DLR callbacks are sent as HTTP `GET` requests. The durable dispatcher checks PostgreSQL on a one-second schedule in serial batches of up to 100; a running batch delays the next check rather than overlapping it. Each request has a five-second timeout, and redirects are not followed; the original response status from `200` to `399` is treated as successful. Failures on attempts 1 through 9 are scheduled 120 seconds later. A failure on attempt 10 marks the row `FAILED`, and pending or failed rows are eligible for cleanup seven days after provider resolution. A malformed callback URI fails immediately without starting an HTTP attempt.
+
+The retry schedule and attempt count survive a Sendium restart, but delivery is at-least-once rather than exactly-once. A crash or storage failure after the receiver accepts a callback can cause another request. Callback handlers must be idempotent and should use the gateway message ID supplied through `%s` as their deduplication key.
 
 ## Mobile-Originated Message Forwarding
 
@@ -85,7 +87,7 @@ outSms.instance.testRoute.forward.mo.url = https://example.com/mo?from=%p&to=%P&
 outSms.instance.testRoute.forward.mo.format = FORM
 ```
 
-MO callbacks are sent as HTTP `POST` requests. HTTP status codes from `200` to `399` are treated as successful. Sendium makes up to 10 attempts with a 120 second delay between failed attempts. The retry schedule is process-local and does not survive a Sendium restart.
+Unlike durable DLR callbacks, MO callbacks are sent as process-local HTTP `POST` requests. HTTP status codes from `200` to `399` are treated as successful. Sendium makes up to 10 attempts with a 120 second delay between failed attempts. The MO retry schedule does not survive a Sendium restart.
 
 ## Security Notes
 
