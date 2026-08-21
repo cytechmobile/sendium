@@ -1,7 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
 import com.sun.net.httpserver.HttpServer;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,7 +18,6 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,14 +43,12 @@ class ForwardDlrServiceTest {
     @Mock
     HttpClient httpClient;
 
-    private SimpleMeterRegistry meterRegistry;
     private ForwardDlrService service;
     private HttpServer server;
 
     @BeforeEach
     void setUp() {
-        meterRegistry = new SimpleMeterRegistry();
-        service = new ForwardDlrService(dlrService, meterRegistry, httpClient);
+        service = new ForwardDlrService(dlrService, httpClient);
     }
 
     @AfterEach
@@ -60,7 +56,6 @@ class ForwardDlrServiceTest {
         if (server != null) {
             server.stop(0);
         }
-        meterRegistry.close();
     }
 
     @Test
@@ -91,7 +86,6 @@ class ForwardDlrServiceTest {
         var order = inOrder(dlrService, httpClient);
         order.verify(dlrService).startDeliveryAttempt(GATEWAY_ID, MessageState.DeliveryChannel.HTTP);
         order.verify(httpClient).send(any(HttpRequest.class), anyBodyHandler());
-        assertAttemptMetric("success", 1);
     }
 
     @Test
@@ -113,14 +107,13 @@ class ForwardDlrServiceTest {
                 + server.getAddress().getPort() + "/redirect");
         dueAttempt(due, 1);
         when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
-        service = new ForwardDlrService(dlrService, meterRegistry, ForwardDlrService.newHttpClient());
+        service = new ForwardDlrService(dlrService, ForwardDlrService.newHttpClient());
 
         service.dispatchDueDeliveries();
 
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
         assertThat(redirectTargetRequests).hasValue(0);
         assertThat(ForwardDlrService.newHttpClient().followRedirects()).isEqualTo(HttpClient.Redirect.NEVER);
-        assertAttemptMetric("success", 1);
     }
 
     @Test
@@ -144,8 +137,6 @@ class ForwardDlrServiceTest {
 
         verify(dlrService).failDelivery(GATEWAY_ID, 10, "http_failure");
         verify(dlrService, never()).retryDelivery(eq(GATEWAY_ID), eq(10), any(), anyLong());
-        assertThat(meterRegistry.get("sendium.dlr.delivery.terminal.failure")
-                .tags("channel", "http", "reason", "max_attempts").counter().count()).isEqualTo(1);
     }
 
     @Test
@@ -160,7 +151,6 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(2), eq("timeout"), anyLong());
-        assertAttemptMetric("timeout", 1);
         assertThat(deliveryResult().getValue()).doesNotContain("secret", "token", "http");
     }
 
@@ -176,7 +166,6 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(3), eq("transport_failure"), anyLong());
-        assertAttemptMetric("transport_failure", 1);
     }
 
     @Test
@@ -191,13 +180,19 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(4), eq("transport_failure"), anyLong());
-        assertAttemptMetric("transport_failure", 1);
     }
 
     @Test
-    void interruptionSchedulesRetryAndRestoresInterrupt() throws Exception {
+    void interruptionSchedulesRetryRestoresInterruptAndStopsBatch() throws Exception {
         MessageState due = dueState("https://example.test/dlr");
-        dueAttempt(due, 5);
+        String laterGatewayId = "1e5fc768-c60d-4417-95bf-d39642381a1c";
+        MessageState later = new MessageState(laterGatewayId, "account", "system", "source", "destination",
+                "https://example.test/later");
+        MessageState started = dueState(due.getForwardDlrUrl());
+        started.setDeliveryAttemptCount(5);
+        when(dlrService.listDueHttpDeliveries(100)).thenReturn(List.of(due, later));
+        when(dlrService.startDeliveryAttempt(GATEWAY_ID, MessageState.DeliveryChannel.HTTP))
+                .thenReturn(Optional.of(started));
         when(httpClient.send(any(HttpRequest.class), anyBodyHandler()))
                 .thenThrow(new InterruptedException("interrupted"));
         when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(5), eq("interrupted"), anyLong()))
@@ -207,8 +202,8 @@ class ForwardDlrServiceTest {
             service.dispatchDueDeliveries();
 
             verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(5), eq("interrupted"), anyLong());
+            verify(dlrService, never()).startDeliveryAttempt(laterGatewayId, MessageState.DeliveryChannel.HTTP);
             assertThat(Thread.currentThread().isInterrupted()).isTrue();
-            assertAttemptMetric("transport_failure", 1);
         } finally {
             Thread.interrupted();
         }
@@ -225,8 +220,6 @@ class ForwardDlrServiceTest {
         verify(dlrService).failInvalidDelivery(GATEWAY_ID, "invalid_uri");
         verify(dlrService, never()).startDeliveryAttempt(any(), any());
         verifyNoInteractions(httpClient);
-        assertThat(meterRegistry.get("sendium.dlr.delivery.terminal.failure")
-                .tags("channel", "http", "reason", "invalid_uri").counter().count()).isEqualTo(1);
     }
 
     @Test
@@ -242,7 +235,7 @@ class ForwardDlrServiceTest {
     }
 
     @Test
-    void completionStorageFailureLeavesDeliveryForLaterRunAndRecordsBoundedError() throws Exception {
+    void completionStorageFailureLeavesDeliveryForLaterRun() throws Exception {
         MessageState due = dueState("https://example.test/dlr");
         dueAttempt(due, 1);
         respondWith(200);
@@ -252,19 +245,15 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
-        assertThat(meterRegistry.get("sendium.dlr.delivery.dispatch.error")
-                .tags("channel", "http", "source", "storage").counter().count()).isEqualTo(1);
     }
 
     @Test
-    void schedulerStorageFailureIsCountedWithoutDynamicMetricTags() {
+    void schedulerStorageFailureDoesNotSend() {
         when(dlrService.listDueHttpDeliveries(100)).thenThrow(new DlrStorageException("database unavailable"));
 
         service.dispatchDueDeliveries();
 
-        assertThat(meterRegistry.get("sendium.dlr.delivery.dispatch.error")
-                .tags("channel", "http", "source", "scheduler").counter().count()).isEqualTo(1);
-        assertBoundedMetricTags();
+        verifyNoInteractions(httpClient);
     }
 
     @Test
@@ -292,8 +281,6 @@ class ForwardDlrServiceTest {
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(1), eq("http_failure"), nextAttempt.capture());
         assertThat(nextAttempt.getValue()).isBetween(beforeFailure + 120_000, System.currentTimeMillis() + 120_000);
         assertThat(deliveryResult().getValue()).isEqualTo("http_failure");
-        assertAttemptMetric("http_failure", 1);
-        assertBoundedMetricTags();
     }
 
     private ArgumentCaptor<String> deliveryResult() {
@@ -330,21 +317,4 @@ class ForwardDlrServiceTest {
         return any(HttpResponse.BodyHandler.class);
     }
 
-    private void assertAttemptMetric(String outcome, long expectedCount) {
-        assertThat(meterRegistry.get("sendium.dlr.delivery.attempt")
-                .tags("channel", "http", "outcome", outcome).timer().count()).isEqualTo(expectedCount);
-    }
-
-    private void assertBoundedMetricTags() {
-        Set<String> permittedTags = Set.of("channel", "outcome", "reason", "source");
-        assertThat(meterRegistry.getMeters())
-                .filteredOn(meter -> meter.getId().getName().startsWith("sendium.dlr.delivery"))
-                .allSatisfy(meter -> assertThat(meter.getId().getTags())
-                        .extracting(io.micrometer.core.instrument.Tag::getKey)
-                        .allMatch(permittedTags::contains));
-        assertThat(meterRegistry.getMeters())
-                .flatExtracting(meter -> meter.getId().getTags())
-                .extracting(io.micrometer.core.instrument.Tag::getKey)
-                .doesNotContain("id", "url", "host", "provider", "attempt");
-    }
 }

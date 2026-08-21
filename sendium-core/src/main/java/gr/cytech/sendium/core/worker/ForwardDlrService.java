@@ -1,8 +1,5 @@
 package gr.cytech.sendium.core.worker;
 
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Timer;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -26,10 +23,6 @@ import java.util.Optional;
 public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
 
-    private static final String ATTEMPT_METRIC = "sendium.dlr.delivery.attempt";
-    private static final String TERMINAL_FAILURE_METRIC = "sendium.dlr.delivery.terminal.failure";
-    private static final String DISPATCH_ERROR_METRIC = "sendium.dlr.delivery.dispatch.error";
-    private static final String CHANNEL_HTTP = "http";
     private static final int DUE_BATCH_SIZE = 100;
     private static final int MAX_ATTEMPTS = 10;
     private static final long RETRY_INTERVAL_MS = 120_000;
@@ -44,17 +37,15 @@ public class ForwardDlrService {
     private static final String MSG_ID_PLACEHOLDER = "%s";
 
     private final DlrService dlrService;
-    private final MeterRegistry meterRegistry;
     private final HttpClient httpClient;
 
     @Inject
-    public ForwardDlrService(DlrService dlrService, MeterRegistry meterRegistry) {
-        this(dlrService, meterRegistry, newHttpClient());
+    public ForwardDlrService(DlrService dlrService) {
+        this(dlrService, newHttpClient());
     }
 
-    ForwardDlrService(DlrService dlrService, MeterRegistry meterRegistry, HttpClient httpClient) {
+    ForwardDlrService(DlrService dlrService, HttpClient httpClient) {
         this.dlrService = dlrService;
-        this.meterRegistry = meterRegistry;
         this.httpClient = httpClient;
     }
 
@@ -71,7 +62,6 @@ public class ForwardDlrService {
         try {
             dueDeliveries = dlrService.listDueHttpDeliveries(DUE_BATCH_SIZE);
         } catch (RuntimeException e) {
-            recordDispatchError("scheduler");
             logger.error("Unable to list due HTTP DLR deliveries");
             return;
         }
@@ -79,8 +69,10 @@ public class ForwardDlrService {
         for (MessageState state : dueDeliveries) {
             try {
                 dispatch(state);
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
+                }
             } catch (RuntimeException e) {
-                recordDispatchError("scheduler");
                 logger.error("Unexpected HTTP DLR dispatch failure for gatewayMsgId={}", state.getGatewayMsgId());
             }
         }
@@ -108,25 +100,19 @@ public class ForwardDlrService {
         }
 
         int attempt = started.orElseThrow().getDeliveryAttemptCount();
-        Timer.Sample sample = Timer.start(meterRegistry);
         try {
             HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
             if (response.statusCode() >= 200 && response.statusCode() < 400) {
-                sample.stop(attemptTimer("success"));
                 completeDelivery(gatewayMsgId, attempt);
             } else {
-                sample.stop(attemptTimer("http_failure"));
                 handleAttemptFailure(gatewayMsgId, attempt, "http_failure");
             }
         } catch (HttpTimeoutException e) {
-            sample.stop(attemptTimer("timeout"));
             handleAttemptFailure(gatewayMsgId, attempt, "timeout");
         } catch (InterruptedException e) {
-            sample.stop(attemptTimer("transport_failure"));
             handleAttemptFailure(gatewayMsgId, attempt, "interrupted");
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
-            sample.stop(attemptTimer("transport_failure"));
             handleAttemptFailure(gatewayMsgId, attempt, "transport_failure");
         }
     }
@@ -171,9 +157,6 @@ public class ForwardDlrService {
                         gatewayMsgId, attempt, result, System.currentTimeMillis() + RETRY_INTERVAL_MS);
             } else {
                 updated = dlrService.failDelivery(gatewayMsgId, attempt, result);
-                if (updated) {
-                    terminalFailureCounter("max_attempts").increment();
-                }
             }
             if (!updated) {
                 recordStorageError(gatewayMsgId, attempt, "finish");
@@ -186,9 +169,7 @@ public class ForwardDlrService {
     private void failInvalidDelivery(String gatewayMsgId) {
         logger.warn("Invalid HTTP DLR callback for gatewayMsgId={}", gatewayMsgId);
         try {
-            if (dlrService.failInvalidDelivery(gatewayMsgId, "invalid_uri")) {
-                terminalFailureCounter("invalid_uri").increment();
-            } else {
+            if (!dlrService.failInvalidDelivery(gatewayMsgId, "invalid_uri")) {
                 recordStorageError(gatewayMsgId, 0, "invalid");
             }
         } catch (RuntimeException e) {
@@ -197,31 +178,8 @@ public class ForwardDlrService {
     }
 
     private void recordStorageError(String gatewayMsgId, int attempt, String operation) {
-        recordDispatchError("storage");
         logger.error("HTTP DLR storage update failed for gatewayMsgId={} attempt={} operation={}",
                 gatewayMsgId, attempt, operation);
-    }
-
-    private void recordDispatchError(String source) {
-        Counter.builder(DISPATCH_ERROR_METRIC)
-                .description("Sendium DLR dispatcher errors")
-                .tags("channel", CHANNEL_HTTP, "source", source)
-                .register(meterRegistry)
-                .increment();
-    }
-
-    private Timer attemptTimer(String outcome) {
-        return Timer.builder(ATTEMPT_METRIC)
-                .description("Sendium DLR delivery attempt latency")
-                .tags("channel", CHANNEL_HTTP, "outcome", outcome)
-                .register(meterRegistry);
-    }
-
-    private Counter terminalFailureCounter(String reason) {
-        return Counter.builder(TERMINAL_FAILURE_METRIC)
-                .description("Sendium terminal DLR delivery failures")
-                .tags("channel", CHANNEL_HTTP, "reason", reason)
-                .register(meterRegistry);
     }
 
     int mapToKannelType(MessageState.MessageStatus status) {
