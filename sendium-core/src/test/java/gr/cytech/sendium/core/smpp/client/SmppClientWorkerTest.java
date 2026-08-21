@@ -11,6 +11,7 @@ import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
+import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.external.WorkerResourceProvider;
@@ -38,6 +39,32 @@ class SmppClientWorkerTest {
     }
 
     @Test
+    void dlrProviderNameDefaultsToWorkerFullName() {
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+
+        assertThat(worker.getDlrProviderName()).isEqualTo("test");
+    }
+
+    @Test
+    void dlrProviderNameUsesConfiguredSharedNamespace() {
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(Map.of("msg.hash.prefix", "provider-cluster")),
+                new Queue<>(), new CapturingTracker());
+
+        assertThat(worker.getDlrProviderName()).isEqualTo("provider-cluster");
+    }
+
+    @Test
+    void blankDlrProviderNameFallsBackToWorkerFullName() {
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(Map.of("msg.hash.prefix", "   ")),
+                new Queue<>(), new CapturingTracker());
+
+        assertThat(worker.getDlrProviderName()).isEqualTo("test");
+    }
+
+    @Test
     void parseDlrAndCreateResponse_whenReceiptIsValid_enqueuesDlrWithRegisteredTlvs() throws Exception {
         TestConfigurationProvider config = new TestConfigurationProvider(Map.of(
                 "registered.tlvs.dlr", "carrier_1400"));
@@ -56,11 +83,54 @@ class SmppClientWorkerTest {
         PduResponse response = worker.parseDlrAndCreateResponse(deliverSm);
 
         assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
-        assertThat(tracker.dlrSmscId).isEqualTo("abc123");
+        assertThat(tracker.dlrProviderMessageId).isEqualTo("abc123");
         assertThat(tracker.dlrFrom).isEqualTo("smsc");
         assertThat(tracker.dlrTo).isEqualTo("recipient");
         assertThat(tracker.dlrState).isEqualTo(StandardMessage.DLR_STAT_DELIVRD);
         assertThat(tracker.dlrTlvs).containsEntry("carrier_1400", "network-a");
+    }
+
+    @Test
+    void parseDlrAndCreateResponse_whenReceiptIsIntermediate_acknowledgesWithoutEnqueuing() throws Exception {
+        CapturingTracker tracker = new CapturingTracker();
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), tracker);
+
+        for (String state : Set.of("ACCEPTD", "ENROUTE")) {
+            DeliverSm deliverSm = new DeliverSm();
+            deliverSm.setSourceAddress(new Address((byte) 1, (byte) 1, "smsc"));
+            deliverSm.setDestAddress(new Address((byte) 1, (byte) 1, "recipient"));
+            deliverSm.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+            deliverSm.setShortMessage(CharsetUtil.encode(
+                    "id:abc123 sub:001 dlvrd:000 submit date:2401010000 done date: stat:" + state +
+                            " err:000 text:pending",
+                    CharsetUtil.NAME_GSM));
+
+            PduResponse response = worker.parseDlrAndCreateResponse(deliverSm);
+
+            assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
+        }
+        assertThat(tracker.dlrAttempts).isZero();
+    }
+
+    @Test
+    void parseDlrAndCreateResponse_whenStorageFails_returnsSystemErrorForProviderRetry() throws Exception {
+        CapturingTracker tracker = new CapturingTracker();
+        tracker.failDlrCreation = true;
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), tracker);
+        DeliverSm deliverSm = new DeliverSm();
+        deliverSm.setSourceAddress(new Address((byte) 1, (byte) 1, "smsc"));
+        deliverSm.setDestAddress(new Address((byte) 1, (byte) 1, "recipient"));
+        deliverSm.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+        deliverSm.setShortMessage(CharsetUtil.encode(
+                "id:abc123 sub:001 dlvrd:001 submit date:2401010000 done date:2401010001 stat:DELIVRD err:000 text:ok",
+                CharsetUtil.NAME_GSM));
+
+        PduResponse response = worker.parseDlrAndCreateResponse(deliverSm);
+
+        assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
+        assertThat(tracker.dlrAttempts).isEqualTo(1);
     }
 
     @Test
@@ -178,9 +248,54 @@ class SmppClientWorkerTest {
         worker.handleResponse(handler(worker), SmppConstants.STATUS_INVMSGLEN, "smsc-2", msg);
 
         assertThat(tracker.dlrMqId).isEqualTo(17);
-        assertThat(tracker.dlrSmscId).isEqualTo("smsc-2");
+        assertThat(tracker.dlrProviderMessageId).isEqualTo("smsc-2");
         assertThat(tracker.dlrState).isEqualTo(StandardMessage.DLR_STAT_FAILED);
         assertThat(tracker.dlrErrorCode).isEqualTo("7");
+    }
+
+    @Test
+    void updateSendStatusAndProviderMessageId_whenStorageFails_keepsSubmitResponseCallbackAlive() {
+        CapturingTracker tracker = new CapturingTracker();
+        tracker.failProviderLink = true;
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), tracker);
+        StandardMessage msg = messageWithNetwork();
+        msg.serial = "gateway-17";
+
+        String providerMessageId = worker.updateSendStatusAndProviderMessageId("smsc-17", msg);
+
+        assertThat(providerMessageId).isEqualTo("smsc-17");
+        assertThat(tracker.linkAttempts).isEqualTo(1);
+    }
+
+    @Test
+    void updateSendStatusAndProviderMessageId_whenResponseIdIsBlank_usesInternalId() {
+        CapturingTracker tracker = new CapturingTracker();
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), tracker);
+        StandardMessage msg = messageWithNetwork();
+        msg.serial = "gateway-17";
+
+        String providerMessageId = worker.updateSendStatusAndProviderMessageId("   ", msg);
+
+        assertThat(providerMessageId).isEqualTo("smppclient.test_internal_17");
+        assertThat(tracker.linkAttempts).isEqualTo(1);
+    }
+
+    @Test
+    void failMessage_whenStorageFails_attemptsDlrWithoutEscapingCallback() {
+        CapturingTracker tracker = new CapturingTracker();
+        tracker.failProviderLink = true;
+        tracker.failDlrCreation = true;
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), tracker);
+        StandardMessage msg = messageWithNetwork();
+        msg.serial = "gateway-17";
+
+        worker.failMessage(SmppConstants.STATUS_INVMSGLEN, "smsc-17", msg);
+
+        assertThat(tracker.linkAttempts).isEqualTo(1);
+        assertThat(tracker.dlrAttempts).isEqualTo(1);
     }
 
     private static SmppClientSessionHandler handler(TestSmppClientWorker worker) {
@@ -262,12 +377,16 @@ class SmppClientWorkerTest {
 
     private static class CapturingTracker implements Tracker<StandardMessage> {
         private int dlrMqId;
-        private String dlrSmscId;
+        private String dlrProviderMessageId;
         private String dlrFrom;
         private String dlrTo;
         private int dlrState;
         private String dlrErrorCode;
         private HashMap<String, String> dlrTlvs;
+        private boolean failProviderLink;
+        private boolean failDlrCreation;
+        private int linkAttempts;
+        private int dlrAttempts;
 
         @Override
         public void init() {
@@ -283,7 +402,12 @@ class SmppClientWorkerTest {
         }
 
         @Override
-        public int updateSendStatusAndExtID(String smsid, StandardMessage pMsg, String smscid) {
+        public int updateSendStatusAndExtID(String hashedProviderMessageId, StandardMessage message,
+                                            String providerMessageId) {
+            linkAttempts++;
+            if (failProviderLink) {
+                throw new DlrStorageException("Failed to link provider DLR ID");
+            }
             return 1;
         }
 
@@ -298,10 +422,15 @@ class SmppClientWorkerTest {
         }
 
         @Override
-        public void createAndEnqueueDLR(int mqid, String smscid, String smsid, String from, String to, String body,
-                                        int state, String errorCode, HashMap<String, String> tlvs) {
+        public void createAndEnqueueDLR(int mqid, String providerMessageId, String hashedProviderMessageId,
+                                        String from, String to, String body, int state, String errorCode,
+                                        HashMap<String, String> tlvs) {
+            dlrAttempts++;
+            if (failDlrCreation) {
+                throw new DlrStorageException("Failed to resolve DLR state");
+            }
             this.dlrMqId = mqid;
-            this.dlrSmscId = smscid;
+            this.dlrProviderMessageId = providerMessageId;
             this.dlrFrom = from;
             this.dlrTo = to;
             this.dlrState = state;

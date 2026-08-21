@@ -4,6 +4,7 @@ import com.cloudhopper.smpp.pdu.Pdu;
 import com.cloudhopper.smpp.pdu.PduRequest;
 import com.cloudhopper.smpp.pdu.PduResponse;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.smpp.server.DlrDeliverSmReference;
 import gr.cytech.sendium.core.smpp.server.SmppServerSessionHandler;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
 import gr.cytech.sendium.util.MessageTrace;
@@ -25,6 +26,12 @@ public class OutTask<M extends StandardMessage> implements Runnable {
     @Override
     public void run() {
         boolean success;
+        DlrDeliverSmReference<?> dlrReference =
+                pdu.getReferenceObject() instanceof DlrDeliverSmReference<?> reference ? reference : null;
+        StandardMessage durableDlr = dlrReference == null ? null : dlrReference.batch().getMessage();
+        if (dlrReference != null && !dlrReference.batch().isActive()) {
+            return;
+        }
         try {
             if (pdu.isResponse()) {
                 //for responses, the pdu contains the handler as a reference object
@@ -40,11 +47,17 @@ public class OutTask<M extends StandardMessage> implements Runnable {
                 success = handler.sendPduResponse((PduResponse) pdu);
             } else {
                 //for requests, the pdu contains an array with the handler and possibly the original message (dlr/mo)
-                Object[] arr = (Object[]) pdu.getReferenceObject();
-                SmppServerSessionHandler handler = (SmppServerSessionHandler) arr[0];
-                msg = (M) arr[1];
-                deliverMsgId = arr.length > 2 && arr[2] instanceof String id ? id : null;
-                success = handler.sendPduRequest((PduRequest) pdu);
+                if (dlrReference != null) {
+                    msg = null;
+                    deliverMsgId = dlrReference.receiptMessageId();
+                    success = dlrReference.handler().sendPduRequest((PduRequest) pdu);
+                } else {
+                    Object[] arr = (Object[]) pdu.getReferenceObject();
+                    SmppServerSessionHandler handler = (SmppServerSessionHandler) arr[0];
+                    msg = (M) arr[1];
+                    deliverMsgId = arr.length > 2 && arr[2] instanceof String id ? id : null;
+                    success = handler.sendPduRequest((PduRequest) pdu);
+                }
             }
         } catch (Exception e) {
             success = false;
@@ -52,11 +65,19 @@ public class OutTask<M extends StandardMessage> implements Runnable {
         }
 
         if (!success) {
-            worker.outTaskFailed(pdu, msg);
-        } else if (!pdu.isResponse() && msg != null) {
+            if (dlrReference != null) {
+                if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_FAILED)) {
+                    logger.warn("message.deliver.failed worker={} {}", worker.getFullName(),
+                            MessageTrace.identifiers(durableDlr));
+                }
+                dlrReference.batch().fail("send_failed");
+            } else {
+                worker.outTaskFailed(pdu, msg);
+            }
+        } else if (!pdu.isResponse() && (msg != null || durableDlr != null)) {
             if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_SENT)) {
                 logger.info("message.deliver.sent worker={} deliverMsgId={} {}", worker.getFullName(),
-                        MessageTrace.value(deliverMsgId), MessageTrace.identifiers(msg));
+                        MessageTrace.value(deliverMsgId), MessageTrace.identifiers(msg != null ? msg : durableDlr));
             }
         }
     }

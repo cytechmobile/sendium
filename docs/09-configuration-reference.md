@@ -43,6 +43,25 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `QUARKUS_HTTP_ACCESS_LOG_ENABLE` | `true` | Enables HTTP access logging. |
 | `QUARKUS_HTTP_ACCESS_LOG_DIRECTORY` | `/work/logs` | HTTP access log directory. |
 
+## DLR Storage Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SENDIUM_DLR_POSTGRESQL_JDBC_URL` | Empty | PostgreSQL JDBC URL. |
+| `SENDIUM_DLR_POSTGRESQL_USERNAME` | Empty | PostgreSQL role name when required by the database authentication method. |
+| `SENDIUM_DLR_POSTGRESQL_PASSWORD` | Empty | PostgreSQL password when required; provide through an access-controlled environment or secret. |
+| `SENDIUM_DLR_POSTGRESQL_POOL_MIN_SIZE` | `0` | Minimum datasource pool size. |
+| `SENDIUM_DLR_POSTGRESQL_POOL_MAX_SIZE` | `10` | Maximum datasource pool size. |
+| `SENDIUM_DLR_POSTGRESQL_ACQUISITION_TIMEOUT` | `5S` | Maximum wait for a pooled connection. |
+
+PostgreSQL is the only DLR persistence backend and is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
+
+### Core Embedding
+
+`sendium.dlr.persistence.enabled` is a build-time setting. The `sendium-core` module leaves it undefined, which means disabled; the standalone `sendium-app` sets it to `true`.
+
+When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. Submissions are still accepted and routed, but no gateway DLR state is stored and Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` must declare the property as `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. Enabled persistence remains fail-closed.
+
 ## Logs
 
 | Log | Description |
@@ -68,6 +87,8 @@ When the HTTP server is running, Sendium exposes:
 | :--- | :--- |
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI JSON document. |
+| `/q/health/ready` | Readiness status and PostgreSQL DLR availability. |
+| `/q/metrics` | Prometheus metrics, including DLR storage and datasource metrics. |
 
 ## Related Documentation
 
@@ -75,3 +96,4 @@ When the HTTP server is running, Sendium exposes:
 - [Authentication and Security](03-auth-security.md)
 - [SMPP Configuration](04-smpp-configuration.md)
 - [Routing Engine](05-routing-engine.md)
+- [DLR Persistence](13-dlr-persistence.md)

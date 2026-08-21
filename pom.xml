@@ -41,7 +41,6 @@
         <cloudhopper.smpp.version>7.2.2</cloudhopper.smpp.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.23.0</mockito.version>
-        <h2.version>2.4.240</h2.version>
     </properties>
 
     <dependencyManagement>
@@ -71,11 +70,6 @@
                 <artifactId>mockito-junit-jupiter</artifactId>
                 <version>${mockito.version}</version>
                 <scope>test</scope>
-            </dependency>
-            <dependency>
-                <groupId>com.h2database</groupId>
-                <artifactId>h2-mvstore</artifactId>
-                <version>${h2.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.assertj</groupId>
