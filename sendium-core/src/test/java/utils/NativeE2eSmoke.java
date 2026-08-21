@@ -62,7 +62,6 @@ public class NativeE2eSmoke {
     private static final int SENDIUM_SMPP_PORT = 27777;
     private static final int UPSTREAM_SMPP_PORT = 27779;
     private static final Duration TIMEOUT = Duration.ofSeconds(90);
-    private static final Duration NO_DELIVERY_TIMEOUT = Duration.ofSeconds(3);
 
     public static void main(String[] args) throws Exception {
         String containerName = "sendium-e2e-" + UUID.randomUUID().toString().substring(0, 8);
@@ -80,9 +79,8 @@ public class NativeE2eSmoke {
             waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
             require(upstream.awaitSessionBound(), "Sendium container did not bind to the upstream SMPP server");
 
-            container = verifyUnpushedDlrSurvivesRestart(containerName, workDir, upstream);
-            container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 2);
-            verifySmppSubmitGetsDeliverSm(upstream, 3);
+            container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 1);
+            verifySmppSubmitGetsDeliverSm(upstream, 2);
         } catch (Throwable t) {
             printDockerLogs(containerName);
             throw t;
@@ -159,62 +157,6 @@ public class NativeE2eSmoke {
         } finally {
             upstream.setAutomaticDelivery(true);
         }
-    }
-
-    private static Process verifyUnpushedDlrSurvivesRestart(String containerName, Path workDir,
-                                                            UpstreamSmppServer upstream) throws Exception {
-        upstream.setAutomaticDelivery(false);
-        String gatewayId;
-        try (DownstreamSmppClient client = new DownstreamSmppClient()) {
-            client.start();
-            SubmitSmResp response = client.sendSms("smpp-sender", "306900000003", "container restart dlr e2e");
-            require(response.getCommandStatus() == SmppConstants.STATUS_OK,
-                    "SMPP restart submit_sm_resp status was " + response.getCommandStatus());
-            gatewayId = response.getMessageId();
-            require(gatewayId != null && !gatewayId.isBlank(), "SMPP restart submit_sm_resp did not contain a message id");
-            require(upstream.awaitSubmitCount(1), "Upstream SMPP server did not receive the restart test message");
-            awaitSuccessfulStorageOperation("link_provider");
-        }
-
-        Thread.sleep(500);
-        upstream.sendDeliveryReceipt(1);
-        awaitSuccessfulStorageOperation("save_unpushed");
-        upstream.setAutomaticDelivery(true);
-        int boundSessionsBeforeRestart = upstream.boundSessionCount();
-        stopContainer(containerName);
-
-        Process replayContainer = startSendiumContainer(containerName, workDir);
-        waitForPostgresqlReadiness();
-        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
-        require(upstream.awaitSessionBoundAfter(boundSessionsBeforeRestart),
-                "Sendium container did not rebind to upstream after restart");
-
-        try (DownstreamSmppClient reconnectedClient = new DownstreamSmppClient()) {
-            reconnectedClient.start();
-            DeliverSm deliverSm = reconnectedClient.awaitDeliverSm();
-            require(deliverSm != null, "Reconnected downstream SMPP client did not receive persisted unpushed DLR");
-            String body = new String(deliverSm.getShortMessage(), StandardCharsets.UTF_8);
-            require(body.contains("DELIVRD"), "Persisted unpushed DLR was not delivered: " + body);
-            require(body.contains("id:" + gatewayId),
-                    "Persisted unpushed DLR did not contain gateway id " + gatewayId + ": " + body);
-            awaitSuccessfulStorageOperation("remove_unpushed");
-        }
-
-        boundSessionsBeforeRestart = upstream.boundSessionCount();
-        stopContainer(containerName);
-        replayContainer.destroyForcibly();
-        Process container = startSendiumContainer(containerName, workDir);
-        waitForPostgresqlReadiness();
-        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
-        require(upstream.awaitSessionBoundAfter(boundSessionsBeforeRestart),
-                "Sendium container did not rebind to upstream after replay check");
-        try (DownstreamSmppClient client = new DownstreamSmppClient()) {
-            client.start();
-            awaitSuccessfulStorageOperation("claim_unpushed");
-            require(client.awaitDeliverSm(NO_DELIVERY_TIMEOUT) == null,
-                    "Replayed unpushed DLR was delivered more than once after restart");
-        }
-        return container;
     }
 
     private static Process startSendiumContainer(String containerName, Path workDir) throws Exception {

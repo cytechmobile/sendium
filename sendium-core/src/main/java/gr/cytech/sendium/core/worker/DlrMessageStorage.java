@@ -12,15 +12,23 @@ public interface DlrMessageStorage {
 
     void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId);
 
-    /**
-     * Resolves and removes one provider correlation and its tracked message.
-     * The returned state must contain the supplied status, provider name, linked provider message ID, and an updated
-     * timestamp.
-     */
-    Optional<MessageState> resolveAndRemoveDlr(String providerName, String providerMessageId,
-                                               MessageState.MessageStatus status);
+    Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
+                                      MessageState.MessageStatus status, int dlrState, String errorCode);
 
     Optional<MessageState> getState(String gatewayMsgId);
 
-    boolean markAsFailed(String gatewayMsgId);
+    List<MessageState> listPendingSmppDeliveries(String systemId);
+
+    List<MessageState> listDueHttpDeliveries(int limit);
+
+    Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
+                                                MessageState.DeliveryChannel expectedChannel);
+
+    boolean completeDelivery(String gatewayMsgId, int expectedAttempt);
+
+    boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt);
+
+    boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result);
+
+    boolean failInvalidDelivery(String gatewayMsgId, String result);
 }

@@ -20,6 +20,15 @@ public class MessageState implements Serializable {
     private String forwardDlrUrl;
     private List<String> reassembledParts;
     private MessageStatus status;
+    private Integer dlrState;
+    private String errorCode;
+    private DeliveryChannel deliveryChannel = DeliveryChannel.NONE;
+    private DeliveryStatus deliveryStatus = DeliveryStatus.WAITING_PROVIDER;
+    private int deliveryAttemptCount;
+    private Long lastAttemptAt;
+    private Long nextAttemptAt;
+    private String lastDeliveryResult;
+    private Long resolvedAt;
     private long timestamp;
 
     public MessageState() {
@@ -38,6 +47,7 @@ public class MessageState implements Serializable {
         this.providerName = null;
         this.providerMessageId = null;
         this.status = MessageStatus.ACCEPTED;
+        this.deliveryAttemptCount = 0;
         this.timestamp = System.currentTimeMillis();
         this.forwardDlrUrl = forwardDlrUrl;
     }
@@ -78,6 +88,42 @@ public class MessageState implements Serializable {
         return status;
     }
 
+    public Integer getDlrState() {
+        return dlrState;
+    }
+
+    public String getErrorCode() {
+        return errorCode;
+    }
+
+    public DeliveryChannel getDeliveryChannel() {
+        return deliveryChannel;
+    }
+
+    public DeliveryStatus getDeliveryStatus() {
+        return deliveryStatus;
+    }
+
+    public int getDeliveryAttemptCount() {
+        return deliveryAttemptCount;
+    }
+
+    public Long getLastAttemptAt() {
+        return lastAttemptAt;
+    }
+
+    public Long getNextAttemptAt() {
+        return nextAttemptAt;
+    }
+
+    public String getLastDeliveryResult() {
+        return lastDeliveryResult;
+    }
+
+    public Long getResolvedAt() {
+        return resolvedAt;
+    }
+
     public List<String> getReassembledParts() {
         return reassembledParts == null ? null : new ArrayList<>(reassembledParts);
     }
@@ -98,6 +144,42 @@ public class MessageState implements Serializable {
         this.status = status;
     }
 
+    public void setDlrState(Integer dlrState) {
+        this.dlrState = dlrState;
+    }
+
+    public void setErrorCode(String errorCode) {
+        this.errorCode = errorCode;
+    }
+
+    public void setDeliveryChannel(DeliveryChannel deliveryChannel) {
+        this.deliveryChannel = deliveryChannel;
+    }
+
+    public void setDeliveryStatus(DeliveryStatus deliveryStatus) {
+        this.deliveryStatus = deliveryStatus;
+    }
+
+    public void setDeliveryAttemptCount(int deliveryAttemptCount) {
+        this.deliveryAttemptCount = deliveryAttemptCount;
+    }
+
+    public void setLastAttemptAt(Long lastAttemptAt) {
+        this.lastAttemptAt = lastAttemptAt;
+    }
+
+    public void setNextAttemptAt(Long nextAttemptAt) {
+        this.nextAttemptAt = nextAttemptAt;
+    }
+
+    public void setLastDeliveryResult(String lastDeliveryResult) {
+        this.lastDeliveryResult = lastDeliveryResult;
+    }
+
+    public void setResolvedAt(Long resolvedAt) {
+        this.resolvedAt = resolvedAt;
+    }
+
     public void setReassembledParts(List<String> reassembledParts) {
         this.reassembledParts = reassembledParts == null ? null : new ArrayList<>(reassembledParts);
     }
@@ -110,6 +192,18 @@ public class MessageState implements Serializable {
         ACCEPTED,
         SENT,
         DELIVERED,
+        FAILED
+    }
+
+    public enum DeliveryChannel {
+        NONE,
+        HTTP,
+        SMPP
+    }
+
+    public enum DeliveryStatus {
+        WAITING_PROVIDER,
+        PENDING,
         FAILED
     }
 }

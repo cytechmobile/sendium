@@ -214,6 +214,8 @@ public class KannelResource {
             msg.serial = UUID.randomUUID().toString();
             if (!dlrServices.isUnsatisfied()) {
                 MessageState state = new MessageState(msg.serial, usr, msg.from, msg.to, dlrUrl);
+                state.setDeliveryChannel(dlrUrl == null || dlrUrl.isBlank() ?
+                        MessageState.DeliveryChannel.NONE : MessageState.DeliveryChannel.HTTP);
                 dlrServices.get().saveInitialState(state);
             }
             queueProvider.getRouterQueue().enqueue(msg);

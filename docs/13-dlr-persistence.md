@@ -1,6 +1,6 @@
 # DLR Persistence
 
-Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and replay receipts that could not be delivered to a downstream SMPP client in PostgreSQL.
+Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and durably track terminal HTTP/SMPP delivery in PostgreSQL.
 
 This storage boundary does not make Sendium's message queues or all delivery processing durable. Review [Durability Boundaries](#durability-boundaries) before using restart recovery as a delivery guarantee.
 
@@ -34,7 +34,7 @@ Quick Start preserves the local database password during `--force` regeneration,
 
 ## Upgrade From MVStore Builds
 
-Older Sendium builds could store DLR state in `data/dlr-mvstore.db`. Current builds do not read or import that file. Before upgrading an MVStore-configured runtime, stop accepting submissions and allow pending provider correlations and unpushed downstream receipts to drain, or explicitly accept that the remaining state will be unavailable after the upgrade. Stop Sendium and preserve the old file before starting the PostgreSQL-only build.
+Older Sendium builds could store DLR state in `data/dlr-mvstore.db`. Current builds do not read or import that file. Before upgrading an MVStore-configured runtime, stop accepting submissions and allow pending provider correlations and terminal deliveries to drain, or explicitly accept that the remaining state will be unavailable after the upgrade. Stop Sendium and preserve the old file before starting the PostgreSQL-only build.
 
 Provision PostgreSQL and require readiness to report `UP` with `backend=postgresql` before reopening traffic. State written to PostgreSQL is not available to an older MVStore build if the application is later downgraded.
 
@@ -98,6 +98,10 @@ PostgreSQL is fail-closed. If required persistence is unavailable, new HTTP subm
 
 Provider message IDs are correlated within the outbound provider namespace rather than globally. The worker instance name is the default namespace; workers connected to the same SMSC account can share `msg.hash.prefix` when that SMSC may deliver their receipts interchangeably. Different providers may therefore return the same message ID without overwriting each other's state. The namespace must remain stable while correlations are outstanding: changing `msg.hash.prefix` or renaming a worker using the default makes earlier receipts unresolvable.
 
+Sendium requests final delivery receipts from upstream SMPP providers. A valid unsolicited `ACCEPTD` or `ENROUTE` receipt is acknowledged successfully but is not forwarded and does not consume its provider correlation. The first terminal receipt consumes the correlation and produces the downstream DLR; later receipts for that provider message ID cannot resolve it. Multipart submissions retain this first-terminal behavior and do not aggregate delivery states across every segment.
+
+A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP delivery is pending. The delivery attempt number is a fencing token: a stale completion or failure cannot mutate a newer attempt, and an adapter-local active-ID guard prevents duplicate starts within one process.
+
 ## Retention
 
 The V1 retention thresholds are fixed application behavior, not environment settings:
@@ -105,8 +109,8 @@ The V1 retention thresholds are fixed application behavior, not environment sett
 | State | Eligible for cleanup after |
 | :--- | :--- |
 | Provider message correlation | 3 days |
-| Tracked gateway message | 7 days |
-| Unpushed downstream SMPP receipt | 7 days |
+| Message waiting for provider receipt | 7 days from creation |
+| Pending or failed terminal delivery | 7 days from resolution |
 
 Cleanup is triggered by storage activity and runs no more than once per hour. These values are therefore eligibility thresholds, not exact physical deletion deadlines: idle records can remain in the database longer, and an active deployment can retain newly eligible state until the next cleanup pass. A provider receipt cannot be matched after its correlation has been removed. Making the thresholds or cleanup schedule configurable is outside the V1 storage replacement.
 
@@ -117,14 +121,14 @@ Cleanup is best-effort maintenance and is isolated from message handling. One ca
 | State or transition | PostgreSQL guarantee | Remaining limit |
 | :--- | :--- | :--- |
 | Initial DLR state for HTTP and downstream SMPP submissions | Persisted before HTTP routing or a successful SMPP acknowledgement. | Router and worker queues remain in memory. A process crash can lose queued outbound work even though its DLR row remains until cleanup. |
-| Gateway-to-provider message correlation | Survives Sendium restart after the provider message ID is linked. | Resolving a provider receipt consumes the correlation before callback or downstream delivery completes. A crash in that window can lose the resulting receipt. |
-| Unpushed downstream SMPP receipt | Survives restart and is replayed when the same system ID binds again. | The row is removed after admission to the worker queue, not after confirmed downstream delivery. A crash in that window can lose the receipt. |
-| Replay claim | Prevents duplicate replay within one Sendium process. | Claims are process-local. Multiple active Sendium replicas can claim and deliver the same database row. V1 supports one active gateway process. |
+| Gateway-to-provider message correlation | Survives Sendium restart after the provider message ID is linked. Intermediate `ACCEPTD` and `ENROUTE` receipts leave it intact. | The first terminal receipt consumes every correlation for the gateway message. |
+| Terminal HTTP/SMPP delivery | The common payload and exact provider outcome remain in one row until fenced completion. | Delivery scheduling and SMPP response batching are separate runtime concerns. |
+| Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. | The active-ID guard is process-local. Adapter recreation may start a new attempt for an attempt that was active before a crash. |
 | Multipart submission | Each acknowledged segment has provisional DLR state; completed aggregates update the primary state. | Multipart assembly and its pending timers are process-local and are not reconstructed after restart. |
-| HTTP DLR callback retry | The resolved callback is attempted up to 10 times while the process remains running. | The retry schedule is in memory and is lost on restart. There is no durable callback outbox. |
+| HTTP DLR callback retry | Pending state and the next-attempt timestamp are durable. | The scheduler that consumes due rows is implemented separately. |
 | Database files | The Quick Start named volume survives normal container replacement and `docker compose down`. | Volume deletion, host-disk loss, and disaster recovery require backups or external PostgreSQL replication managed by the operator. |
 
-These limits are intentional V1 boundaries. PostgreSQL provides DLR persistence; it is not a durable queue, distributed claim coordinator, or delivery outbox.
+These limits are intentional V1 boundaries. PostgreSQL provides DLR persistence and delivery fencing; it is not a distributed worker coordinator or a replacement for the router and worker queues.
 
 ## Related Documentation
 
