@@ -14,9 +14,6 @@ public class DlrService {
     @Inject
     DlrStorage storage;
 
-    @Inject
-    ForwardDlrService forwardDlrService;
-
     public void saveInitialState(MessageState state) {
         storage.saveInitialState(state);
     }
@@ -29,47 +26,57 @@ public class DlrService {
         storage.linkProviderMessageId(gatewayMessageId, providerName, providerMessageId);
     }
 
-    public Optional<MessageState> resolveAndRemoveDlr(String providerName, String providerMessageId, int dlrState) {
-        Optional<MessageState> state = storage.resolveAndRemoveDlr(
-                providerName, providerMessageId, mapDlrState(dlrState));
-        state.filter(messageState -> messageState.getForwardDlrUrl() != null)
-                .filter(messageState -> !messageState.getForwardDlrUrl().isEmpty())
-                .ifPresent(forwardDlrService::forwardDlr);
-        return state;
+    public Optional<MessageState> resolveDlr(String providerName, String providerMessageId, int dlrState,
+                                             String errorCode) {
+        if (!isTerminalDlrState(dlrState)) {
+            return Optional.empty();
+        }
+        return storage.resolveDlr(
+                providerName, providerMessageId, mapDlrState(dlrState), dlrState, errorCode);
+    }
+
+    public static boolean isTerminalDlrState(int dlrState) {
+        return dlrState != StandardMessage.DLR_STAT_ACCEPTD &&
+                dlrState != StandardMessage.DLR_STAT_BUFFRED;
     }
 
     public Optional<MessageState> getState(String gatewayMsgId) {
         return storage.getState(gatewayMsgId);
     }
 
-    public boolean markAsFailed(String gatewayMsgId) {
-        return storage.markAsFailed(gatewayMsgId);
+    public List<MessageState> listPendingSmppDeliveries(String systemId) {
+        return storage.listPendingSmppDeliveries(systemId);
     }
 
-    public boolean saveUnpushedDlr(StandardMessage message) {
-        return storage.saveUnpushedDlr(message);
+    public List<MessageState> listDueHttpDeliveries(int limit) {
+        return storage.listDueHttpDeliveries(limit);
     }
 
-    public List<StandardMessage> getUnpushedDlrs(String systemId) {
-        return storage.getUnpushedDlrs(systemId);
+    public Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
+                                                       MessageState.DeliveryChannel expectedChannel) {
+        return storage.startDeliveryAttempt(gatewayMsgId, expectedChannel);
     }
 
-    public List<StandardMessage> claimUnpushedDlrs(String systemId) {
-        return storage.claimUnpushedDlrs(systemId);
+    public boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
+        return storage.completeDelivery(gatewayMsgId, expectedAttempt);
     }
 
-    public boolean removeUnpushedDlr(StandardMessage message) {
-        return storage.removeUnpushedDlr(message);
+    public boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
+        return storage.retryDelivery(gatewayMsgId, expectedAttempt, result, nextAttemptAt);
     }
 
-    public void releaseUnpushedDlrClaim(StandardMessage message) {
-        storage.releaseUnpushedDlrClaim(message);
+    public boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        return storage.failDelivery(gatewayMsgId, expectedAttempt, result);
+    }
+
+    public boolean failInvalidDelivery(String gatewayMsgId, String result) {
+        return storage.failInvalidDelivery(gatewayMsgId, result);
     }
 
     private MessageState.MessageStatus mapDlrState(int dlrState) {
         return switch (dlrState) {
-            case 1, 15 -> MessageState.MessageStatus.DELIVERED;
-            case 5, 9 -> MessageState.MessageStatus.ACCEPTED;
+            case StandardMessage.DLR_STAT_DELIVRD, StandardMessage.DLR_STAT_SEEN ->
+                MessageState.MessageStatus.DELIVERED;
             default -> MessageState.MessageStatus.FAILED;
         };
     }

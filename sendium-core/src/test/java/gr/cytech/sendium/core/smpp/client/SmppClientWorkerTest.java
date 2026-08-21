@@ -91,6 +91,29 @@ class SmppClientWorkerTest {
     }
 
     @Test
+    void parseDlrAndCreateResponse_whenReceiptIsIntermediate_acknowledgesWithoutEnqueuing() throws Exception {
+        CapturingTracker tracker = new CapturingTracker();
+        TestSmppClientWorker worker = new TestSmppClientWorker(
+                new TestConfigurationProvider(), new Queue<>(), tracker);
+
+        for (String state : Set.of("ACCEPTD", "ENROUTE")) {
+            DeliverSm deliverSm = new DeliverSm();
+            deliverSm.setSourceAddress(new Address((byte) 1, (byte) 1, "smsc"));
+            deliverSm.setDestAddress(new Address((byte) 1, (byte) 1, "recipient"));
+            deliverSm.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+            deliverSm.setShortMessage(CharsetUtil.encode(
+                    "id:abc123 sub:001 dlvrd:000 submit date:2401010000 done date: stat:" + state +
+                            " err:000 text:pending",
+                    CharsetUtil.NAME_GSM));
+
+            PduResponse response = worker.parseDlrAndCreateResponse(deliverSm);
+
+            assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
+        }
+        assertThat(tracker.dlrAttempts).isZero();
+    }
+
+    @Test
     void parseDlrAndCreateResponse_whenStorageFails_returnsSystemErrorForProviderRetry() throws Exception {
         CapturingTracker tracker = new CapturingTracker();
         tracker.failDlrCreation = true;
