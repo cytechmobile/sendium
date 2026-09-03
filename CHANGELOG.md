@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/cytechmobile/sendium/compare/v0.4.1...v0.4.2) (2026-09-03)
+
+
+### Documentation
+
+* add quickstart resource requirements ([b3fe37c](https://github.com/cytechmobile/sendium/commit/b3fe37ce60686b179d547a17554dc33c37858f81))
+* add repository agent workflow ([fa9bc2e](https://github.com/cytechmobile/sendium/commit/fa9bc2e54cfcc3bf30236dc6cd511de32ed0b5ac))
+
 ## [0.4.1](https://github.com/cytechmobile/sendium/compare/v0.4.0...v0.4.1) (2026-08-12)
 
 
