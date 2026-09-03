@@ -55,6 +55,7 @@ With over 20 years of experience building high-performance telecommunications so
 
 * Docker with Docker Compose v2.
 * `curl` and a POSIX shell.
+* At least 1 GB of RAM and 2 GB of free disk space. For a more comfortable evaluation, 2 GB of RAM and 5 GB of free disk space are recommended.
 
 ### Generate and Start Sendium
 
