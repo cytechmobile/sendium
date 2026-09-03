@@ -113,7 +113,7 @@ class PostgresqlDlrStorageIT {
         MessageState state = state(MessageState.DeliveryChannel.NONE, "system", null);
         saveAndLink(state, "provider-message");
 
-        MessageState resolved = resolve(state, "provider-message").orElseThrow();
+        MessageState resolved = resolve("provider-message").orElseThrow();
 
         assertThat(resolved.getDlrState()).isEqualTo(StandardMessage.DLR_STAT_DELIVRD);
         assertThat(storage.getState(state.getGatewayMsgId())).isEmpty();
@@ -364,7 +364,7 @@ class PostgresqlDlrStorageIT {
 
     private void saveResolve(MessageState state, String providerMessageId) {
         saveAndLink(state, providerMessageId);
-        resolve(state, providerMessageId).orElseThrow();
+        resolve(providerMessageId).orElseThrow();
     }
 
     private void saveAndLink(MessageState state, String providerMessageId) {
@@ -372,7 +372,7 @@ class PostgresqlDlrStorageIT {
         storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, providerMessageId);
     }
 
-    private Optional<MessageState> resolve(MessageState state, String providerMessageId) {
+    private Optional<MessageState> resolve(String providerMessageId) {
         return storage.resolveDlr(PROVIDER, providerMessageId, MessageState.MessageStatus.DELIVERED,
                 StandardMessage.DLR_STAT_DELIVRD, "000");
     }
