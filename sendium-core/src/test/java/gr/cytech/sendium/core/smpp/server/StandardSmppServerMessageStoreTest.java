@@ -240,7 +240,7 @@ class StandardSmppServerMessageStoreTest {
     }
 
     @Test
-    void persistMessages_WhenPersistenceDisabled_AcknowledgesWithoutStoring() {
+    void persistMessages_WhenPersistenceDisabled_RoutesWithoutStoring() {
         when(workerResources.isDlrPersistenceEnabled()).thenReturn(false);
         List<InEvent<StandardMessage>> events = List.of(event("gw-1", new SubmitSm()));
 
