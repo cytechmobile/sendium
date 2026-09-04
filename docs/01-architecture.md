@@ -127,12 +127,12 @@ sequenceDiagram
     Client->>Server: submit_sm
     Server->>Submit: Validate and convert PDU
     Submit-->>Server: Valid submission event
+    Server-->>Client: Queue submit_sm_resp (gateway UUID)
     Server->>Store: Add event to persistence batch
     Store->>DLR: Persist initial DLR state
     DLR-->>Store: Commit successful
     Store-->>Server: Handle persisted event
     Server->>Queue: Enqueue StandardMessage
-    Server-->>Client: submit_sm_resp
     Router->>Queue: Dequeue and route message
 ```
 
@@ -151,7 +151,7 @@ sequenceDiagram
 
 ## DLR Handling
 
-Outbound HTTP messages can include a Kannel-style `dlr-url`, while downstream SMPP submissions request receipts through `registered_delivery`. Before accepting either submission, Sendium stores one `dlr_message` row containing the gateway message ID and downstream delivery target. After the upstream SMSC returns `submit_sm_resp`, the client worker links that gateway ID to the exact `(provider name, provider message ID)` pair in `provider_correlation`. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
+Outbound HTTP messages can include a Kannel-style `dlr-url`, while downstream SMPP submissions request receipts through `registered_delivery`. HTTP ingress stores one `dlr_message` row before returning `202`; SMPP ingress queues a successful response with its generated gateway UUID immediately after validation, then persists the same state asynchronously before routing. Response transmission and persistence run independently, so PostgreSQL can commit before the client receives the queued response. After the upstream SMSC returns `submit_sm_resp`, the client worker links that gateway ID to the exact `(provider name, provider message ID)` pair in `provider_correlation`. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
 
 Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Link and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged without invoking the tracker or consuming correlation. The first terminal receipt records its exact state and error, consumes every correlation for the gateway message, and either deletes a `NONE` delivery row or retains an HTTP/SMPP row as `PENDING`.
 
@@ -168,11 +168,19 @@ sequenceDiagram
     participant App as Originating HTTP application
     participant SMPPApp as Originating SMPP client
 
-    Ingress->>Service: saveInitialState(gateway message ID)
-    Service->>Database: Insert DLR message
-    Database-->>Service: Commit
-    Service-->>Ingress: State persisted
-    Ingress->>Router: Enqueue accepted message
+    alt HTTP ingress
+        Ingress->>Service: saveInitialState(gateway message ID)
+        Service->>Database: Insert DLR message
+        Database-->>Service: Commit
+        Service-->>Ingress: State persisted
+        Ingress->>Router: Enqueue accepted message
+    else SMPP ingress
+        Ingress-->>SMPPApp: Queue submit_sm_resp (gateway message ID)
+        Ingress->>Service: saveInitialState(gateway message ID)
+        Service->>Database: Insert DLR message
+        Database-->>Service: Commit
+        Ingress->>Router: Enqueue accepted message
+    end
     Router->>Worker: Route outbound message
     Worker->>SMSC: submit_sm
     SMSC-->>Worker: submit_sm_resp(provider message ID)
@@ -256,7 +264,7 @@ Sendium expects runtime files in the configured `conf` directory.
 
 ## Persistence Boundaries
 
-Most runtime queues are in memory. DLR messages, provider correlations, and terminal HTTP/SMPP delivery state use PostgreSQL. Sendium completes the required storage operation before HTTP routing or successful downstream SMPP acknowledgement. Queued and in-flight messages remain process-local.
+Most runtime queues are in memory. DLR messages, provider correlations, and terminal HTTP/SMPP delivery state use PostgreSQL. Sendium persists required state before HTTP routing and acceptance, while downstream SMPP submissions receive a generated UUID before persistence and are routed only after persistence succeeds. Queued and in-flight messages remain process-local.
 
 PostgreSQL does not make multipart assembly or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, and the remaining crash windows.
 
