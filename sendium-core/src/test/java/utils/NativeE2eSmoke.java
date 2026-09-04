@@ -140,7 +140,7 @@ public class NativeE2eSmoke {
             awaitSuccessfulStorageOperation("link_provider");
 
             int boundSessionsBeforeRestart = upstream.boundSessionCount();
-            stopContainer(containerName);
+            require(stopContainer(containerName), "Failed to remove Sendium container before restart");
             Process restartedContainer = startSendiumContainer(containerName, workDir);
             waitForPostgresqlReadiness();
             waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
@@ -323,10 +323,16 @@ public class NativeE2eSmoke {
         }
     }
 
-    private static void stopContainer(String containerName) {
+    private static boolean stopContainer(String containerName) {
         try {
-            run(List.of("docker", "stop", containerName), true).waitFor(30, TimeUnit.SECONDS);
+            Process process = run(List.of("docker", "rm", "--force", containerName), true);
+            if (!process.waitFor(30, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return false;
+            }
+            return process.exitValue() == 0;
         } catch (Exception ignored) {
+            return false;
         }
     }
 
