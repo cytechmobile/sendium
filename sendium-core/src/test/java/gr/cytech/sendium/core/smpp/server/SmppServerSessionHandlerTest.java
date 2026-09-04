@@ -63,6 +63,7 @@ class SmppServerSessionHandlerTest {
 
         // Mock the worker charset to bypass the SmppServerUtil.getMessageBody requirement
         when(worker.getCharsetGsm()).thenReturn(StandardCharsets.UTF_8.toString());
+        when(worker.beginSubmitSm()).thenReturn(true);
 
         // Define the specific error code we expect to be handled
         int expectedErrorCode = SmppConstants.STATUS_INVCMDID;
@@ -84,6 +85,21 @@ class SmppServerSessionHandlerTest {
 
         SubmitSmResp capturedResp = respCaptor.getValue();
         assertThat(capturedResp.getCommandStatus()).isEqualTo(expectedErrorCode);
+        verify(worker).endSubmitSm();
+    }
+
+    @Test
+    void handleSubmitSm_whenWorkerIsStopping_shouldRejectSubmission() {
+        SubmitSm submitSm = new SubmitSm();
+        when(worker.beginSubmitSm()).thenReturn(false);
+
+        handler.handleSubmitSm(submitSm);
+
+        ArgumentCaptor<SubmitSmResp> respCaptor = ArgumentCaptor.forClass(SubmitSmResp.class);
+        verify(worker).enqueueOut(respCaptor.capture());
+        assertThat(respCaptor.getValue().getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
+        verify(worker, never()).endSubmitSm();
+        verifyNoInteractions(submitProcessor);
     }
 
     @Test

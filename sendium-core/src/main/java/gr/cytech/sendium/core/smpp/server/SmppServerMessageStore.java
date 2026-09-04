@@ -23,7 +23,10 @@ public interface SmppServerMessageStore<M extends StandardMessage> {
      */
     Future<Boolean> persistMessages(List<InEvent<M>> eventsQueue);
 
-    default boolean persistsBeforeAcknowledgement() {
+    /**
+     * Whether multipart parts have already been persisted before entering the reassembly handler.
+     */
+    default boolean persistsMultipartPartsBeforeAssembly() {
         return false;
     }
 
