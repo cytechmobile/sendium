@@ -82,7 +82,7 @@ public class StandardSmppServerMessageStore implements SmppServerMessageStore<St
         try {
             getDlrService().saveInitialStates(states);
         } catch (DlrStorageException e) {
-            logger.error("SMPP submission batch rejected: DLR storage unavailable");
+            logger.error("Failed to persist accepted SMPP submission batch: DLR storage unavailable");
             worker.handleMessagePersistenceFailure(eventsQueue);
             return false;
         } catch (Exception e) {
@@ -94,13 +94,8 @@ public class StandardSmppServerMessageStore implements SmppServerMessageStore<St
         return true;
     }
 
-    /**
-     * Acknowledgement and router admission are always deferred to
-     * {@link SmppServerWorker#handlePersistedMessages(List)}, so the worker must drain the ingress queue on shutdown
-     * even when Sendium-owned DLR persistence is disabled and the persist step itself is a no-op.
-     */
     @Override
-    public boolean persistsBeforeAcknowledgement() {
+    public boolean persistsMultipartPartsBeforeAssembly() {
         return true;
     }
 

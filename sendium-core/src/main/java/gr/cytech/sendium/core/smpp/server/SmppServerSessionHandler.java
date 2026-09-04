@@ -420,34 +420,43 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
     }
 
     public void handleSubmitSm(SubmitSm submitSm) {
-        String userId = getAccountId();
-        if (userId == null) {
-            SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_INVSYSID, null);
-            worker.enqueueOut(resp);
+        if (!worker.beginSubmitSm()) {
+            worker.enqueueOut(SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_SYSERR, null));
             return;
         }
 
         try {
-            Timestamp tstamp = validateScheduleDeliveryTime(submitSm);
-            if (tstamp == null) {
+            String userId = getAccountId();
+            if (userId == null) {
+                SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_INVSYSID, null);
+                worker.enqueueOut(resp);
                 return;
             }
 
-            SmppServerUtil.ValidatedMessageBody validatedMessageBody = validateShortMessage(submitSm);
-            if (validatedMessageBody == null) {
-                return;
-            }
+            try {
+                Timestamp tstamp = validateScheduleDeliveryTime(submitSm);
+                if (tstamp == null) {
+                    return;
+                }
 
-            InEvent<M> ine = submitProcessor.processSubmitSm(submitSm, sessionContext, validatedMessageBody, tstamp);
-            worker.enqueueIn(ine);
-        } catch (SmppProcessingException e) {
-            logger.warn("{} error processing submit sm {}", this, MessageTrace.pdu(submitSm), e);
-            SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, e.getErrorCode(), null);
-            worker.enqueueOut(resp);
-        } catch (Exception e) {
-            logger.error("{}: unexpected error processing submit sm {}", this, MessageTrace.pdu(submitSm), e);
-            SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_SYSERR, null);
-            worker.enqueueOut(resp);
+                SmppServerUtil.ValidatedMessageBody validatedMessageBody = validateShortMessage(submitSm);
+                if (validatedMessageBody == null) {
+                    return;
+                }
+
+                InEvent<M> ine = submitProcessor.processSubmitSm(submitSm, sessionContext, validatedMessageBody, tstamp);
+                worker.enqueueIn(ine);
+            } catch (SmppProcessingException e) {
+                logger.warn("{} error processing submit sm {}", this, MessageTrace.pdu(submitSm), e);
+                SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, e.getErrorCode(), null);
+                worker.enqueueOut(resp);
+            } catch (Exception e) {
+                logger.error("{}: unexpected error processing submit sm {}", this, MessageTrace.pdu(submitSm), e);
+                SubmitSmResp resp = SmppServerUtil.createSubmitRsp(submitSm, SmppConstants.STATUS_SYSERR, null);
+                worker.enqueueOut(resp);
+            }
+        } finally {
+            worker.endSubmitSm();
         }
     }
 
