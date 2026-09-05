@@ -2,10 +2,12 @@ package gr.cytech.sendium.core.http;
 
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.MessageState;
+import gr.cytech.sendium.core.worker.PostgresqlDlrQuarkusTestResource;
 import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.StandardOutgoingWorkerHandler;
+import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.spi.CDI;
 import org.junit.jupiter.api.BeforeAll;
@@ -22,9 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
+@QuarkusTestResource(value = PostgresqlDlrQuarkusTestResource.class, restrictToAnnotatedClass = true)
 class KannelResourceIT {
     static StandardOutgoingWorkerHandler outgoingWorkerHandler;
-    static InMemoryDlrService dlrService;
+    static DlrService dlrService;
 
     CaptorWorker captorWorker;
     private final String usernamekannel = "test2";
@@ -34,7 +37,7 @@ class KannelResourceIT {
     @BeforeAll
     static void beforeAll() {
         outgoingWorkerHandler = (StandardOutgoingWorkerHandler) CDI.current().select(OutgoingWorkerManager.class).get();
-        dlrService = CDI.current().select(InMemoryDlrService.class).get();
+        dlrService = CDI.current().select(DlrService.class).get();
     }
 
     @BeforeEach

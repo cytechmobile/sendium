@@ -4,10 +4,11 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.queue.QueueProvider;
 import gr.cytech.sendium.core.smpp.client.SmppClientHolder;
+import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.ForwardMoService;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
 import io.quarkus.arc.DefaultBean;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +26,7 @@ public class WorkerResourceProvider {
 
     @Inject InMemoryQueueProvider queueProvider;
     @Inject CredentialFileWatcher  credentialFileWatcher;
-    @Inject InMemoryDlrService dlrService;
+    @Inject Instance<DlrService> dlrServices;
     @Inject ForwardMoService forwardMoService;
     @Inject SmppClientHolder smppClientHolder;
 
@@ -40,8 +41,20 @@ public class WorkerResourceProvider {
         return credentialFileWatcher;
     }
 
-    public InMemoryDlrService getDlrService() {
-        return dlrService;
+    /**
+     * Whether Sendium owns the DLR persistence lifecycle in this build. Callers on message paths must check this
+     * before {@link #getDlrService()}: an application embedding {@code sendium-core} can leave
+     * {@code sendium.dlr.persistence.enabled} unset and take over DLR tracking itself.
+     */
+    public boolean isDlrPersistenceEnabled() {
+        return !dlrServices.isUnsatisfied();
+    }
+
+    public DlrService getDlrService() {
+        if (dlrServices.isUnsatisfied()) {
+            throw new IllegalStateException("Sendium DLR persistence is disabled");
+        }
+        return dlrServices.get();
     }
 
     public ForwardMoService getForwardMoService() {

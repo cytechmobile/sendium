@@ -1,8 +1,12 @@
 package gr.cytech.sendium.core.smpp.server;
 
+import com.cloudhopper.smpp.PduAsyncResponse;
 import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.SmppSession;
 import com.cloudhopper.smpp.SmppSessionConfiguration;
+import com.cloudhopper.smpp.pdu.DeliverSm;
+import com.cloudhopper.smpp.pdu.DeliverSmResp;
+import com.cloudhopper.smpp.pdu.GenericNack;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.pdu.SubmitSmResp;
 import com.cloudhopper.smpp.tlv.Tlv;
@@ -18,13 +22,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class SmppServerSessionHandlerTest {
@@ -34,6 +37,7 @@ class SmppServerSessionHandlerTest {
     @Mock private SmppSessionContext sessionContext;
     @Mock private SubmitSmProcessor<StandardMessage> submitProcessor;
     @Mock private SmppSessionConfiguration sessionConfiguration;
+    @Mock private SmppServerMessageStore<StandardMessage> messageStore;
 
     private SmppServerSessionHandler<StandardMessage> handler;
 
@@ -59,6 +63,7 @@ class SmppServerSessionHandlerTest {
 
         // Mock the worker charset to bypass the SmppServerUtil.getMessageBody requirement
         when(worker.getCharsetGsm()).thenReturn(StandardCharsets.UTF_8.toString());
+        when(worker.beginSubmitSm()).thenReturn(true);
 
         // Define the specific error code we expect to be handled
         int expectedErrorCode = SmppConstants.STATUS_INVCMDID;
@@ -80,6 +85,21 @@ class SmppServerSessionHandlerTest {
 
         SubmitSmResp capturedResp = respCaptor.getValue();
         assertThat(capturedResp.getCommandStatus()).isEqualTo(expectedErrorCode);
+        verify(worker).endSubmitSm();
+    }
+
+    @Test
+    void handleSubmitSm_whenWorkerIsStopping_shouldRejectSubmission() {
+        SubmitSm submitSm = new SubmitSm();
+        when(worker.beginSubmitSm()).thenReturn(false);
+
+        handler.handleSubmitSm(submitSm);
+
+        ArgumentCaptor<SubmitSmResp> respCaptor = ArgumentCaptor.forClass(SubmitSmResp.class);
+        verify(worker).enqueueOut(respCaptor.capture());
+        assertThat(respCaptor.getValue().getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
+        verify(worker, never()).endSubmitSm();
+        verifyNoInteractions(submitProcessor);
     }
 
     @Test
@@ -152,5 +172,93 @@ class SmppServerSessionHandlerTest {
         verify(worker).enqueueOut(respCaptor.capture());
         assertThat(result).isNull();
         assertThat(respCaptor.getValue().getCommandStatus()).isEqualTo(SmppConstants.STATUS_INVSCHED);
+    }
+
+    @Test
+    void expectedOkDeliverSmResponseCompletesPart() {
+        DlrDeliveryBatch<StandardMessage> batch = batch(1);
+        when(messageStore.completeDlrDeliveryAttempt(any(), eq(1))).thenReturn(true);
+        DeliverSm request = request(batch);
+        DeliverSmResp response = new DeliverSmResp();
+        response.setCommandStatus(SmppConstants.STATUS_OK);
+
+        handler.fireExpectedPduResponseReceived(asyncResponse(request, response));
+
+        verify(messageStore).completeDlrDeliveryAttempt(any(), eq(1));
+    }
+
+    @Test
+    void expectedNonOkDeliverSmResponseReleasesAttempt() {
+        DlrDeliveryBatch<StandardMessage> batch = batch(2);
+        when(messageStore.releaseDlrDeliveryAttempt(any(), eq(2), eq("non_ok_response"))).thenReturn(true);
+        DeliverSm request = request(batch);
+        DeliverSmResp response = new DeliverSmResp();
+        response.setCommandStatus(SmppConstants.STATUS_SYSERR);
+
+        handler.fireExpectedPduResponseReceived(asyncResponse(request, response));
+
+        verify(messageStore).releaseDlrDeliveryAttempt(any(), eq(2), eq("non_ok_response"));
+    }
+
+    @Test
+    void expectedWrongOrGenericResponseReleasesAttempt() {
+        DlrDeliveryBatch<StandardMessage> wrongBatch = batch(3);
+        DlrDeliveryBatch<StandardMessage> nackBatch = batch(4);
+        when(messageStore.releaseDlrDeliveryAttempt(any(), eq(3), eq("wrong_response"))).thenReturn(true);
+        when(messageStore.releaseDlrDeliveryAttempt(any(), eq(4), eq("generic_nack"))).thenReturn(true);
+
+        handler.fireExpectedPduResponseReceived(asyncResponse(request(wrongBatch), new SubmitSmResp()));
+        handler.fireExpectedPduResponseReceived(asyncResponse(request(nackBatch), new GenericNack()));
+
+        verify(messageStore).releaseDlrDeliveryAttempt(any(), eq(3), eq("wrong_response"));
+        verify(messageStore).releaseDlrDeliveryAttempt(any(), eq(4), eq("generic_nack"));
+    }
+
+    @Test
+    void expiredDeliverSmReleasesAttemptWithoutLegacyUpsert() {
+        DlrDeliveryBatch<StandardMessage> batch = batch(5);
+        when(messageStore.releaseDlrDeliveryAttempt(any(), eq(5), eq("timeout"))).thenReturn(true);
+        DeliverSm request = request(batch);
+
+        handler.firePduRequestExpired(request);
+
+        verify(messageStore).releaseDlrDeliveryAttempt(any(), eq(5), eq("timeout"));
+        verify(worker, never()).markAsUnpushed(any());
+    }
+
+    @Test
+    void unexpectedDisconnectReleasesOutstandingBatches() {
+        DlrDeliveryBatch<StandardMessage> batch = batch(6);
+        SmppServerBindHandler<StandardMessage> bindHandler = mock(SmppServerBindHandler.class);
+        ServerConnections connections = mock(ServerConnections.class);
+        when(worker.getBindHandler()).thenReturn(bindHandler);
+        when(bindHandler.getConnections()).thenReturn(connections);
+        when(messageStore.releaseDlrDeliveryAttempt(any(), eq(6), eq("session_closed"))).thenReturn(true);
+        assertThat(handler.registerDlrBatch(batch)).isTrue();
+
+        handler.fireChannelUnexpectedlyClosed();
+
+        verify(messageStore).releaseDlrDeliveryAttempt(any(), eq(6), eq("session_closed"));
+        verify(connections).removeConnection(handler);
+    }
+
+    private DlrDeliveryBatch<StandardMessage> batch(int attempt) {
+        StandardMessage message = new StandardMessage();
+        message.serial = "gateway-" + attempt;
+        message.type = StandardMessage.MSG_DLR;
+        return new DlrDeliveryBatch<>(message, attempt, Set.of(0), messageStore, handler);
+    }
+
+    private DeliverSm request(DlrDeliveryBatch<StandardMessage> batch) {
+        DeliverSm request = new DeliverSm();
+        request.setReferenceObject(new DlrDeliverSmReference<>(handler, batch, 0, "receipt-1"));
+        return request;
+    }
+
+    private PduAsyncResponse asyncResponse(DeliverSm request, com.cloudhopper.smpp.pdu.PduResponse response) {
+        PduAsyncResponse asyncResponse = mock(PduAsyncResponse.class);
+        when(asyncResponse.getRequest()).thenReturn(request);
+        when(asyncResponse.getResponse()).thenReturn(response);
+        return asyncResponse;
     }
 }
