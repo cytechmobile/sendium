@@ -86,19 +86,17 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     @Override
-    public void saveInitialState(MessageState state) {
-        timed("save_initial", () -> delegate.saveInitialState(state));
+    public void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
+        timed("record_provider_accepted", () -> delegate.recordProviderAccepted(
+                state, providerName, providerMessageId));
     }
 
     @Override
-    public void saveInitialStates(List<MessageState> states) {
-        timed("save_initial_batch", () -> delegate.saveInitialStates(states));
-    }
-
-    @Override
-    public void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId) {
-        timed("link_provider", () -> delegate.linkProviderMessageId(
-                gatewayMessageId, providerName, providerMessageId));
+    public Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
+                                                          String providerMessageId, int dlrState,
+                                                          String errorCode) {
+        return timed("record_provider_rejected", () -> delegate.recordProviderRejected(
+                state, providerName, providerMessageId, dlrState, errorCode));
     }
 
     @Override

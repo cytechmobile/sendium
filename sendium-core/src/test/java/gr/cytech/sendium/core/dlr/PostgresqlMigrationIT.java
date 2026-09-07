@@ -57,7 +57,6 @@ class PostgresqlMigrationIT {
             assertThat(loadNames(connection,
                     "SELECT indexname FROM pg_indexes WHERE schemaname = 'sendium_dlr'"))
                     .contains("dlr_message_created_at_idx",
-                            "dlr_message_provider_message_id_idx",
                             "dlr_message_http_due_idx",
                             "dlr_message_smpp_replay_idx",
                             "provider_correlation_created_at_idx",
@@ -91,9 +90,13 @@ class PostgresqlMigrationIT {
     void schemaRejectsInvalidProviderAndDeliveryStates() throws SQLException {
         try (Connection connection = connection()) {
             assertInvalidMessage(connection, "UNKNOWN", "NONE", "WAITING_PROVIDER", 0, null, null);
-            assertInvalidMessage(connection, "ACCEPTED", "MAIL", "WAITING_PROVIDER", 0, null, null);
-            assertInvalidMessage(connection, "ACCEPTED", "NONE", "DONE", 0, null, null);
-            assertInvalidMessage(connection, "ACCEPTED", "NONE", "WAITING_PROVIDER", -1, null, null);
+            assertInvalidMessage(connection, "ACCEPTED", "HTTP", "WAITING_PROVIDER", 0,
+                    "system", "https://example.test/dlr");
+            assertInvalidMessage(connection, "SENT", "MAIL", "WAITING_PROVIDER", 0, null, null);
+            assertInvalidMessage(connection, "SENT", "HTTP", "DONE", 0,
+                    "system", "https://example.test/dlr");
+            assertInvalidMessage(connection, "SENT", "HTTP", "WAITING_PROVIDER", -1,
+                    "system", "https://example.test/dlr");
         }
     }
 
@@ -101,12 +104,12 @@ class PostgresqlMigrationIT {
     void schemaRequiresValidChannelTargets() throws SQLException {
         try (Connection connection = connection()) {
             for (String blank : List.of("", "   ", "\t\n")) {
-                assertInvalidMessage(connection, "ACCEPTED", "HTTP", "WAITING_PROVIDER", 0, "system", blank);
-                assertInvalidMessage(connection, "ACCEPTED", "SMPP", "WAITING_PROVIDER", 0, blank,
+                assertInvalidMessage(connection, "SENT", "HTTP", "WAITING_PROVIDER", 0, "system", blank);
+                assertInvalidMessage(connection, "SENT", "SMPP", "WAITING_PROVIDER", 0, blank,
                         "https://example.test/dlr");
             }
-            assertInvalidMessage(connection, "ACCEPTED", "HTTP", "WAITING_PROVIDER", 0, "system", null);
-            assertInvalidMessage(connection, "ACCEPTED", "SMPP", "WAITING_PROVIDER", 0, null,
+            assertInvalidMessage(connection, "SENT", "HTTP", "WAITING_PROVIDER", 0, "system", null);
+            assertInvalidMessage(connection, "SENT", "SMPP", "WAITING_PROVIDER", 0, null,
                     "https://example.test/dlr");
         }
     }
@@ -134,22 +137,17 @@ class PostgresqlMigrationIT {
     }
 
     @Test
-    void defaultsWaitingProviderWithNoAttempts() throws SQLException {
-        UUID gatewayId = UUID.randomUUID();
+    void schemaRequiresExplicitProviderOutcome() throws SQLException {
         try (Connection connection = connection()) {
-            insertMessage(connection, gatewayId);
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT delivery_channel, delivery_status, delivery_attempt_count
-                    FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?
-                    """)) {
-                statement.setObject(1, gatewayId);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    assertThat(resultSet.next()).isTrue();
-                    assertThat(resultSet.getString("delivery_channel")).isEqualTo("NONE");
-                    assertThat(resultSet.getString("delivery_status")).isEqualTo("WAITING_PROVIDER");
-                    assertThat(resultSet.getInt("delivery_attempt_count")).isZero();
+            assertThatThrownBy(() -> {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO sendium_dlr.dlr_message (gateway_message_id, provider_status)
+                        VALUES (?, 'SENT')
+                        """)) {
+                    statement.setObject(1, UUID.randomUUID());
+                    statement.executeUpdate();
                 }
-            }
+            }).isInstanceOf(SQLException.class);
         }
     }
 
@@ -159,9 +157,9 @@ class PostgresqlMigrationIT {
         assertThatThrownBy(() -> {
             try (PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO sendium_dlr.dlr_message
-                        (gateway_message_id, provider_status, delivery_channel, delivery_status,
-                         delivery_attempt_count, system_id, forward_dlr_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (gateway_message_id, provider_name, provider_message_id, provider_status,
+                         delivery_channel, delivery_status, delivery_attempt_count, system_id, forward_dlr_url)
+                    VALUES (?, 'provider', 'message', ?, ?, ?, ?, ?, ?)
                     """)) {
                 statement.setObject(1, UUID.randomUUID());
                 statement.setString(2, providerStatus);
@@ -177,8 +175,11 @@ class PostgresqlMigrationIT {
 
     private static void insertMessage(Connection connection, UUID gatewayId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO sendium_dlr.dlr_message (gateway_message_id, provider_status)
-                VALUES (?, 'ACCEPTED')
+                INSERT INTO sendium_dlr.dlr_message
+                    (gateway_message_id, provider_name, provider_message_id, provider_status,
+                     delivery_channel, delivery_status, forward_dlr_url)
+                VALUES (?, 'provider', 'message', 'SENT', 'HTTP', 'WAITING_PROVIDER',
+                        'https://example.test/dlr')
                 """)) {
             statement.setObject(1, gatewayId);
             statement.executeUpdate();

@@ -14,7 +14,6 @@ public class InEvent<M extends StandardMessage> {
     public boolean concatenated;
     public boolean waitingForResponse;
     public String responseMessageId;
-    public int persistenceAttempts;
 
     public InEvent(M pMsg, SubmitSm submitSm, int mpid, Timestamp localTimestamp) {
         this(pMsg, submitSm, mpid, localTimestamp, true, null);
@@ -29,7 +28,6 @@ public class InEvent<M extends StandardMessage> {
         this.concatenated = false;
         this.waitingForResponse = waitingForResponse;
         this.responseMessageId = messageId;
-        this.persistenceAttempts = 0;
     }
 
     public String toString() {
@@ -43,7 +41,6 @@ public class InEvent<M extends StandardMessage> {
                 ", concatenated=" + concatenated +
                 ", waitingForResponse=" + waitingForResponse +
                 ", responseMessageId=" + responseMessageId +
-                ", persistenceAttempts=" + persistenceAttempts +
                 '}';
     }
 }

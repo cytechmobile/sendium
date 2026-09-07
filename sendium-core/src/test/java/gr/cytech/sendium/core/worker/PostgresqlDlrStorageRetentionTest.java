@@ -55,7 +55,7 @@ class PostgresqlDlrStorageRetentionTest {
 
     @Test
     void failedRetentionDoesNotFailTheTriggeringOperation() {
-        PostgresqlDlrStorage storage = new PostgresqlDlrStorage(dataSource, 1, 0, ONE_MINUTE_MILLIS);
+        PostgresqlDlrStorage storage = new PostgresqlDlrStorage(dataSource, ONE_MINUTE_MILLIS);
 
         assertThat(storage.getState(UUID.randomUUID().toString())).isEmpty();
         assertThat(retentionAttempts).hasValue(1);
@@ -63,7 +63,7 @@ class PostgresqlDlrStorageRetentionTest {
 
     @Test
     void failedRetentionIsNotRetriedUntilTheNextInterval() {
-        PostgresqlDlrStorage storage = new PostgresqlDlrStorage(dataSource, 1, 0, ONE_MINUTE_MILLIS);
+        PostgresqlDlrStorage storage = new PostgresqlDlrStorage(dataSource, ONE_MINUTE_MILLIS);
 
         for (int call = 0; call < 5; call++) {
             assertThat(storage.getState(UUID.randomUUID().toString())).isEmpty();

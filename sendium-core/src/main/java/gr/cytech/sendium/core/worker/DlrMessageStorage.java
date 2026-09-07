@@ -4,13 +4,11 @@ import java.util.List;
 import java.util.Optional;
 
 public interface DlrMessageStorage {
-    void saveInitialState(MessageState state);
+    void recordProviderAccepted(MessageState state, String providerName, String providerMessageId);
 
-    default void saveInitialStates(List<MessageState> states) {
-        states.forEach(this::saveInitialState);
-    }
-
-    void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId);
+    Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
+                                                   String providerMessageId, int dlrState,
+                                                   String errorCode);
 
     Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
                                       MessageState.MessageStatus status, int dlrState, String errorCode);

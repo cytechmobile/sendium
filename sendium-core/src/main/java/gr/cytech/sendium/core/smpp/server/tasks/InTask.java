@@ -23,14 +23,14 @@ public class InTask<M extends StandardMessage> implements Runnable {
     private final LinkedBlockingQueue<InEvent<M>> inEventsQueue;
     private boolean keepOnRunning;
     private boolean pause;
-    private List<InEvent<M>> storeInDB;
+    private List<InEvent<M>> pendingEvents;
     private List<InEvent<M>> notifyFailure;
 
     public InTask(SmppServerWorker<M> worker) {
         this.worker = worker;
         this.inEventsQueue = worker.getInEventQueue();
 
-        this.storeInDB = new ArrayList<>();
+        this.pendingEvents = new ArrayList<>();
         this.notifyFailure = new ArrayList<>();
 
         keepOnRunning = true;
@@ -92,11 +92,10 @@ public class InTask<M extends StandardMessage> implements Runnable {
             }
         } while (currentBatchSize < maxBatchSize && remainingTime >= 0);
 
-        //if there are messages to be stored in db, dispatch the hard work to the executor
-        if (!storeInDB.isEmpty()) {
-            logger.debug("InTask Batch: {}", storeInDB.size());
-            worker.persistMessagesIn(storeInDB);
-            storeInDB = new ArrayList<>(maxBatchSize + 1);
+        if (!pendingEvents.isEmpty()) {
+            logger.debug("InTask Batch: {}", pendingEvents.size());
+            worker.processIngressMessages(pendingEvents);
+            pendingEvents = new ArrayList<>(maxBatchSize + 1);
         }
 
         if (!notifyFailure.isEmpty()) {
@@ -107,10 +106,9 @@ public class InTask<M extends StandardMessage> implements Runnable {
 
     public void processInEvent(InEvent<M> ine) {
         try {
-            logger.trace("preparing storage for submit_sm: {}", ine.submitSm);
-            storeInDB.add(ine);
+            pendingEvents.add(ine);
         } catch (Exception ex) {
-            logger.error("Exception caught during the batch db insert", ex);
+            logger.error("Exception caught while preparing the ingress batch", ex);
             notifyFailure.add(ine);
         }
     }
@@ -122,11 +120,4 @@ public class InTask<M extends StandardMessage> implements Runnable {
         }
     }
 
-    public List<InEvent<M>> getStoreInDB() {
-        return storeInDB;
-    }
-
-    public List<InEvent<M>> getNotifyFailure() {
-        return notifyFailure;
-    }
 }

@@ -80,7 +80,7 @@ flowchart TD
 
 ## HTTP Submission Flow
 
-The HTTP API exposes a Kannel-compatible `GET /sendsms` endpoint. `KannelResource` validates HTTP credentials from `credentials.yml`, decodes request parameters into a `StandardMessage`, saves initial DLR state with the callback URL when present, and enqueues the message for routing.
+The HTTP API exposes a Kannel-compatible `GET /sendsms` endpoint. `KannelResource` validates HTTP credentials from `credentials.yml`, decodes request parameters into a `StandardMessage`, attaches body-free callback metadata when `dlr-url` is present, and enqueues the message for routing. No PostgreSQL row is created at ingress.
 
 ```mermaid
 sequenceDiagram
@@ -95,15 +95,14 @@ sequenceDiagram
 
     Client->>API: GET /sendsms
     API->>Creds: Validate HTTP credentials
-    API->>DLR: Save initial message state
     API->>Queue: Enqueue StandardMessage
     API-->>Client: 202 Accepted with gateway UUID
     Router->>Queue: Dequeue message
     Router->>Router: Match routing rules
     Router->>Worker: Enqueue to selected worker
     Worker->>SMSC: submit_sm
-    SMSC-->>Worker: submit_sm_resp
-    Worker->>DLR: Link gateway UUID to provider message ID
+    SMSC-->>Worker: submit_sm_resp(provider message ID)
+    Worker->>DLR: Atomically record provider acceptance and correlation
 ```
 
 ## SMPP Server Flow
@@ -116,8 +115,6 @@ sequenceDiagram
     participant Server as SmppServerWorker
     participant Auth as BasicSmppAuthenticationProvider
     participant Submit as BasicSubmitSmProcessor
-    participant Store as SMPP message store
-    participant DLR as DlrStorage
     participant Queue as Router queue
     participant Router as StandardRoutingManager
 
@@ -128,10 +125,6 @@ sequenceDiagram
     Server->>Submit: Validate and convert PDU
     Submit-->>Server: Valid submission event
     Server-->>Client: Queue submit_sm_resp (gateway UUID)
-    Server->>Store: Add event to persistence batch
-    Store->>DLR: Persist initial DLR state
-    DLR-->>Store: Commit successful
-    Store-->>Server: Handle persisted event
     Server->>Queue: Enqueue StandardMessage
     Router->>Queue: Dequeue and route message
 ```
@@ -151,9 +144,9 @@ sequenceDiagram
 
 ## DLR Handling
 
-Outbound HTTP messages can include a Kannel-style `dlr-url`, while downstream SMPP submissions request receipts through `registered_delivery`. HTTP ingress stores one `dlr_message` row before returning `202`; SMPP ingress queues a successful response with its generated gateway UUID immediately after validation, then persists the same state asynchronously before routing. Response transmission and persistence run independently, so PostgreSQL can commit before the client receives the queued response. After the upstream SMSC returns `submit_sm_resp`, the client worker links that gateway ID to the exact `(provider name, provider message ID)` pair in `provider_correlation`. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
+Outbound HTTP messages can include a Kannel-style `dlr-url`, while downstream SMPP submissions request receipts through `registered_delivery`. Ingress carries the body-free return metadata with the in-memory `StandardMessage` and creates no PostgreSQL row. After an upstream SMSC accepts `submit_sm`, the client worker atomically creates the `dlr_message` row and the exact `(provider name, provider message ID)` correlation. An upstream rejection creates a terminal pending-delivery row directly without a correlation. A successful response without a usable provider ID is accepted but cannot be tracked. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
 
-Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Link and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged without invoking the tracker or consuming correlation. The first terminal receipt records its exact state and error, consumes every correlation for the gateway message, and either deletes a `NONE` delivery row or retains an HTTP/SMPP row as `PENDING`.
+Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Acceptance and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged without invoking the tracker or consuming correlation. The first terminal receipt records its exact state and error, consumes every correlation for the gateway message, and retains the HTTP/SMPP row as `PENDING`.
 
 ```mermaid
 sequenceDiagram
@@ -168,25 +161,30 @@ sequenceDiagram
     participant App as Originating HTTP application
     participant SMPPApp as Originating SMPP client
 
-    alt HTTP ingress
-        Ingress->>Service: saveInitialState(gateway message ID)
-        Service->>Database: Insert DLR message
-        Database-->>Service: Commit
-        Service-->>Ingress: State persisted
+    alt HTTP ingress with dlr-url
+        Ingress->>Ingress: Attach HTTP return metadata
         Ingress->>Router: Enqueue accepted message
-    else SMPP ingress
+    else SMPP ingress requesting DLR
+        Ingress->>Ingress: Attach SMPP return metadata
         Ingress-->>SMPPApp: Queue submit_sm_resp (gateway message ID)
-        Ingress->>Service: saveInitialState(gateway message ID)
-        Service->>Database: Insert DLR message
-        Database-->>Service: Commit
         Ingress->>Router: Enqueue accepted message
     end
     Router->>Worker: Route outbound message
     Worker->>SMSC: submit_sm
-    SMSC-->>Worker: submit_sm_resp(provider message ID)
-    Worker->>Tracker: linkProviderMessageId
-    Tracker->>Service: Link gateway ID and provider pair
-    Service->>Database: Lock and upsert provider correlation
+    alt Provider accepts with message ID
+        SMSC-->>Worker: submit_sm_resp success (provider message ID)
+        Worker->>Tracker: recordProviderAccepted
+        Tracker->>Service: Persist return metadata and provider pair
+        Service->>Database: Atomically upsert DLR row and correlation
+    else Provider rejects
+        SMSC-->>Worker: submit_sm_resp failure
+        Worker->>Tracker: recordProviderRejected
+        Tracker->>Service: Persist terminal pending delivery
+        Service->>Database: Upsert DLR row without correlation
+    else Provider accepts without message ID
+        SMSC-->>Worker: submit_sm_resp success
+        Worker->>Worker: Log and skip DLR tracking
+    end
 
     SMSC->>Worker: deliver_sm delivery receipt
     alt ACCEPTD or ENROUTE receipt

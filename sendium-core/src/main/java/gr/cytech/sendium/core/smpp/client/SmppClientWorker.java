@@ -1200,9 +1200,11 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             return;
         }
 
-        String providerMessageId = updateSendStatusAndProviderMessageId(respMessageId, msg);
+        String providerMessageId = getProviderMessageId(respMessageId);
+        msg.extrid = providerMessageId;
         logSubmitResponse(commandStatus, providerMessageId, msg);
         String hashedProviderMessageId = getHashedMessageID(providerMessageId);
+        msg.field1 = hashedProviderMessageId;
 
         String errorCode;
         if (respErrCodeMap != null && !respErrCodeMap.isEmpty()) {
@@ -1213,12 +1215,13 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         try {
-            messageTracker.createAndEnqueueDLR(msg.msgId, providerMessageId, hashedProviderMessageId,
-                    msg.from, msg.to, "" + commandStatus, StandardMessage.DLR_STAT_FAILED, errorCode, null);
+            messageTracker.createAndEnqueueSubmissionFailure(
+                    msg, providerMessageId, hashedProviderMessageId, "" + commandStatus,
+                    StandardMessage.DLR_STAT_FAILED, errorCode, null);
         } catch (DlrStorageException e) {
             // A submit_sm_resp cannot be rejected or retried by this client. Keep the session callback alive and
-            // leave the tracked state for retention rather than losing the upstream connection as well.
-            logger.error("Failed to create submission failure DLR providerMessageId={} {}: {}",
+            // avoid losing the upstream connection as well.
+            logger.error("Failed to persist submission failure DLR providerMessageId={} {}: {}",
                     MessageTrace.value(providerMessageId), MessageTrace.identifiers(msg), e.getMessage());
         }
     }
@@ -1234,12 +1237,11 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         if (msg.msgId < 0) {
             return null;
         }
-        // The message was sent, so record its provider ID against the gateway message ID.
-        final String providerMessageId;
-        if (respMessageId == null || respMessageId.isBlank()) {
-            providerMessageId = getInternalProviderMessageId(msg.msgId);
-        } else {
-            providerMessageId = decodeMessageID(false, respMessageId);
+        // The message was sent, so record its return metadata and provider correlation atomically.
+        final String providerMessageId = getProviderMessageId(respMessageId);
+        if (providerMessageId == null) {
+            logger.warn("Provider accepted message without a usable message ID {}", MessageTrace.identifiers(msg));
+            return null;
         }
         final String hashedProviderMessageId = getHashedMessageID(providerMessageId);
         int size = getThreadCount();
@@ -1249,14 +1251,15 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         } catch (DlrStorageException e) {
             // The SMSC has already produced its response, so there is no protocol acknowledgement available to
             // request a retry. Isolate the storage failure from Cloudhopper's response callback.
-            logger.error("Failed to link provider message ID {} {}: {}",
+            logger.error("Failed to record provider acceptance {} {}: {}",
                     MessageTrace.value(providerMessageId), MessageTrace.identifiers(msg), e.getMessage());
         }
         return providerMessageId;
     }
 
-    public String getInternalProviderMessageId(int msgId) {
-        return getFullName() + "_internal_" + msgId;
+    private String getProviderMessageId(String responseMessageId) {
+        return responseMessageId == null || responseMessageId.isBlank() ?
+                null : decodeMessageID(false, responseMessageId);
     }
 
     protected StandardMessage generateMessageReferenceForSubmitSm(M original, SubmitSm submitSm, String charset) {

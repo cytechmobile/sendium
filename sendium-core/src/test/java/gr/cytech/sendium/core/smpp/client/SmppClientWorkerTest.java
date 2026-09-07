@@ -269,7 +269,7 @@ class SmppClientWorkerTest {
     }
 
     @Test
-    void updateSendStatusAndProviderMessageId_whenResponseIdIsBlank_usesInternalId() {
+    void updateSendStatusAndProviderMessageId_whenResponseIdIsBlank_skipsTracking() {
         CapturingTracker tracker = new CapturingTracker();
         TestSmppClientWorker worker = new TestSmppClientWorker(
                 new TestConfigurationProvider(), new Queue<>(), tracker);
@@ -278,14 +278,13 @@ class SmppClientWorkerTest {
 
         String providerMessageId = worker.updateSendStatusAndProviderMessageId("   ", msg);
 
-        assertThat(providerMessageId).isEqualTo("smppclient.test_internal_17");
-        assertThat(tracker.linkAttempts).isEqualTo(1);
+        assertThat(providerMessageId).isNull();
+        assertThat(tracker.linkAttempts).isZero();
     }
 
     @Test
     void failMessage_whenStorageFails_attemptsDlrWithoutEscapingCallback() {
         CapturingTracker tracker = new CapturingTracker();
-        tracker.failProviderLink = true;
         tracker.failDlrCreation = true;
         TestSmppClientWorker worker = new TestSmppClientWorker(
                 new TestConfigurationProvider(), new Queue<>(), tracker);
@@ -294,7 +293,7 @@ class SmppClientWorkerTest {
 
         worker.failMessage(SmppConstants.STATUS_INVMSGLEN, "smsc-17", msg);
 
-        assertThat(tracker.linkAttempts).isEqualTo(1);
+        assertThat(tracker.linkAttempts).isZero();
         assertThat(tracker.dlrAttempts).isEqualTo(1);
     }
 
@@ -433,6 +432,24 @@ class SmppClientWorkerTest {
             this.dlrProviderMessageId = providerMessageId;
             this.dlrFrom = from;
             this.dlrTo = to;
+            this.dlrState = state;
+            this.dlrErrorCode = errorCode;
+            this.dlrTlvs = tlvs;
+        }
+
+        @Override
+        public void createAndEnqueueSubmissionFailure(StandardMessage message, String providerMessageId,
+                                                       String hashedProviderMessageId, String body,
+                                                       int state, String errorCode,
+                                                       HashMap<String, String> tlvs) {
+            dlrAttempts++;
+            if (failDlrCreation) {
+                throw new DlrStorageException("Failed to persist submission failure DLR");
+            }
+            this.dlrMqId = message.msgId;
+            this.dlrProviderMessageId = providerMessageId;
+            this.dlrFrom = message.from;
+            this.dlrTo = message.to;
             this.dlrState = state;
             this.dlrErrorCode = errorCode;
             this.dlrTlvs = tlvs;
