@@ -1,6 +1,7 @@
 // CHECKSTYLE:OFF
 package gr.cytech.sendium.core.message;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import org.slf4j.Logger;
@@ -279,6 +280,8 @@ public class StandardMessage implements Comparable<StandardMessage>, CoreMessage
     public int smsSubmitCnt;
     public Map<String, Object> attrs;
     public ArrayList<String> reassembledParts;
+    @JsonIgnore
+    public DlrReturnMetadata dlrReturnMetadata;
     public HashMap<String, String> tlvs;
     public int dispatchType;
     public String hlrRoute;

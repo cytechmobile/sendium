@@ -28,5 +28,14 @@ public interface Tracker<M extends StandardMessage> {
                              String from, String to, String body, int state, String errorCode,
                              HashMap<String, String> tlvs);
 
+    default void createAndEnqueueSubmissionFailure(M message, String providerMessageId,
+                                                    String hashedProviderMessageId, String body,
+                                                    int state, String errorCode,
+                                                    HashMap<String, String> tlvs) {
+        updateSendStatusAndExtID(hashedProviderMessageId, message, providerMessageId);
+        createAndEnqueueDLR(message.msgId, providerMessageId, hashedProviderMessageId,
+                message.from, message.to, body, state, errorCode, tlvs);
+    }
+
     int getConfiguredMccMnc();
 }

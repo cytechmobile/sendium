@@ -137,7 +137,7 @@ public class NativeE2eSmoke {
             require(!gatewayId.isBlank(), "HTTP /sendsms did not return a gateway message id");
             require(upstream.awaitSubmitCount(expectedSubmitCount),
                     "Upstream SMPP server did not receive the HTTP-originated message");
-            awaitSuccessfulStorageOperation("link_provider");
+            awaitSuccessfulStorageOperation("record_provider_accepted");
 
             int boundSessionsBeforeRestart = upstream.boundSessionCount();
             require(stopContainer(containerName), "Failed to remove Sendium container before restart");

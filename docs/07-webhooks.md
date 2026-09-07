@@ -4,7 +4,7 @@ Sendium can call external HTTP endpoints for delivery receipts and mobile-origin
 
 ## Delivery Receipt Callbacks
 
-HTTP submissions can include a `dlr-url` query parameter. Sendium stores the callback URL with the submitted message and calls it for the first terminal provider outcome. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
+HTTP submissions can include a `dlr-url` query parameter. Sendium carries the callback URL as body-free metadata on the in-memory message, persists it only after the upstream provider accepts or rejects the submission, and calls it for the first terminal provider outcome. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
 
 Example HTTP submission:
 

@@ -70,26 +70,113 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
-    void initialStateRoundTripsAndDefaultsToNoDelivery() {
-        MessageState state = state(MessageState.DeliveryChannel.NONE, "system", null);
+    void providerAcceptanceCreatesWaitingStateAndCorrelationTogether() throws SQLException {
+        MessageState state = state(
+                MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
         state.setReassembledParts(List.of("part-1", "part-2"));
 
-        storage.saveInitialState(state);
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-1");
 
-        assertThat(storage.getState(state.getGatewayMsgId()))
+        assertThat(storage.getState(state.getGatewayMsgId())).get().satisfies(actual -> {
+            assertThat(actual.getStatus()).isEqualTo(MessageState.MessageStatus.SENT);
+            assertThat(actual.getProviderName()).isEqualTo(PROVIDER);
+            assertThat(actual.getProviderMessageId()).isEqualTo("provider-message-1");
+            assertThat(actual.getDeliveryStatus()).isEqualTo(MessageState.DeliveryStatus.WAITING_PROVIDER);
+            assertThat(actual.getReassembledParts()).containsExactly("part-1", "part-2");
+        });
+        assertThat(countCorrelations(state.getGatewayMsgId())).isOne();
+    }
+
+    @Test
+    void additionalProviderAcceptancePreservesEarlierCorrelation() throws SQLException {
+        MessageState state = state(
+                MessageState.DeliveryChannel.SMPP, "system", null);
+
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-1");
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-2");
+
+        assertThat(countCorrelations(state.getGatewayMsgId())).isEqualTo(2);
+        assertThat(resolve("provider-message-1")).isPresent();
+        assertThat(resolve("provider-message-2")).isEmpty();
+    }
+
+    @Test
+    void reusedProviderCorrelationMovesToNewestMessage() throws SQLException {
+        MessageState first = state(MessageState.DeliveryChannel.SMPP, "system", null);
+        MessageState newest = state(MessageState.DeliveryChannel.SMPP, "system", null);
+
+        storage.recordProviderAccepted(first, PROVIDER, "reused-provider-message");
+        storage.recordProviderAccepted(newest, PROVIDER, "reused-provider-message");
+
+        assertThat(storage.getState(first.getGatewayMsgId())).get().satisfies(previous -> {
+            assertThat(previous.getProviderName()).isNull();
+            assertThat(previous.getProviderMessageId()).isNull();
+        });
+        assertThat(countCorrelations(first.getGatewayMsgId())).isZero();
+        assertThat(countCorrelations(newest.getGatewayMsgId())).isOne();
+        assertThat(resolve("reused-provider-message"))
                 .get()
-                .usingRecursiveComparison()
-                .isEqualTo(state);
-        assertThat(state.getDeliveryStatus()).isEqualTo(MessageState.DeliveryStatus.WAITING_PROVIDER);
-        assertThat(state.getDeliveryAttemptCount()).isZero();
+                .extracting(MessageState::getGatewayMsgId)
+                .isEqualTo(newest.getGatewayMsgId());
+    }
+
+    @Test
+    void providerRejectionCreatesPendingDeliveryWithoutCorrelation() throws SQLException {
+        MessageState state = state(
+                MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
+
+        Optional<MessageState> rejected = storage.recordProviderRejected(
+                state, PROVIDER, "rejected-provider-message",
+                StandardMessage.DLR_STAT_FAILED, "22");
+
+        assertThat(rejected).get().satisfies(actual -> {
+            assertThat(actual.getStatus()).isEqualTo(MessageState.MessageStatus.FAILED);
+            assertThat(actual.getProviderName()).isEqualTo(PROVIDER);
+            assertThat(actual.getProviderMessageId()).isEqualTo("rejected-provider-message");
+            assertThat(actual.getDlrState()).isEqualTo(StandardMessage.DLR_STAT_FAILED);
+            assertThat(actual.getErrorCode()).isEqualTo("22");
+            assertThat(actual.getDeliveryStatus()).isEqualTo(MessageState.DeliveryStatus.PENDING);
+            assertThat(actual.getResolvedAt()).isNotNull();
+            assertThat(actual.getNextAttemptAt()).isNotNull();
+        });
+        assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
+    }
+
+    @Test
+    void providerRejectionWithoutMessageIdStoresNoProviderPair() throws SQLException {
+        MessageState state = state(MessageState.DeliveryChannel.SMPP, "system", null);
+
+        Optional<MessageState> rejected = storage.recordProviderRejected(
+                state, PROVIDER, null, StandardMessage.DLR_STAT_FAILED, "22");
+
+        assertThat(rejected).get().satisfies(actual -> {
+            assertThat(actual.getProviderName()).isNull();
+            assertThat(actual.getProviderMessageId()).isNull();
+            assertThat(actual.getNextAttemptAt()).isNull();
+        });
+        assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
+    }
+
+    @Test
+    void providerRejectionConsumesExistingCorrelationsAndDoesNotRepeat() throws SQLException {
+        MessageState state = state(MessageState.DeliveryChannel.SMPP, "system", null);
+        storage.recordProviderAccepted(state, PROVIDER, "accepted-part");
+
+        Optional<MessageState> rejected = storage.recordProviderRejected(
+                state, PROVIDER, "rejected-part", StandardMessage.DLR_STAT_FAILED, "22");
+        Optional<MessageState> duplicate = storage.recordProviderRejected(
+                state, PROVIDER, "rejected-part", StandardMessage.DLR_STAT_FAILED, "22");
+
+        assertThat(rejected).isPresent();
+        assertThat(duplicate).isEmpty();
+        assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
     }
 
     @Test
     void terminalHttpStateIsRetainedWithExactOutcomeAndAllCorrelationsConsumed() throws SQLException {
         MessageState state = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
-        storage.saveInitialState(state);
-        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-1");
-        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-2");
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-1");
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-2");
 
         Optional<MessageState> resolved = storage.resolveDlr(PROVIDER, "provider-message-1",
                 MessageState.MessageStatus.FAILED, StandardMessage.DLR_STAT_REJECTD, "  exact-101  ");
@@ -106,18 +193,6 @@ class PostgresqlDlrStorageIT {
         assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
         assertThat(storage.resolveDlr(PROVIDER, "provider-message-2", MessageState.MessageStatus.DELIVERED,
                 StandardMessage.DLR_STAT_DELIVRD, "000")).isEmpty();
-    }
-
-    @Test
-    void terminalStateWithoutDeliveryChannelIsDeletedAfterResolution() throws SQLException {
-        MessageState state = state(MessageState.DeliveryChannel.NONE, "system", null);
-        saveAndLink(state, "provider-message");
-
-        MessageState resolved = resolve("provider-message").orElseThrow();
-
-        assertThat(resolved.getDlrState()).isEqualTo(StandardMessage.DLR_STAT_DELIVRD);
-        assertThat(storage.getState(state.getGatewayMsgId())).isEmpty();
-        assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
     }
 
     @Test
@@ -262,18 +337,15 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
-    void initialSaveAndLinkCannotOverwriteOrRelinkTerminalRow() throws SQLException {
+    void providerAcceptanceCannotOverwriteTerminalRow() throws SQLException {
         MessageState terminal = pendingHttp("terminal-guard");
         MessageState replacement = new MessageState(terminal.getGatewayMsgId(), "replacement-account",
                 "replacement-system", "replacement-source", "replacement-destination",
                 "https://example.test/replacement");
         replacement.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
 
-        storage.saveInitialState(replacement);
-        PostgresqlDlrStorage noRetryStorage = new PostgresqlDlrStorage(dataSource, 1, 0);
-
-        assertThatThrownBy(() -> noRetryStorage.linkProviderMessageId(
-                terminal.getGatewayMsgId(), PROVIDER, "new-provider-message"))
+        assertThatThrownBy(() -> storage.recordProviderAccepted(
+                replacement, PROVIDER, "new-provider-message"))
                 .isInstanceOf(DlrStorageException.class);
         assertThat(storage.getState(terminal.getGatewayMsgId())).get().satisfies(actual -> {
             assertThat(actual.getAccountId()).isEqualTo(terminal.getAccountId());
@@ -286,7 +358,7 @@ class PostgresqlDlrStorageIT {
     @Test
     void retentionUsesCreatedAtWhileWaitingAndResolvedAtAfterResolution() throws SQLException {
         MessageState oldWaiting = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/waiting");
-        storage.saveInitialState(oldWaiting);
+        storage.recordProviderAccepted(oldWaiting, PROVIDER, "old-waiting");
         setCreatedAt(oldWaiting.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '8 days'");
 
         MessageState freshPendingWithOldCreation = pendingHttp("fresh-pending");
@@ -302,7 +374,7 @@ class PostgresqlDlrStorageIT {
         storage.failInvalidDelivery(oldFailed.getGatewayMsgId(), "invalid");
         setResolvedAt(oldFailed.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '8 days'");
 
-        PostgresqlDlrStorage cleanup = new PostgresqlDlrStorage(dataSource, 1, 0, 0);
+        PostgresqlDlrStorage cleanup = new PostgresqlDlrStorage(dataSource, 0);
         cleanup.getState(freshPendingWithOldCreation.getGatewayMsgId());
 
         assertThat(cleanup.getState(oldWaiting.getGatewayMsgId())).isEmpty();
@@ -315,7 +387,7 @@ class PostgresqlDlrStorageIT {
     @Test
     void correlationRetentionRemainsThreeDays() throws SQLException {
         MessageState state = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
-        saveAndLink(state, "old-correlation");
+        acceptProviderMessage(state, "old-correlation");
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      UPDATE sendium_dlr.provider_correlation
@@ -327,7 +399,7 @@ class PostgresqlDlrStorageIT {
             statement.executeUpdate();
         }
 
-        PostgresqlDlrStorage cleanup = new PostgresqlDlrStorage(dataSource, 1, 0, 0);
+        PostgresqlDlrStorage cleanup = new PostgresqlDlrStorage(dataSource, 0);
         assertThat(cleanup.getState(state.getGatewayMsgId())).isPresent();
         assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
     }
@@ -335,9 +407,8 @@ class PostgresqlDlrStorageIT {
     @Test
     void concurrentTerminalReceiptsResolveMessageOnlyOnce() throws Exception {
         MessageState state = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
-        storage.saveInitialState(state);
-        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-1");
-        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, "provider-message-2");
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-1");
+        storage.recordProviderAccepted(state, PROVIDER, "provider-message-2");
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -363,13 +434,12 @@ class PostgresqlDlrStorageIT {
     }
 
     private void saveResolve(MessageState state, String providerMessageId) {
-        saveAndLink(state, providerMessageId);
+        acceptProviderMessage(state, providerMessageId);
         resolve(providerMessageId).orElseThrow();
     }
 
-    private void saveAndLink(MessageState state, String providerMessageId) {
-        storage.saveInitialState(state);
-        storage.linkProviderMessageId(state.getGatewayMsgId(), PROVIDER, providerMessageId);
+    private void acceptProviderMessage(MessageState state, String providerMessageId) {
+        storage.recordProviderAccepted(state, PROVIDER, providerMessageId);
     }
 
     private Optional<MessageState> resolve(String providerMessageId) {

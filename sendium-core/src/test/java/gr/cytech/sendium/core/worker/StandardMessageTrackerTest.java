@@ -1,6 +1,7 @@
 package gr.cytech.sendium.core.worker;
 
 import gr.cytech.sendium.core.AbstractOutWorker;
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,11 +50,21 @@ class StandardMessageTrackerTest {
     void updateSendStatusAndExtID_WithValidIds_Returns1() {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = "gw-123";
+        pMsg.reassembledParts = new ArrayList<>(List.of("part-1", "part-2"));
+        pMsg.dlrReturnMetadata = DlrReturnMetadata.smpp(
+                "accountId", "systemId", "from", "to");
 
         int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456");
 
         assertEquals(1, result);
-        verify(dlrService).linkProviderMessageId("gw-123", "provider-1", "provider-message-456");
+        ArgumentCaptor<MessageState> captor = ArgumentCaptor.forClass(MessageState.class);
+        verify(dlrService).recordProviderAccepted(
+                captor.capture(), eq("provider-1"), eq("provider-message-456"));
+        assertEquals("gw-123", captor.getValue().getGatewayMsgId());
+        assertEquals("accountId", captor.getValue().getAccountId());
+        assertEquals("systemId", captor.getValue().getSystemId());
+        assertEquals(MessageState.DeliveryChannel.SMPP, captor.getValue().getDeliveryChannel());
+        assertEquals(List.of("part-1", "part-2"), captor.getValue().getReassembledParts());
     }
 
     @Test
@@ -64,7 +75,7 @@ class StandardMessageTrackerTest {
         int result = tracker.updateSendStatusAndExtID(null, pMsg, "provider-message-456");
 
         assertEquals(0, result);
-        verify(dlrService, never()).linkProviderMessageId(any(), any(), any());
+        verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
     }
 
     @Test
@@ -75,15 +86,18 @@ class StandardMessageTrackerTest {
         int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, null);
 
         assertEquals(0, result);
-        verify(dlrService, never()).linkProviderMessageId(any(), any(), any());
+        verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
     }
 
     @Test
     void updateSendStatusAndExtID_WhenStorageFails_PropagatesToProtocolBoundary() {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = "gw-123";
+        pMsg.dlrReturnMetadata = DlrReturnMetadata.smpp(
+                "accountId", "systemId", "from", "to");
         doThrow(new DlrStorageException("Failed to link provider DLR ID"))
-                .when(dlrService).linkProviderMessageId("gw-123", "provider-1", "provider-message-456");
+                .when(dlrService).recordProviderAccepted(
+                        any(MessageState.class), eq("provider-1"), eq("provider-message-456"));
 
         assertThrows(DlrStorageException.class,
                 () -> tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456"));
@@ -99,6 +113,58 @@ class StandardMessageTrackerTest {
 
         assertEquals(0, result);
         verify(workerResources, never()).getDlrService();
+    }
+
+    @Test
+    void updateSendStatusAndExtID_WithoutReturnMetadata_SkipsPersistence() {
+        StandardMessage pMsg = new StandardMessage();
+        pMsg.serial = "gw-123";
+
+        int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456");
+
+        assertEquals(0, result);
+        verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
+    }
+
+    @Test
+    void submissionFailure_PersistsAndEnqueuesSmppDlr() throws InterruptedException {
+        StandardMessage message = new StandardMessage();
+        message.serial = "gw-123";
+        message.dlrReturnMetadata = DlrReturnMetadata.smpp(
+                "accountId", "systemId", "from", "to");
+        MessageState rejected = new MessageState(
+                "gw-123", "accountId", "systemId", "from", "to", null);
+        rejected.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        when(dlrService.recordProviderRejected(any(), eq("provider-1"), eq("provider-message-456"),
+                eq(StandardMessage.DLR_STAT_FAILED), eq("22"))).thenReturn(java.util.Optional.of(rejected));
+
+        tracker.createAndEnqueueSubmissionFailure(message, "provider-message-456", "hash",
+                "5", StandardMessage.DLR_STAT_FAILED, "22", null);
+
+        ArgumentCaptor<StandardMessage> captor = ArgumentCaptor.forClass(StandardMessage.class);
+        verify(outWorker).enqueueToRouter(captor.capture());
+        assertEquals(StandardMessage.MSG_DLR, captor.getValue().type);
+        assertEquals("gw-123", captor.getValue().serial);
+        assertEquals("5", captor.getValue().body);
+        assertEquals("22", captor.getValue().errcode);
+    }
+
+    @Test
+    void submissionFailure_PersistsHttpDlrWithoutRouterEnqueue() throws InterruptedException {
+        StandardMessage message = new StandardMessage();
+        message.serial = "gw-http";
+        message.dlrReturnMetadata = DlrReturnMetadata.http(
+                "accountId", "from", "to", "https://example.test/dlr");
+        MessageState rejected = new MessageState(
+                "gw-http", "accountId", "accountId", "from", "to", "https://example.test/dlr");
+        rejected.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
+        when(dlrService.recordProviderRejected(any(), eq("provider-1"), isNull(),
+                eq(StandardMessage.DLR_STAT_FAILED), eq("22"))).thenReturn(java.util.Optional.of(rejected));
+
+        tracker.createAndEnqueueSubmissionFailure(message, null, "",
+                "5", StandardMessage.DLR_STAT_FAILED, "22", null);
+
+        verify(outWorker, never()).enqueueToRouter(any());
     }
 
     @Test

@@ -13,8 +13,8 @@ CREATE TABLE sendium_dlr.dlr_message (
     provider_status TEXT NOT NULL,
     dlr_state INTEGER,
     error_code TEXT,
-    delivery_channel TEXT NOT NULL DEFAULT 'NONE',
-    delivery_status TEXT NOT NULL DEFAULT 'WAITING_PROVIDER',
+    delivery_channel TEXT NOT NULL,
+    delivery_status TEXT NOT NULL,
     delivery_attempt_count INTEGER NOT NULL DEFAULT 0,
     last_attempt_at TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
@@ -29,9 +29,9 @@ CREATE TABLE sendium_dlr.dlr_message (
     CONSTRAINT dlr_message_provider_message_id_not_blank
         CHECK (provider_message_id IS NULL OR provider_message_id !~ '^[[:space:]]*$'),
     CONSTRAINT dlr_message_provider_status_check
-        CHECK (provider_status IN ('ACCEPTED', 'SENT', 'DELIVERED', 'FAILED')),
+        CHECK (provider_status IN ('SENT', 'DELIVERED', 'FAILED')),
     CONSTRAINT dlr_message_delivery_channel_check
-        CHECK (delivery_channel IN ('NONE', 'HTTP', 'SMPP')),
+        CHECK (delivery_channel IN ('HTTP', 'SMPP')),
     CONSTRAINT dlr_message_delivery_status_check
         CHECK (delivery_status IN ('WAITING_PROVIDER', 'PENDING', 'FAILED')),
     CONSTRAINT dlr_message_delivery_attempt_count_check
@@ -41,15 +41,18 @@ CREATE TABLE sendium_dlr.dlr_message (
                (forward_dlr_url IS NOT NULL AND forward_dlr_url !~ '^[[:space:]]*$')),
     CONSTRAINT dlr_message_smpp_system_id_check
         CHECK (delivery_channel <> 'SMPP' OR
-               (system_id IS NOT NULL AND system_id !~ '^[[:space:]]*$'))
+               (system_id IS NOT NULL AND system_id !~ '^[[:space:]]*$')),
+    CONSTRAINT dlr_message_provider_outcome_check
+        CHECK ((provider_status = 'SENT' AND delivery_status = 'WAITING_PROVIDER'
+                    AND dlr_state IS NULL AND resolved_at IS NULL
+                    AND delivery_attempt_count = 0)
+               OR (provider_status IN ('DELIVERED', 'FAILED')
+                    AND delivery_status IN ('PENDING', 'FAILED')
+                    AND dlr_state IS NOT NULL AND resolved_at IS NOT NULL))
 );
 
 CREATE INDEX dlr_message_created_at_idx
     ON sendium_dlr.dlr_message (created_at);
-
-CREATE INDEX dlr_message_provider_message_id_idx
-    ON sendium_dlr.dlr_message (provider_name, provider_message_id)
-    WHERE provider_message_id IS NOT NULL;
 
 CREATE INDEX dlr_message_http_due_idx
     ON sendium_dlr.dlr_message (next_attempt_at)

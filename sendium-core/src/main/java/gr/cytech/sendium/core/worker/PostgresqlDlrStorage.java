@@ -16,9 +16,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -29,8 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PostgresqlDlrStorage implements DlrStorage {
     private static final Logger logger = LoggerFactory.getLogger(PostgresqlDlrStorage.class);
 
-    private static final int DEFAULT_LINK_MAX_ATTEMPTS = 20;
-    private static final long DEFAULT_LINK_RETRY_INTERVAL_MILLIS = 200;
     private static final long EXPIRY_CHECK_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(1);
     private static final int MAX_DELIVERY_BATCH_SIZE = 1_000;
     private static final int STARTING_ATTEMPT = -1;
@@ -42,7 +38,28 @@ public class PostgresqlDlrStorage implements DlrStorage {
             last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at
             """;
 
-    private static final String SAVE_INITIAL_STATE_SQL = """
+    private static final String RECORD_PROVIDER_ACCEPTED_SQL = """
+            INSERT INTO sendium_dlr.dlr_message
+                (gateway_message_id, account_id, system_id, source_address, destination_address,
+                 provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
+                 dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
+                 last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (gateway_message_id) DO UPDATE SET
+                account_id = EXCLUDED.account_id,
+                system_id = EXCLUDED.system_id,
+                source_address = EXCLUDED.source_address,
+                destination_address = EXCLUDED.destination_address,
+                provider_name = EXCLUDED.provider_name,
+                provider_message_id = EXCLUDED.provider_message_id,
+                forward_dlr_url = EXCLUDED.forward_dlr_url,
+                reassembled_parts = EXCLUDED.reassembled_parts,
+                provider_status = EXCLUDED.provider_status,
+                updated_at = EXCLUDED.updated_at
+            WHERE dlr_message.delivery_status = 'WAITING_PROVIDER'
+            """;
+
+    private static final String RECORD_PROVIDER_REJECTED_SQL = """
             INSERT INTO sendium_dlr.dlr_message
                 (gateway_message_id, account_id, system_id, source_address, destination_address,
                  provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
@@ -68,17 +85,10 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 next_attempt_at = EXCLUDED.next_attempt_at,
                 last_delivery_result = EXCLUDED.last_delivery_result,
                 resolved_at = EXCLUDED.resolved_at,
-                created_at = CURRENT_TIMESTAMP,
                 updated_at = EXCLUDED.updated_at
             WHERE dlr_message.delivery_status = 'WAITING_PROVIDER'
-            """;
-
-    private static final String LINK_MESSAGE_SQL = """
-            UPDATE sendium_dlr.dlr_message
-            SET provider_name = ?, provider_message_id = ?, provider_status = 'SENT',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE gateway_message_id = ? AND delivery_status = 'WAITING_PROVIDER'
-            """;
+            RETURNING %s
+            """.formatted(STATE_COLUMNS);
 
     private static final String LOCK_MESSAGE_SQL = """
             SELECT 1
@@ -140,11 +150,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
             WHERE gateway_message_id = ? AND delivery_status = 'WAITING_PROVIDER'
             RETURNING %s
             """.formatted(STATE_COLUMNS);
-
-    private static final String DELETE_STATE_SQL = """
-            DELETE FROM sendium_dlr.dlr_message
-            WHERE gateway_message_id = ?
-            """;
 
     private static final String LIST_PENDING_SMPP_SQL = """
             SELECT %s
@@ -218,113 +223,128 @@ public class PostgresqlDlrStorage implements DlrStorage {
             """;
 
     private final DataSource dataSource;
-    private final int linkMaxAttempts;
-    private final long linkRetryIntervalMillis;
     private final long expiryCheckIntervalMillis;
     private final ConcurrentHashMap<UUID, Integer> activeDeliveryAttempts = new ConcurrentHashMap<>();
     private final AtomicBoolean expiryInProgress = new AtomicBoolean();
     private volatile long lastExpiryCheck;
 
     public PostgresqlDlrStorage(DataSource dataSource) {
-        this(dataSource, DEFAULT_LINK_MAX_ATTEMPTS, DEFAULT_LINK_RETRY_INTERVAL_MILLIS,
-                EXPIRY_CHECK_INTERVAL_MILLIS);
+        this(dataSource, EXPIRY_CHECK_INTERVAL_MILLIS);
     }
 
-    PostgresqlDlrStorage(DataSource dataSource, int linkMaxAttempts,
-                         long linkRetryIntervalMillis) {
-        this(dataSource, linkMaxAttempts, linkRetryIntervalMillis, EXPIRY_CHECK_INTERVAL_MILLIS);
-    }
-
-    PostgresqlDlrStorage(DataSource dataSource, int linkMaxAttempts,
-                         long linkRetryIntervalMillis, long expiryCheckIntervalMillis) {
+    PostgresqlDlrStorage(DataSource dataSource, long expiryCheckIntervalMillis) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
-        if (linkMaxAttempts < 1 || linkRetryIntervalMillis < 0 || expiryCheckIntervalMillis < 0) {
-            throw new IllegalArgumentException("Invalid storage retry or expiry policy");
+        if (expiryCheckIntervalMillis < 0) {
+            throw new IllegalArgumentException("Invalid expiry policy");
         }
-        this.linkMaxAttempts = linkMaxAttempts;
-        this.linkRetryIntervalMillis = linkRetryIntervalMillis;
         this.expiryCheckIntervalMillis = expiryCheckIntervalMillis;
     }
 
     @Override
-    public void saveInitialState(MessageState state) {
-        saveInitialStates(List.of(state));
-    }
-
-    @Override
-    public void saveInitialStates(List<MessageState> states) {
-        Objects.requireNonNull(states, "states");
-        if (states.isEmpty()) {
-            return;
-        }
-
-        Map<UUID, MessageState> finalStatesByGateway = new LinkedHashMap<>();
-        for (MessageState state : states) {
-            Objects.requireNonNull(state, "state");
-            validateState(state);
-            UUID gatewayMsgId = parseGatewayId(state.getGatewayMsgId());
-            finalStatesByGateway.remove(gatewayMsgId);
-            finalStatesByGateway.put(gatewayMsgId, state);
-        }
+    public void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
+        Objects.requireNonNull(state, "state");
+        requireCorrelation(providerName, providerMessageId);
+        state.setProviderName(providerName);
+        state.setProviderMessageId(providerMessageId);
+        state.setStatus(MessageState.MessageStatus.SENT);
+        state.setDeliveryStatus(MessageState.DeliveryStatus.WAITING_PROVIDER);
+        state.setDlrState(null);
+        state.setErrorCode(null);
+        state.setLastAttemptAt(null);
+        state.setNextAttemptAt(null);
+        state.setLastDeliveryResult(null);
+        state.setResolvedAt(null);
+        state.setTimestamp(System.currentTimeMillis());
+        validateState(state);
+        UUID gatewayMessageId = parseGatewayId(state.getGatewayMsgId());
         checkExpiry();
 
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
-                List<Map.Entry<UUID, MessageState>> entries = new ArrayList<>(finalStatesByGateway.entrySet());
-                List<MessageState> correlatedStates = entries.stream()
-                        .map(Map.Entry::getValue)
-                        .filter(state -> state.getProviderMessageId() != null)
-                        .sorted(Comparator.comparing(MessageState::getProviderName)
-                                .thenComparing(MessageState::getProviderMessageId))
-                        .toList();
-                lockCorrelations(connection, correlatedStates);
-                lockInitialMessageOwners(connection, entries, correlatedStates);
+                lockCorrelation(connection, providerName, providerMessageId);
+                Optional<UUID> previousOwner = findCorrelationOwner(connection, providerName, providerMessageId);
+                List<UUID> messageIdsToLock = new ArrayList<>();
+                messageIdsToLock.add(gatewayMessageId);
+                previousOwner.ifPresent(messageIdsToLock::add);
+                for (UUID messageId : messageIdsToLock.stream().distinct()
+                        .sorted(Comparator.comparing(UUID::toString)).toList()) {
+                    lockMessage(connection, messageId);
+                }
 
-                List<Map.Entry<UUID, MessageState>> saved = new ArrayList<>();
-                try (PreparedStatement statement = connection.prepareStatement(SAVE_INITIAL_STATE_SQL)) {
-                    for (Map.Entry<UUID, MessageState> entry : entries) {
-                        setStateParameters(connection, statement, entry.getKey(), entry.getValue());
-                        if (statement.executeUpdate() == 1) {
-                            saved.add(entry);
-                        }
+                try (PreparedStatement statement = connection.prepareStatement(RECORD_PROVIDER_ACCEPTED_SQL)) {
+                    setStateParameters(connection, statement, gatewayMessageId, state);
+                    if (statement.executeUpdate() != 1) {
+                        connection.rollback();
+                        throw new DlrStorageException(
+                                "Provider acceptance cannot replace terminal DLR state");
                     }
                 }
-                for (Map.Entry<UUID, MessageState> entry : saved) {
-                    deleteCorrelations(connection, entry.getKey());
-                }
-                for (int index = 0; index < saved.size(); index++) {
-                    MessageState state = saved.get(index).getValue();
-                    if (state.getProviderMessageId() != null && isLastCorrelationOwner(saved, index, state)) {
-                        saveCorrelation(connection, state.getProviderName(), state.getProviderMessageId(),
-                                saved.get(index).getKey());
-                    }
-                }
+                saveCorrelation(connection, providerName, providerMessageId, gatewayMessageId);
                 connection.commit();
             } catch (SQLException e) {
                 rollback(connection, e);
                 throw e;
             }
         } catch (SQLException e) {
-            throw failure("save initial DLR states", e);
+            throw failure("record provider acceptance", e);
         }
     }
 
     @Override
-    public void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId) {
-        checkExpiry();
-        requireCorrelation(providerName, providerMessageId);
-        UUID gatewayId = parseGatewayId(gatewayMessageId);
-
-        for (int attempt = 0; attempt < linkMaxAttempts; attempt++) {
-            if (tryLinkProviderMessageId(gatewayId, providerName, providerMessageId)) {
-                return;
-            }
-            if (attempt + 1 < linkMaxAttempts) {
-                sleepBeforeLinkRetry();
-            }
+    public Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
+                                                          String providerMessageId, int dlrState,
+                                                          String errorCode) {
+        Objects.requireNonNull(state, "state");
+        boolean hasProviderMessageId = providerMessageId != null && !providerMessageId.isBlank();
+        if (hasProviderMessageId) {
+            requireCorrelation(providerName, providerMessageId);
+            state.setProviderName(providerName);
+            state.setProviderMessageId(providerMessageId);
+        } else {
+            state.setProviderName(null);
+            state.setProviderMessageId(null);
         }
-        throw new DlrStorageException("Gateway message state not found while linking provider message ID");
+        long now = System.currentTimeMillis();
+        state.setStatus(MessageState.MessageStatus.FAILED);
+        state.setDlrState(dlrState);
+        state.setErrorCode(errorCode);
+        state.setDeliveryStatus(MessageState.DeliveryStatus.PENDING);
+        state.setDeliveryAttemptCount(0);
+        state.setLastAttemptAt(null);
+        state.setNextAttemptAt(state.getDeliveryChannel() == MessageState.DeliveryChannel.HTTP ? now : null);
+        state.setLastDeliveryResult(null);
+        state.setResolvedAt(now);
+        state.setTimestamp(now);
+        validateState(state);
+        UUID gatewayMessageId = parseGatewayId(state.getGatewayMsgId());
+        checkExpiry();
+
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                lockMessage(connection, gatewayMessageId);
+                Optional<MessageState> rejected;
+                try (PreparedStatement statement = connection.prepareStatement(RECORD_PROVIDER_REJECTED_SQL)) {
+                    setStateParameters(connection, statement, gatewayMessageId, state);
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        rejected = resultSet.next() ? Optional.of(readState(resultSet)) : Optional.empty();
+                    }
+                }
+                if (rejected.isEmpty()) {
+                    connection.rollback();
+                    return Optional.empty();
+                }
+                deleteCorrelations(connection, gatewayMessageId);
+                connection.commit();
+                return rejected;
+            } catch (SQLException e) {
+                rollback(connection, e);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("record provider rejection", e);
+        }
     }
 
     @Override
@@ -351,9 +371,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
                     return Optional.empty();
                 }
                 deleteCorrelations(connection, gatewayMessageId.get());
-                if (state.get().getDeliveryChannel() == MessageState.DeliveryChannel.NONE) {
-                    deleteState(connection, gatewayMessageId.get());
-                }
                 connection.commit();
                 return state;
             } catch (SQLException e) {
@@ -508,70 +525,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
         }
     }
 
-    private void lockCorrelations(Connection connection, List<MessageState> correlatedStates) throws SQLException {
-        String previousProviderName = null;
-        String previousProviderMessageId = null;
-        for (MessageState state : correlatedStates) {
-            if (!state.getProviderName().equals(previousProviderName) ||
-                    !state.getProviderMessageId().equals(previousProviderMessageId)) {
-                lockCorrelation(connection, state.getProviderName(), state.getProviderMessageId());
-                previousProviderName = state.getProviderName();
-                previousProviderMessageId = state.getProviderMessageId();
-            }
-        }
-    }
-
-    private void lockInitialMessageOwners(Connection connection, List<Map.Entry<UUID, MessageState>> entries,
-                                          List<MessageState> correlatedStates) throws SQLException {
-        List<UUID> messageIdsToLock = entries.stream().map(Map.Entry::getKey).collect(ArrayList::new,
-                ArrayList::add, ArrayList::addAll);
-        for (MessageState state : correlatedStates) {
-            findCorrelationOwner(connection, state.getProviderName(), state.getProviderMessageId())
-                    .ifPresent(messageIdsToLock::add);
-        }
-        for (UUID messageId : messageIdsToLock.stream().distinct()
-                .sorted(Comparator.comparing(UUID::toString)).toList()) {
-            lockMessage(connection, messageId);
-        }
-    }
-
-    private boolean tryLinkProviderMessageId(UUID gatewayMessageId, String providerName, String providerMessageId) {
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-            try {
-                lockCorrelation(connection, providerName, providerMessageId);
-                Optional<UUID> previousOwner = findCorrelationOwner(connection, providerName, providerMessageId);
-                List<UUID> messageIdsToLock = new ArrayList<>();
-                messageIdsToLock.add(gatewayMessageId);
-                previousOwner.ifPresent(messageIdsToLock::add);
-                boolean targetFound = false;
-                for (UUID messageId : messageIdsToLock.stream().distinct()
-                        .sorted(Comparator.comparing(UUID::toString)).toList()) {
-                    boolean found = lockMessage(connection, messageId);
-                    if (messageId.equals(gatewayMessageId)) {
-                        targetFound = found;
-                    }
-                }
-                if (!targetFound) {
-                    connection.rollback();
-                    return false;
-                }
-                saveCorrelation(connection, providerName, providerMessageId, gatewayMessageId);
-                if (!markAsSent(connection, gatewayMessageId, providerName, providerMessageId)) {
-                    connection.rollback();
-                    return false;
-                }
-                connection.commit();
-                return true;
-            } catch (SQLException e) {
-                rollback(connection, e);
-                throw e;
-            }
-        } catch (SQLException e) {
-            throw failure("link provider DLR ID", e);
-        }
-    }
-
     private void lockCorrelation(Connection connection, String providerName,
                                  String providerMessageId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(LOCK_CORRELATION_SQL)) {
@@ -603,16 +556,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
         }
     }
 
-    private boolean markAsSent(Connection connection, UUID gatewayMessageId,
-                               String providerName, String providerMessageId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(LINK_MESSAGE_SQL)) {
-            statement.setString(1, providerName);
-            statement.setString(2, providerMessageId);
-            statement.setObject(3, gatewayMessageId);
-            return statement.executeUpdate() == 1;
-        }
-    }
-
     private Optional<MessageState> resolveState(Connection connection, UUID gatewayMessageId,
                                                 String providerName, String providerMessageId,
                                                 MessageState.MessageStatus status, int dlrState,
@@ -633,13 +576,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
     private void deleteCorrelations(Connection connection, UUID gatewayMessageId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(DELETE_CORRELATIONS_SQL)) {
             statement.setObject(1, gatewayMessageId);
-            statement.executeUpdate();
-        }
-    }
-
-    private void deleteState(Connection connection, UUID gatewayMsgId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(DELETE_STATE_SQL)) {
-            statement.setObject(1, gatewayMsgId);
             statement.executeUpdate();
         }
     }
@@ -730,6 +666,9 @@ public class PostgresqlDlrStorage implements DlrStorage {
     }
 
     private void validateDeliveryTarget(MessageState state) {
+        if (state.getDeliveryChannel() == MessageState.DeliveryChannel.NONE) {
+            throw new IllegalArgumentException("DLR persistence requires an HTTP or SMPP delivery target");
+        }
         if (state.getDeliveryChannel() == MessageState.DeliveryChannel.HTTP &&
                 (state.getForwardDlrUrl() == null || state.getForwardDlrUrl().isBlank())) {
             throw new IllegalArgumentException("HTTP delivery requires a nonblank callback URL");
@@ -738,18 +677,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 (state.getSystemId() == null || state.getSystemId().isBlank())) {
             throw new IllegalArgumentException("SMPP delivery requires a nonblank system ID");
         }
-    }
-
-    private boolean isLastCorrelationOwner(List<Map.Entry<UUID, MessageState>> states, int index,
-                                           MessageState candidate) {
-        for (int laterIndex = index + 1; laterIndex < states.size(); laterIndex++) {
-            MessageState later = states.get(laterIndex).getValue();
-            if (candidate.getProviderName().equals(later.getProviderName()) &&
-                    candidate.getProviderMessageId().equals(later.getProviderMessageId())) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private void requireCorrelation(String providerName, String providerMessageId) {
@@ -799,15 +726,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
             return;
         }
         statement.setArray(index, connection.createArrayOf("text", values.toArray(String[]::new)));
-    }
-
-    private void sleepBeforeLinkRetry() {
-        try {
-            Thread.sleep(linkRetryIntervalMillis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new DlrStorageException("Interrupted while linking provider message ID", e);
-        }
     }
 
     private void checkExpiry() {

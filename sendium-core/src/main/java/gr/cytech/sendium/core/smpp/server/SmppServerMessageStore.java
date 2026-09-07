@@ -4,7 +4,6 @@ import gr.cytech.sendium.core.message.StandardMessage;
 
 import java.util.List;
 import java.util.OptionalInt;
-import java.util.concurrent.Future;
 
 public interface SmppServerMessageStore<M extends StandardMessage> {
 
@@ -19,16 +18,9 @@ public interface SmppServerMessageStore<M extends StandardMessage> {
     void stop();
 
     /**
-     * Handle incoming messages (e.g., save to DB or route directly).
+     * Process accepted incoming messages.
      */
-    Future<Boolean> persistMessages(List<InEvent<M>> eventsQueue);
-
-    /**
-     * Whether multipart parts have already been persisted before entering the reassembly handler.
-     */
-    default boolean persistsMultipartPartsBeforeAssembly() {
-        return false;
-    }
+    void processIngressMessages(List<InEvent<M>> eventsQueue);
 
     /**
      * Mark a message as unpushed to retry it later.

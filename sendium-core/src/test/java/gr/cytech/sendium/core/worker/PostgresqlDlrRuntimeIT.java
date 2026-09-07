@@ -63,7 +63,7 @@ class PostgresqlDlrRuntimeIT {
 
     @Test
     void wiresPoolMigrationStorageHealthAndMetrics() throws SQLException {
-        long successfulSavesBefore = metricCount("save_initial", "success");
+        long successfulSavesBefore = metricCount("record_provider_accepted", "success");
         assertThat(storage).isSameAs(managedStorage);
         assertThat(managedStorage.backend()).isEqualTo("postgresql");
         assertThat(dataSource.getHandle().getBean().isActive()).isTrue();
@@ -72,8 +72,9 @@ class PostgresqlDlrRuntimeIT {
         assertThat(flywayHistoryCount()).isOne();
 
         MessageState state = new MessageState(UUID.randomUUID().toString(), "account", "system",
-                "source", "destination", null);
-        storage.saveInitialState(state);
+                "source", "destination", "https://example.test/dlr");
+        state.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
+        storage.recordProviderAccepted(state, "provider", "provider-message");
         assertThat(storage.getState(state.getGatewayMsgId())).isPresent();
 
         given()
@@ -84,7 +85,7 @@ class PostgresqlDlrRuntimeIT {
                 .body("checks.find { it.name == 'sendium-dlr-storage' }.data.backend",
                         equalTo("postgresql"));
 
-        assertThat(metricCount("save_initial", "success")).isEqualTo(successfulSavesBefore + 1);
+        assertThat(metricCount("record_provider_accepted", "success")).isEqualTo(successfulSavesBefore + 1);
         assertThat(meterRegistry.find("sendium.dlr.storage.selected")
                 .tag("backend", "postgresql").gauge().value()).isEqualTo(1.0);
         assertThat(meterRegistry.getMeters())
@@ -93,7 +94,7 @@ class PostgresqlDlrRuntimeIT {
     }
 
     @Test
-    void databaseOutageRejectsHttpAndRetriesAcceptedSmppBeforeRouting() throws Exception {
+    void databaseOutageDoesNotBlockIngressRouting() throws Exception {
         StandardOutgoingWorkerHandler outgoingWorkerHandler = (StandardOutgoingWorkerHandler) outgoingWorkerManager;
         CaptorWorker captorWorker = (CaptorWorker) outgoingWorkerHandler.getWorkers().get("captorTest");
         captorWorker.captures.clear();
@@ -101,24 +102,31 @@ class PostgresqlDlrRuntimeIT {
                 PostgresqlDlrQuarkusTestResource.getSmppPort())) {
             smppClient.start();
             PostgresqlDlrQuarkusTestResource.pausePostgresql();
+            String acceptedHttp;
             SubmitSmResp acceptedSmpp;
             try {
-                given()
+                acceptedHttp = given()
                         .queryParam("username", "test2")
                         .queryParam("password", "123qwe")
                         .queryParam("from", "Sender")
                         .queryParam("to", "306910000000")
                         .queryParam("text", "database outage http")
+                        .queryParam("dlr-url", "https://example.test/dlr?id=%s&status=%d")
                         .when().get("/sendsms")
                         .then()
-                        .statusCode(503)
-                        .body(equalTo("Temporal failure, try again later."));
+                        .statusCode(202)
+                        .extract().asString();
 
                 acceptedSmpp = smppClient.sendSms(
                         "Sender", "306910000001", "database outage smpp");
                 assertThat(acceptedSmpp.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
                 assertThat(acceptedSmpp.getMessageId()).isNotBlank();
-                assertThat(captorWorker.captures).isEmpty();
+                var firstRouted = captorWorker.captures.poll(5, TimeUnit.SECONDS);
+                var secondRouted = captorWorker.captures.poll(5, TimeUnit.SECONDS);
+                assertThat(firstRouted).isNotNull();
+                assertThat(secondRouted).isNotNull();
+                assertThat(List.of(firstRouted.body, secondRouted.body))
+                        .containsExactlyInAnyOrder("database outage http", "database outage smpp");
                 assertThat(managedStorage.backend()).isEqualTo("postgresql");
 
                 given()
@@ -128,32 +136,27 @@ class PostgresqlDlrRuntimeIT {
                         .body("status", equalTo("DOWN"))
                         .body("checks.find { it.name == 'sendium-dlr-storage' }.data.reason",
                                 equalTo("unavailable"));
-                assertThat(metricCount("save_initial", "error")).isGreaterThanOrEqualTo(1);
-                awaitMetric("save_initial_batch", "error");
             } finally {
                 PostgresqlDlrQuarkusTestResource.resumePostgresql();
                 awaitPostgresqlRecovery();
             }
 
-            var retriedSmpp = captorWorker.captures.poll(10, TimeUnit.SECONDS);
-            assertThat(retriedSmpp).isNotNull();
-            assertThat(retriedSmpp.body).isEqualTo("database outage smpp");
-            assertThat(retriedSmpp.serial).isEqualTo(acceptedSmpp.getMessageId());
-            assertThat(storage.getState(acceptedSmpp.getMessageId())).isPresent();
+            assertThat(storage.getState(acceptedHttp)).isEmpty();
+            assertThat(storage.getState(acceptedSmpp.getMessageId())).isEmpty();
 
             String httpGatewayId = submitHttpAfterRecovery();
             SubmitSmResp recoveredSmpp = smppClient.sendSms(
                     "Sender", "306910000003", "database recovered smpp");
             assertThat(recoveredSmpp.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
             assertThat(recoveredSmpp.getMessageId()).isNotBlank();
-            assertThat(storage.getState(httpGatewayId)).isPresent();
+            assertThat(storage.getState(httpGatewayId)).isEmpty();
             var firstRouted = captorWorker.captures.poll(5, TimeUnit.SECONDS);
             var secondRouted = captorWorker.captures.poll(5, TimeUnit.SECONDS);
             assertThat(firstRouted).isNotNull();
             assertThat(secondRouted).isNotNull();
             assertThat(List.of(firstRouted.body, secondRouted.body))
                     .containsExactlyInAnyOrder("database recovered http", "database recovered smpp");
-            assertThat(storage.getState(recoveredSmpp.getMessageId())).isPresent();
+            assertThat(storage.getState(recoveredSmpp.getMessageId())).isEmpty();
 
             given()
                     .when().get("/q/health/ready")
@@ -183,16 +186,6 @@ class PostgresqlDlrRuntimeIT {
         return timer == null ? 0 : timer.count();
     }
 
-    private void awaitMetric(String operation, String outcome) throws InterruptedException {
-        for (int attempt = 0; attempt < 20; attempt++) {
-            if (metricCount(operation, outcome) > 0) {
-                return;
-            }
-            Thread.sleep(250);
-        }
-        throw new AssertionError("Metric was not recorded for " + operation + "/" + outcome);
-    }
-
     private void awaitPostgresqlRecovery() throws InterruptedException {
         DlrStorageException lastFailure = null;
         for (int attempt = 0; attempt < 20; attempt++) {
@@ -214,6 +207,7 @@ class PostgresqlDlrRuntimeIT {
                 .queryParam("from", "Sender")
                 .queryParam("to", "306910000002")
                 .queryParam("text", "database recovered http")
+                .queryParam("dlr-url", "https://example.test/dlr?id=%s&status=%d")
                 .when().get("/sendsms")
                 .then()
                 .statusCode(202)

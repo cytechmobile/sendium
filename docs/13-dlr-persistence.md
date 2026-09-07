@@ -1,6 +1,6 @@
 # DLR Persistence
 
-Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and durably track terminal HTTP/SMPP delivery in PostgreSQL.
+Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and durably track terminal HTTP/SMPP delivery in PostgreSQL after an upstream provider outcome.
 
 This storage boundary does not make Sendium's message queues or all delivery processing durable. Review [Durability Boundaries](#durability-boundaries) before using restart recovery as a delivery guarantee.
 
@@ -14,9 +14,9 @@ Message paths degrade rather than fail when the subsystem is absent. HTTP and do
 
 ## Storage Model
 
-`sendium_dlr.dlr_message` contains one row per gateway UUID. The row holds ingress metadata, the exact terminal provider outcome, the downstream delivery channel and status, the common HTTP/SMPP payload, the retry schedule, and the monotonically increasing attempt number used for fencing.
+`sendium_dlr.dlr_message` contains one row per tracked gateway UUID. A row is created only when the upstream provider accepts or rejects the submission, never at HTTP or downstream SMPP ingress. It holds body-free return metadata, the provider outcome, the downstream delivery channel and status, the retry schedule, and the monotonically increasing attempt number used for fencing. SMS message bodies are never stored in this schema.
 
-`sendium_dlr.provider_correlation` maps the exact `(provider_name, provider_message_id)` pair to the gateway UUID. Multiple provider correlations, including multipart provider IDs, can point to one message. Terminal resolution stores the resolving provider pair and outcome in `dlr_message`, removes every correlation for that gateway message, and retains the message row only when HTTP or SMPP delivery is required.
+`sendium_dlr.provider_correlation` maps the exact `(provider_name, provider_message_id)` pair to the gateway UUID after provider acceptance. Multiple provider correlations, including multipart provider IDs, can point to one message. Provider rejection creates the terminal `dlr_message` row directly and does not create a correlation. Terminal resolution stores the resolving provider pair and outcome in `dlr_message`, removes every correlation for that gateway message, and retains the message row for HTTP or SMPP delivery.
 
 ## Quick Start PostgreSQL
 
@@ -100,11 +100,13 @@ curl -fsS http://127.0.0.1:8080/q/metrics | grep -E 'sendium_dlr_storage|agroal'
 
 Relevant metrics include storage-operation latency/counts tagged by backend, operation, and success or error outcome. PostgreSQL pool metrics use the Agroal metric prefix.
 
-PostgreSQL is required when the subsystem is enabled, and startup fails rather than selecting another backend. If persistence becomes unavailable at runtime, new HTTP submissions return retryable `503`. Valid SMPP submissions have a successful response with their generated UUID queued immediately; persistence failures are retried internally with increasing delays before those messages are routed. The accepted SMPP backlog is in memory and is not bounded by PostgreSQL availability, so readiness alerts must be acted on before a sustained outage exhausts process memory.
+PostgreSQL is required when the subsystem is enabled, and startup fails rather than selecting another backend. At runtime, HTTP and downstream SMPP ingress validation, acknowledgement, and routing do not write PostgreSQL and therefore are not blocked by a database outage. The DLR return metadata travels only with the in-memory outbound message until an upstream provider outcome. Readiness still reports `DOWN` while PostgreSQL is unavailable because new provider outcomes cannot be made durable.
 
 Provider message IDs are correlated within the outbound provider namespace rather than globally. The worker instance name is the default namespace; workers connected to the same SMSC account can share `msg.hash.prefix` when that SMSC may deliver their receipts interchangeably. Different providers may therefore return the same message ID without overwriting each other's state. The namespace must remain stable while correlations are outstanding: changing `msg.hash.prefix` or renaming a worker using the default makes earlier receipts unresolvable.
 
 Sendium requests final delivery receipts from upstream SMPP providers. A valid unsolicited `ACCEPTD` or `ENROUTE` receipt, including a receipt identified through its SMPP ESM class, is acknowledged successfully but is not forwarded and does not consume its provider correlation. The first terminal receipt consumes every correlation for the gateway message and produces the downstream DLR; later receipts for those provider message IDs cannot resolve it. Multipart submissions retain this first-terminal behavior and do not aggregate delivery states across every segment. A terminal persistence failure returns `deliver_sm_resp` with `STATUS_SYSERR` so the provider can retry. A successful provider acknowledgement confirms durable resolution only; it does not wait for downstream HTTP or SMPP delivery.
+
+An accepted upstream `submit_sm_resp` with a provider message ID creates the message row and correlation atomically. If that transaction fails, Sendium preserves the provider success and does not resend the SMS; the later DLR may be lost because it cannot be correlated. An accepted response without a usable provider message ID is also not persisted. A provider rejection is persisted directly as terminal pending delivery so it can be returned downstream without waiting for a provider receipt.
 
 A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP delivery is pending or after HTTP delivery reaches terminal `FAILED` status. The delivery attempt number is a fencing token: a stale completion or failure cannot mutate a newer attempt, and a process-local storage guard prevents duplicate starts within one Sendium instance.
 
@@ -128,18 +130,19 @@ Cleanup is best-effort maintenance and is isolated from message handling. One ca
 
 | State or transition | PostgreSQL guarantee | Remaining limit |
 | :--- | :--- | :--- |
-| Initial DLR state for HTTP and downstream SMPP submissions | HTTP state is persisted before routing and `202`. SMPP queues `submit_sm_resp` before state persistence and routes only after persistence, with internal retries on failure. Graceful shutdown fences protocol ingress, waits for in-flight persistence, drains queued retries, flushes multipart assembly, drains again, and then closes sessions. | A process crash, a persistence drain that exceeds the configured SMPP response timeout, or a response drain that exceeds one minute can lose an acknowledged SMPP submission or response. Router and worker queues remain in memory and can lose queued outbound work after persistence. |
-| Gateway-to-provider message correlation | Survives Sendium restart after the provider message ID is linked. Intermediate `ACCEPTD` and `ENROUTE` receipts leave it intact. | The first terminal receipt consumes every correlation for the gateway message. |
+| HTTP and downstream SMPP ingress | No PostgreSQL write occurs. Body-free DLR return metadata travels with the message through in-memory queues. Graceful shutdown fences protocol ingress, drains queued events, flushes multipart assembly, drains again, and then closes sessions. | A process crash can lose acknowledged or accepted outbound work because router and worker queues are in memory. |
+| Gateway-to-provider message correlation | The `dlr_message` row and exact provider correlation are committed atomically after provider acceptance. Intermediate `ACCEPTD` and `ENROUTE` receipts leave the correlation intact. | Provider success is not retried if this write fails, so a later receipt may be unresolvable. Success without a provider ID is not tracked. The first terminal receipt consumes every correlation for the gateway message. |
+| Provider submission rejection | A terminal pending-delivery row is committed directly without a correlation. | If this write fails, no durable downstream rejection exists. The outbound submission is not retried because the provider already returned an outcome. |
 | Terminal HTTP/SMPP delivery | The common payload and exact provider outcome remain in one row until fenced completion. | Delivery is at-least-once; acknowledgement can be received before the final delete commits. |
 | Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. | The active-ID guard is process-local. Adapter recreation may start a new attempt for an attempt that was active before a crash. |
-| Multipart submission | Each segment is persisted before entering assembly; completed aggregates update the primary state. | The segment is acknowledged before provisional persistence. Multipart assembly and its pending timers are process-local and are not reconstructed after restart. |
+| Multipart submission | Segments and aggregate payloads remain in memory. After provider acceptance, the aggregate DLR row retains the original gateway part IDs needed for downstream receipt delivery. | Multipart assembly and its pending timers are process-local and are not reconstructed after restart. |
 | HTTP DLR callback retry | Pending state, attempt count, and next-attempt timestamp are durable. Checks are scheduled every second in non-overlapping serial batches; failures retry after 120 seconds and attempt 10 failures become `FAILED`. | A request accepted before a crash or failed completion update can be repeated. A slow batch delays later due callbacks. |
 | SMPP DLR delivery | One attempt covers every generated receipt part and completes only after matching successful `deliver_sm_resp` PDUs for all parts. Pending rows are enqueued when the same `system_id` binds. | Timeout, `generic_nack`, wrong/non-OK response, enqueue/send failure, or session closure releases the attempt. Replay is bind-driven rather than periodic, and partial success is not checkpointed. |
 | Database files | The Quick Start named volume survives normal container replacement and `docker compose down`. | Volume deletion, host-disk loss, and disaster recovery require backups or external PostgreSQL replication managed by the operator. |
 
 Downstream delivery uses bounded at-least-once attempt semantics, not exactly-once delivery. A crash or storage failure after an HTTP receiver accepts a callback, or after an SMPP client sends a successful `deliver_sm_resp`, can cause the receipt to be delivered again. Multipart SMPP replay can repeat already acknowledged parts. Consumers must be idempotent using the gateway or receipted message ID. HTTP retry limits, SMPP bind availability, and seven-day retention mean this is not an unlimited eventual-success guarantee.
 
-These limits are intentional V1 boundaries. PostgreSQL provides DLR persistence and delivery fencing; it is not a distributed worker coordinator or a replacement for the router and worker queues. Attempt guards are process-local, so multiple active Sendium replicas sharing one database can start duplicate deliveries.
+These limits are intentional V1 boundaries. PostgreSQL provides provider-outcome correlation, DLR persistence, and delivery fencing; it is not outbound queue persistence, a distributed worker coordinator, or a replacement for the router and worker queues. Attempt guards are process-local, so multiple active Sendium replicas sharing one database can start duplicate deliveries.
 
 ## Related Documentation
 
