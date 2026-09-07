@@ -14,16 +14,15 @@ public class DlrService {
     @Inject
     DlrStorage storage;
 
-    public void saveInitialState(MessageState state) {
-        storage.saveInitialState(state);
+    public void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
+        storage.recordProviderAccepted(state, providerName, providerMessageId);
     }
 
-    public void saveInitialStates(List<MessageState> states) {
-        storage.saveInitialStates(states);
-    }
-
-    public void linkProviderMessageId(String gatewayMessageId, String providerName, String providerMessageId) {
-        storage.linkProviderMessageId(gatewayMessageId, providerName, providerMessageId);
+    public Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
+                                                          String providerMessageId, int dlrState,
+                                                          String errorCode) {
+        return storage.recordProviderRejected(
+                state, providerName, providerMessageId, dlrState, errorCode);
     }
 
     public Optional<MessageState> resolveDlr(String providerName, String providerMessageId, int dlrState,

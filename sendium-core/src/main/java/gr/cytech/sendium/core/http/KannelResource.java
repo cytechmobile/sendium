@@ -3,14 +3,11 @@ package gr.cytech.sendium.core.http;
 import com.google.common.base.Strings;
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
-import gr.cytech.sendium.core.worker.DlrService;
-import gr.cytech.sendium.core.worker.DlrStorageException;
-import gr.cytech.sendium.core.worker.MessageState;
 import gr.cytech.sendium.util.MessageTrace;
 import jakarta.annotation.security.PermitAll;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
@@ -46,9 +43,6 @@ public class KannelResource {
     CredentialFileWatcher credentialFileWatcher;
 
     @Inject
-    Instance<DlrService> dlrServices;
-
-    @Inject
     SendiumConfigurationHandler configurationHandler;
 
     @Operation(
@@ -80,7 +74,7 @@ public class KannelResource {
             ),
             @APIResponse(
                     responseCode = "503",
-                    description = "Service Unavailable. Required DLR state could not be persisted or queue admission was interrupted.",
+                    description = "Service Unavailable. Internal queue admission was interrupted.",
                     content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(examples = "Temporal failure, try again later."))
             )
     })
@@ -210,13 +204,10 @@ public class KannelResource {
             if (binfo != null && !binfo.isEmpty()) {
                 msg.field4 = binfo;
             }
-            msg.acked = true;
+            msg.acked = dlrUrl != null && !dlrUrl.isBlank();
             msg.serial = UUID.randomUUID().toString();
-            if (!dlrServices.isUnsatisfied()) {
-                MessageState state = new MessageState(msg.serial, usr, msg.from, msg.to, dlrUrl);
-                state.setDeliveryChannel(dlrUrl == null || dlrUrl.isBlank() ?
-                        MessageState.DeliveryChannel.NONE : MessageState.DeliveryChannel.HTTP);
-                dlrServices.get().saveInitialState(state);
+            if (msg.acked) {
+                msg.dlrReturnMetadata = DlrReturnMetadata.http(usr, msg.from, msg.to, dlrUrl);
             }
             queueProvider.getRouterQueue().enqueue(msg);
             if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
@@ -227,11 +218,6 @@ public class KannelResource {
                     .entity(msg.serial)
                     .build();
 
-        } catch (DlrStorageException e) {
-            logger.error("HTTP submission rejected: DLR storage unavailable");
-            return Response.status(Response.Status.SERVICE_UNAVAILABLE)
-                    .entity("Temporal failure, try again later.")
-                    .build();
         } catch (InterruptedException e) {
             logger.error("Failed to enqueue message", e);
             return Response.status(Response.Status.SERVICE_UNAVAILABLE)

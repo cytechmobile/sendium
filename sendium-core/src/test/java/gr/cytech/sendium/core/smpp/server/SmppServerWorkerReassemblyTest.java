@@ -35,7 +35,6 @@ class SmppServerWorkerReassemblyTest {
         Queue<StandardMessage> routerQueue = new Queue<>();
         TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), routerQueue);
         SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
-        when(store.persistsMultipartPartsBeforeAssembly()).thenReturn(true);
         worker.setMessageStore(store);
         ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
         MessagePartsHandler<StandardMessage> handler = new MessagePartsHandler<>(
@@ -48,7 +47,7 @@ class SmppServerWorkerReassemblyTest {
             assertThat(routerQueue.dequeue(10)).isNull();
             InEvent<StandardMessage> persisted = worker.getInEventQueue().poll(1_000, TimeUnit.MILLISECONDS);
             assertThat(persisted).isNotNull();
-            worker.handlePersistedMessages(List.of(persisted));
+            worker.handleIngressMessages(List.of(persisted));
             StandardMessage routed = routerQueue.dequeue(1_000);
             assertThat(routed.body).isEqualTo("Hello World");
             assertThat(routed.binheader).isNull();
@@ -66,7 +65,6 @@ class SmppServerWorkerReassemblyTest {
         Queue<StandardMessage> routerQueue = new Queue<>();
         TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), routerQueue);
         SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
-        when(store.persistsMultipartPartsBeforeAssembly()).thenReturn(true);
         worker.setMessageStore(store);
         ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
         MessagePartsHandler<StandardMessage> handler = new MessagePartsHandler<>(
@@ -76,6 +74,9 @@ class SmppServerWorkerReassemblyTest {
         try {
             handler.addMessagePart(part);
 
+            InEvent<StandardMessage> expired = worker.getInEventQueue().poll(1_000, TimeUnit.MILLISECONDS);
+            assertThat(expired).isNotNull();
+            worker.handleIngressMessages(List.of(expired));
             StandardMessage routed = routerQueue.dequeue(1_000);
             assertThat(routed).isSameAs(part);
             assertThat(routed.body).isEqualTo("Hello ");
@@ -227,7 +228,7 @@ class SmppServerWorkerReassemblyTest {
     }
 
     @Test
-    void normalSubmissionAcknowledgesBeforePersistenceAndRoutesAfterPersistence() throws Exception {
+    void normalSubmissionAcknowledgesBeforeIngressProcessing() throws Exception {
         Queue<StandardMessage> routerQueue = new Queue<>();
         TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), routerQueue);
         StandardMessage message = messagePart(null, "hello", null);
@@ -249,32 +250,10 @@ class SmppServerWorkerReassemblyTest {
             assertThat(response.getMessageId()).isEqualTo(message.serial);
         });
 
-        worker.handlePersistedMessages(List.of(queued));
+        worker.handleIngressMessages(List.of(queued));
 
         assertThat(routerQueue.dequeue(1_000)).isSameAs(message);
         assertThat(worker.outgoingPdus).hasSize(1);
-    }
-
-    @Test
-    void persistenceFailureRequeuesWithoutAnotherClientResponse() throws Exception {
-        Queue<StandardMessage> routerQueue = new Queue<>();
-        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), routerQueue);
-        StandardMessage message = messagePart(null, "hello", null);
-        SubmitSm submitSm = new SubmitSm();
-        InEvent<StandardMessage> event = new InEvent<>(message, submitSm, 1,
-                new Timestamp(System.currentTimeMillis()));
-        worker.enqueueIn(event);
-        InEvent<StandardMessage> queued = worker.getInEventQueue().poll();
-
-        worker.handleMessagePersistenceFailure(List.of(queued));
-
-        assertThat(routerQueue.dequeue(10)).isNull();
-        assertThat(worker.outgoingPdus).singleElement().satisfies(pdu -> {
-            assertThat(pdu).isInstanceOf(SubmitSmResp.class);
-            assertThat(pdu.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
-        });
-        assertThat(worker.getInEventQueue()).containsExactly(queued);
-        assertThat(queued.persistenceAttempts).isOne();
     }
 
     @Test
@@ -310,33 +289,18 @@ class SmppServerWorkerReassemblyTest {
         InEvent<StandardMessage> queued = worker.getInEventQueue().poll();
 
         try {
-            worker.handlePersistedMessages(List.of(queued));
+            worker.handleIngressMessages(List.of(queued));
 
             assertThat(worker.outgoingPdus).singleElement()
                     .satisfies(pdu -> assertThat(pdu.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK));
             assertThat(worker.getInEventQueue()).containsExactly(queued);
-            assertThat(queued.persistenceAttempts).isOne();
         } finally {
             Thread.interrupted();
         }
     }
 
     @Test
-    void failedAggregatePersistenceRequeuesWithoutAnotherClientResponse() {
-        TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
-        StandardMessage aggregate = messagePart(null, "Hello World", "part-1");
-        aggregate.reassembledParts = new ArrayList<>(List.of("part-1", "part-2"));
-        InEvent<StandardMessage> event = new InEvent<>(aggregate, null, 1,
-                new Timestamp(System.currentTimeMillis()));
-
-        worker.handleMessagePersistenceFailure(List.of(event));
-
-        assertThat(worker.getInEventQueue()).containsExactly(event);
-        assertThat(worker.outgoingPdus).isEmpty();
-    }
-
-    @Test
-    void multipartPartIsAcknowledgedBeforeProvisionalPersistence() throws Exception {
+    void multipartPartIsAcknowledgedBeforeReassembly() throws Exception {
         Queue<StandardMessage> routerQueue = new Queue<>();
         TestSmppServerWorker worker = new TestSmppServerWorker(new TestConfigurationProvider(), routerQueue);
         ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
@@ -353,7 +317,7 @@ class SmppServerWorkerReassemblyTest {
             assertThat(worker.outgoingPdus).singleElement()
                     .satisfies(pdu -> assertThat(pdu.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK));
 
-            worker.handlePersistedMessages(List.of(queued));
+            worker.handleIngressMessages(List.of(queued));
 
             assertThat(routerQueue.dequeue(10)).isNull();
             assertThat(worker.outgoingPdus).hasSize(1);
@@ -363,44 +327,18 @@ class SmppServerWorkerReassemblyTest {
     }
 
     @Test
-    void shutdownDrainWaitsForSubmittedPersistence() throws Exception {
-        TestConfigurationProvider configurationProvider = new TestConfigurationProvider();
-        configurationProvider.setProperty("conf.responseTout.default", "1000");
-        TestSmppServerWorker worker = new TestSmppServerWorker(configurationProvider, new Queue<>());
-        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
-        CompletableFuture<Boolean> persistence = new CompletableFuture<>();
-        when(store.getInsertBatchSize()).thenReturn(100);
-        when(store.persistMessages(anyList())).thenReturn(persistence);
-        worker.setMessageStore(store);
-        InEvent<StandardMessage> event = new InEvent<>(messagePart(null, "hello", null), new SubmitSm(), 1,
-                new Timestamp(System.currentTimeMillis()));
-        worker.getInEventQueue().add(event);
-
-        CompletableFuture<Boolean> drain = CompletableFuture.supplyAsync(worker::drainPersistedIngress);
-
-        try {
-            verify(store, timeout(1_000)).persistMessages(List.of(event));
-            assertThat(drain).isNotDone();
-        } finally {
-            persistence.complete(true);
-        }
-        assertThat(drain.get(1, TimeUnit.SECONDS)).isTrue();
-    }
-
-    @Test
-    void shutdownDrainPersistsQueuedMultipartBeforeStoppingAssembler() throws Exception {
+    void shutdownDrainProcessesQueuedMultipartBeforeStoppingAssembler() throws Exception {
         Queue<StandardMessage> routerQueue = new Queue<>();
         TestConfigurationProvider configurationProvider = new TestConfigurationProvider();
         configurationProvider.setProperty("conf.responseTout.default", "1000");
         TestSmppServerWorker worker = new TestSmppServerWorker(configurationProvider, routerQueue);
         SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
         when(store.getInsertBatchSize()).thenReturn(100);
-        when(store.persistsMultipartPartsBeforeAssembly()).thenReturn(true);
-        when(store.persistMessages(anyList())).thenAnswer(invocation -> {
+        doAnswer(invocation -> {
             List<InEvent<StandardMessage>> events = invocation.getArgument(0);
-            worker.handlePersistedMessages(events);
-            return CompletableFuture.completedFuture(true);
-        });
+            worker.handleIngressMessages(events);
+            return null;
+        }).when(store).processIngressMessages(anyList());
         worker.setMessageStore(store);
         ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
         worker.setMessagePartsHandler(new MessagePartsHandler<>(
@@ -411,40 +349,13 @@ class SmppServerWorkerReassemblyTest {
         worker.getInEventQueue().add(event);
 
         try {
-            assertThat(worker.drainPersistedIngressAndMultipart()).isTrue();
+            assertThat(worker.drainIngressAndMultipart()).isTrue();
             assertThat(routerQueue.dequeue(1_000)).isSameAs(part);
-            verify(store).persistMessages(List.of(event));
+            verify(store).processIngressMessages(List.of(event));
             verify(store).stop();
         } finally {
             executor.shutdownNow();
         }
-    }
-
-    @Test
-    void shutdownWaitsForInFlightPersistenceBeforeDrainingRetry() throws Exception {
-        TestConfigurationProvider configurationProvider = new TestConfigurationProvider();
-        configurationProvider.setProperty("conf.responseTout.default", "1000");
-        TestSmppServerWorker worker = new TestSmppServerWorker(configurationProvider, new Queue<>());
-        SmppServerMessageStore<StandardMessage> store = mock(SmppServerMessageStore.class);
-        CompletableFuture<Boolean> initialPersistence = new CompletableFuture<>();
-        when(store.getInsertBatchSize()).thenReturn(100);
-        when(store.persistMessages(anyList()))
-                .thenReturn(initialPersistence)
-                .thenReturn(CompletableFuture.completedFuture(true));
-        worker.setMessageStore(store);
-        InEvent<StandardMessage> event = new InEvent<>(messagePart(null, "hello", null), new SubmitSm(), 1,
-                new Timestamp(System.currentTimeMillis()));
-        worker.persistMessagesIn(List.of(event));
-
-        CompletableFuture<Boolean> drain = CompletableFuture.supplyAsync(worker::drainPersistedIngressAndMultipart);
-        Thread.sleep(50);
-        assertThat(drain).isNotDone();
-
-        worker.reEnqueueIn(List.of(event));
-        initialPersistence.complete(false);
-        assertThat(drain.get(1, TimeUnit.SECONDS)).isTrue();
-        verify(store, times(2)).persistMessages(List.of(event));
-        verify(store).stop();
     }
 
     @Test

@@ -2,18 +2,14 @@ package gr.cytech.sendium.core.http;
 
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.queue.Queue;
-import gr.cytech.sendium.core.worker.DlrService;
-import gr.cytech.sendium.core.worker.DlrStorageException;
-import gr.cytech.sendium.core.worker.MessageState;
-import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InOrder;
 
 import java.util.Map;
 import java.util.Set;
@@ -21,9 +17,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -32,8 +26,6 @@ class KannelResourceTest {
     private static final String PASSWORD = "secret";
 
     private Queue<StandardMessage> routerQueue;
-    private DlrService dlrService;
-    private Instance<DlrService> dlrServices;
     private KannelResource resource;
 
     @BeforeEach
@@ -52,63 +44,37 @@ class KannelResourceTest {
         resource.queueProvider = queueProvider;
         resource.credentialFileWatcher = credentials;
         resource.configurationHandler = mock(SendiumConfigurationHandler.class);
-        dlrService = mock(DlrService.class);
-        dlrServices = mock(Instance.class);
-        when(dlrServices.get()).thenReturn(dlrService);
-        resource.dlrServices = dlrServices;
     }
 
     @Test
-    void persistsStateBeforeQueueAdmissionForEverySubmission() throws InterruptedException {
-        ArgumentCaptor<MessageState> stateCaptor = ArgumentCaptor.forClass(MessageState.class);
+    void enqueuesSubmissionWithoutDlrMetadataWhenCallbackIsAbsent() throws InterruptedException {
         ArgumentCaptor<StandardMessage> messageCaptor = ArgumentCaptor.forClass(StandardMessage.class);
-        InOrder order = inOrder(dlrService, routerQueue);
 
         Response response = submit(null);
 
-        order.verify(dlrService).saveInitialState(stateCaptor.capture());
-        order.verify(routerQueue).enqueue(messageCaptor.capture());
-        MessageState state = stateCaptor.getValue();
+        verify(routerQueue).enqueue(messageCaptor.capture());
         StandardMessage message = messageCaptor.getValue();
         assertThat(response.getStatus()).isEqualTo(Response.Status.ACCEPTED.getStatusCode());
-        assertThat(response.getEntity()).isEqualTo(message.serial).isEqualTo(state.getGatewayMsgId());
+        assertThat(response.getEntity()).isEqualTo(message.serial);
+        assertThat(message.acked).isFalse();
+        assertThat(message.dlrReturnMetadata).isNull();
+    }
+
+    @Test
+    void callbackSubmissionCarriesHttpReturnMetadata() throws InterruptedException {
+        ArgumentCaptor<StandardMessage> messageCaptor = ArgumentCaptor.forClass(StandardMessage.class);
+
+        Response response = submit("https://callback.test/dlr");
+
+        assertThat(response.getStatus()).isEqualTo(Response.Status.ACCEPTED.getStatusCode());
+        verify(routerQueue).enqueue(messageCaptor.capture());
+        StandardMessage message = messageCaptor.getValue();
         assertThat(message.acked).isTrue();
-        assertThat(state.getForwardDlrUrl()).isNull();
-        assertThat(state.getDeliveryChannel()).isEqualTo(MessageState.DeliveryChannel.NONE);
-    }
-
-    @Test
-    void callbackSubmissionUsesHttpDeliveryChannel() {
-        ArgumentCaptor<MessageState> stateCaptor = ArgumentCaptor.forClass(MessageState.class);
-
-        Response response = submit("https://callback.test/dlr");
-
-        assertThat(response.getStatus()).isEqualTo(Response.Status.ACCEPTED.getStatusCode());
-        verify(dlrService).saveInitialState(stateCaptor.capture());
-        assertThat(stateCaptor.getValue().getDeliveryChannel()).isEqualTo(MessageState.DeliveryChannel.HTTP);
-    }
-
-    @Test
-    void rejectsBeforeQueueAdmissionWhenPersistenceFails() throws InterruptedException {
-        doThrow(new DlrStorageException("database details"))
-                .when(dlrService).saveInitialState(any(MessageState.class));
-
-        Response response = submit("https://callback.test/dlr");
-
-        assertThat(response.getStatus()).isEqualTo(Response.Status.SERVICE_UNAVAILABLE.getStatusCode());
-        assertThat(response.getEntity()).isEqualTo("Temporal failure, try again later.");
-        verify(routerQueue, never()).enqueue(any(StandardMessage.class));
-    }
-
-    @Test
-    void acceptsSubmissionWithoutDlrTrackingWhenPersistenceIsDisabled() throws InterruptedException {
-        when(dlrServices.isUnsatisfied()).thenReturn(true);
-
-        Response response = submit("https://callback.test/dlr");
-
-        assertThat(response.getStatus()).isEqualTo(Response.Status.ACCEPTED.getStatusCode());
-        verify(dlrService, never()).saveInitialState(any(MessageState.class));
-        verify(routerQueue).enqueue(any(StandardMessage.class));
+        assertThat(message.dlrReturnMetadata.channel()).isEqualTo(DlrReturnMetadata.DeliveryChannel.HTTP);
+        assertThat(message.dlrReturnMetadata.accountId()).isEqualTo(USERNAME);
+        assertThat(message.dlrReturnMetadata.sourceAddress()).isEqualTo("Sender");
+        assertThat(message.dlrReturnMetadata.destinationAddress()).isEqualTo("306910000000");
+        assertThat(message.dlrReturnMetadata.forwardDlrUrl()).isEqualTo("https://callback.test/dlr");
     }
 
     @Test
@@ -120,7 +86,6 @@ class KannelResourceTest {
 
         assertThat(response.getStatus()).isEqualTo(Response.Status.SERVICE_UNAVAILABLE.getStatusCode());
         assertThat(response.getEntity()).isEqualTo("Temporal failure, try again later.");
-        verify(dlrService).saveInitialState(any(MessageState.class));
     }
 
     private Response submit(String dlrUrl) {
