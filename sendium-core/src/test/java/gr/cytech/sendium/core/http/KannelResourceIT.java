@@ -1,11 +1,12 @@
 package gr.cytech.sendium.core.http;
 
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
-import gr.cytech.sendium.core.worker.InMemoryDlrService;
-import gr.cytech.sendium.core.worker.MessageState;
+import gr.cytech.sendium.core.worker.PostgresqlDlrQuarkusTestResource;
 import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.StandardOutgoingWorkerHandler;
+import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.spi.CDI;
 import org.junit.jupiter.api.BeforeAll;
@@ -22,9 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
+@QuarkusTestResource(value = PostgresqlDlrQuarkusTestResource.class, restrictToAnnotatedClass = true)
 class KannelResourceIT {
     static StandardOutgoingWorkerHandler outgoingWorkerHandler;
-    static InMemoryDlrService dlrService;
 
     CaptorWorker captorWorker;
     private final String usernamekannel = "test2";
@@ -34,7 +35,6 @@ class KannelResourceIT {
     @BeforeAll
     static void beforeAll() {
         outgoingWorkerHandler = (StandardOutgoingWorkerHandler) CDI.current().select(OutgoingWorkerManager.class).get();
-        dlrService = CDI.current().select(InMemoryDlrService.class).get();
     }
 
     @BeforeEach
@@ -273,14 +273,8 @@ class KannelResourceIT {
         assertThat(capturedMsg.priority).isEqualTo(3);
         assertThat(capturedMsg.acked).isTrue();
 
-        var state = dlrService.getState(serial);
-        assertThat(state).isPresent();
-        assertThat(state.get().getGatewayMsgId()).isEqualTo(serial);
-        assertThat(state.get().getAccountId()).isEqualTo(usernamekannel);
-        assertThat(state.get().getSystemId()).isEqualTo(usernamekannel);
-        assertThat(state.get().getSourceAddr()).isEqualTo("Sender");
-        assertThat(state.get().getDestAddr()).isEqualTo("987654321");
-        assertThat(state.get().getForwardDlrUrl()).isEqualTo("http://callback.test/dlr?id=%I&status=%d");
-        assertThat(state.get().getStatus()).isEqualTo(MessageState.MessageStatus.ACCEPTED);
+        assertThat(capturedMsg.dlrReturnMetadata).isEqualTo(new DlrReturnMetadata(
+                DlrReturnMetadata.DeliveryChannel.HTTP, usernamekannel, usernamekannel,
+                "Sender", "987654321", "http://callback.test/dlr?id=%I&status=%d"));
     }
 }

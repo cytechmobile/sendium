@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.smpp.server;
 import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.type.SmppProcessingException;
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 
@@ -42,7 +43,12 @@ public class BasicSubmitSmProcessor<M extends StandardMessage> implements Submit
         pMsg.binheader = bodyInfo.udh();
         pMsg.owner_id = context.getAccountId();
         pMsg.systemId = context.getSystemId();
-        pMsg.acked = submitSm.getRegisteredDelivery() != SmppConstants.REGISTERED_DELIVERY_SMSC_RECEIPT_NOT_REQUESTED;
+        pMsg.acked = worker.isForwardDlrs() &&
+                submitSm.getRegisteredDelivery() != SmppConstants.REGISTERED_DELIVERY_SMSC_RECEIPT_NOT_REQUESTED;
+        if (pMsg.acked) {
+            pMsg.dlrReturnMetadata = DlrReturnMetadata.smpp(
+                    pMsg.owner_id, pMsg.systemId, pMsg.from, pMsg.to);
+        }
         pMsg.priority = (submitSm.getPriority() >= StandardMessage.LOW_PRIORITY && submitSm.getPriority() <= StandardMessage.HIGH_PRIORITY) ?
                 submitSm.getPriority() : StandardMessage.NORMAL_PRIORITY;
         if (scheduleDeliveryTime != null) {

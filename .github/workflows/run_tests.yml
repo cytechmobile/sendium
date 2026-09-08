@@ -26,6 +26,20 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: sendium
+          POSTGRES_USER: sendium
+          POSTGRES_PASSWORD: sendium-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sendium -d sendium"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -47,12 +61,22 @@ jobs:
         env:
           SENDIUM_TEST_IMAGE: sendium:quick-start-test
         run: sh tests/quick-start-test.sh
+      - name: Test PostgreSQL restart behavior on JVM
+        env:
+          SENDIUM_E2E_IMAGE: sendium:quick-start-test
+          SENDIUM_DLR_POSTGRESQL_JDBC_URL: jdbc:postgresql://host.docker.internal:5432/sendium
+          SENDIUM_DLR_POSTGRESQL_USERNAME: sendium
+          SENDIUM_DLR_POSTGRESQL_PASSWORD: sendium-test
+        run: |
+          ./mvnw -B -pl sendium-core -DskipTests test-compile org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
+            -Dexec.classpathScope=test \
+            -Dexec.mainClass=utils.NativeE2eSmoke
       - id: result
         name: Sendium Test Result
         if: always()
         run: |
-          echo "result=${{job.status}}" >> $GITHUB_ENV
-          echo "result=${{job.status}}" >> $GITHUB_OUTPUT
+          echo "result=${{job.status}}" >> "$GITHUB_ENV"
+          echo "result=${{job.status}}" >> "$GITHUB_OUTPUT"
       - name: Cancel current workflow run
         if: failure()
         uses: actions/github-script@v9

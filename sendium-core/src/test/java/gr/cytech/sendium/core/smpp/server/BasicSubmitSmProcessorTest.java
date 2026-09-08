@@ -4,6 +4,7 @@ import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.type.Address;
 import com.cloudhopper.smpp.type.SmppProcessingException;
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +30,7 @@ class BasicSubmitSmProcessorTest {
         bodyInfo = mock(SmppServerUtil.ValidatedMessageBody.class);
 
         when(worker.getPtrnValidReceiver()).thenReturn("[+]?[0-9]{10,20}");
+        when(worker.isForwardDlrs()).thenReturn(true);
         when(context.getAccountId()).thenReturn("testSystemId");
         when(context.getSystemId()).thenReturn("testSystemId");
     }
@@ -59,6 +61,11 @@ class BasicSubmitSmProcessorTest {
         assertEquals("050003010201", msg.binheader);
         assertEquals("testSystemId", msg.systemId);
         assertTrue(msg.acked);
+        assertEquals(DlrReturnMetadata.DeliveryChannel.SMPP, msg.dlrReturnMetadata.channel());
+        assertEquals("testSystemId", msg.dlrReturnMetadata.accountId());
+        assertEquals("testSystemId", msg.dlrReturnMetadata.systemId());
+        assertEquals("sender", msg.dlrReturnMetadata.sourceAddress());
+        assertEquals("306984443255", msg.dlrReturnMetadata.destinationAddress());
         assertEquals(StandardMessage.HIGH_PRIORITY, msg.priority);
         assertEquals(scheduleDeliveryTime.toString(), msg.timestamp);
         assertEquals((byte) 0x08, msg.dcs);
@@ -111,6 +118,21 @@ class BasicSubmitSmProcessorTest {
         assertNotNull(event);
         StandardMessage msg = event.pMsg;
         assertFalse(msg.acked);
+        assertNull(msg.dlrReturnMetadata);
+    }
+
+    @Test
+    void processSubmitSm_DlrForwardingDisabledSuppressesReceiptRequest() throws Exception {
+        when(worker.isForwardDlrs()).thenReturn(false);
+        SubmitSm submitSm = new SubmitSm();
+        submitSm.setSourceAddress(new Address((byte) 0, (byte) 0, "sender"));
+        submitSm.setDestAddress(new Address((byte) 0, (byte) 0, "306984443255"));
+        submitSm.setRegisteredDelivery(SmppConstants.REGISTERED_DELIVERY_SMSC_RECEIPT_REQUESTED);
+
+        InEvent<StandardMessage> event = processor.processSubmitSm(submitSm, context, bodyInfo, null);
+
+        assertFalse(event.pMsg.acked);
+        assertNull(event.pMsg.dlrReturnMetadata);
     }
 
     @Test

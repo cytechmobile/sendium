@@ -23,7 +23,7 @@ flowchart LR
     workerQueues[Worker queues]
     smppClients["SMPP client workers<br/>smppclient instances"]
     carriers["Upstream SMSCs<br/>carriers or SMPP providers"]
-    dlrStore["DLR correlation store<br/>InMemoryDlrService"]
+    dlrStore["DLR storage<br/>PostgreSQL"]
     webhooks["HTTP webhooks<br/>DLR and MO callbacks"]
     config["Runtime config files<br/>credentials.yml<br/>smsg.properties<br/>routingTable.conf"]
 
@@ -80,14 +80,14 @@ flowchart TD
 
 ## HTTP Submission Flow
 
-The HTTP API exposes a Kannel-compatible `GET /sendsms` endpoint. `KannelResource` validates HTTP credentials from `credentials.yml`, decodes request parameters into a `StandardMessage`, saves initial DLR state with the callback URL when present, and enqueues the message for routing.
+The HTTP API exposes a Kannel-compatible `GET /sendsms` endpoint. `KannelResource` validates HTTP credentials from `credentials.yml`, decodes request parameters into a `StandardMessage`, attaches body-free callback metadata when `dlr-url` is present, and enqueues the message for routing. No PostgreSQL row is created at ingress.
 
 ```mermaid
 sequenceDiagram
     participant Client as HTTP client
     participant API as KannelResource
     participant Creds as CredentialFileWatcher
-    participant DLR as InMemoryDlrService
+    participant DLR as DlrStorage
     participant Queue as Router queue
     participant Router as StandardRoutingManager
     participant Worker as SmppClientWorker
@@ -95,15 +95,14 @@ sequenceDiagram
 
     Client->>API: GET /sendsms
     API->>Creds: Validate HTTP credentials
-    API->>DLR: Save initial message state
     API->>Queue: Enqueue StandardMessage
     API-->>Client: 202 Accepted with gateway UUID
     Router->>Queue: Dequeue message
     Router->>Router: Match routing rules
     Router->>Worker: Enqueue to selected worker
     Worker->>SMSC: submit_sm
-    SMSC-->>Worker: submit_sm_resp
-    Worker->>DLR: Link gateway UUID to operator message ID
+    SMSC-->>Worker: submit_sm_resp(provider message ID)
+    Worker->>DLR: Atomically record provider acceptance and correlation
 ```
 
 ## SMPP Server Flow
@@ -124,8 +123,9 @@ sequenceDiagram
     Auth-->>Server: Bind accepted or rejected
     Client->>Server: submit_sm
     Server->>Submit: Validate and convert PDU
-    Submit->>Queue: Enqueue StandardMessage
-    Server-->>Client: submit_sm_resp
+    Submit-->>Server: Valid submission event
+    Server-->>Client: Queue submit_sm_resp (gateway UUID)
+    Server->>Queue: Enqueue StandardMessage
     Router->>Queue: Dequeue and route message
 ```
 
@@ -144,25 +144,78 @@ sequenceDiagram
 
 ## DLR Handling
 
-Outbound HTTP messages can include a Kannel-style `dlr-url`. Sendium stores the gateway message ID and later links it to the operator/SMSC message ID returned by the SMPP provider. When a DLR arrives, the DLR service resolves the correlation and forwards the callback.
+Outbound HTTP messages can include a Kannel-style `dlr-url`, while downstream SMPP submissions request receipts through `registered_delivery`. Ingress carries the body-free return metadata with the in-memory `StandardMessage` and creates no PostgreSQL row. After an upstream SMSC accepts `submit_sm`, the client worker atomically creates the `dlr_message` row and the exact `(provider name, provider message ID)` correlation. An upstream rejection creates a terminal pending-delivery row directly without a correlation. A successful response without a usable provider ID is accepted but cannot be tracked. The provider name defaults to the worker's full name; workers sharing an SMSC message-ID namespace can use the same `msg.hash.prefix`.
+
+Different providers can reuse the same message ID independently. Reusing the same pair within one provider moves the correlation to the newest gateway message and clears it from the previous owner. Acceptance and resolve transactions take a composite-key advisory lock and lock affected gateway rows in canonical UUID order, preventing crossed rebind and resolve deadlocks. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged without invoking the tracker or consuming correlation. The first terminal receipt records its exact state and error, consumes every correlation for the gateway message, and retains the HTTP/SMPP row as `PENDING`.
 
 ```mermaid
 sequenceDiagram
-    participant SMSC as Upstream SMSC
-    participant Worker as SmppClientWorker
-    participant Tracker as InMemoryMessageTracker
-    participant Store as InMemoryDlrService
+    participant Ingress as HTTP/SMPP ingress
     participant Router as Router queue
-    participant DLRHook as ForwardDlrService
-    participant App as Originating application
+    participant Worker as SmppClientWorker
+    participant SMSC as Upstream SMSC
+    participant Tracker as StandardMessageTracker
+    participant Service as DlrService
+    participant Database as PostgreSQL DLR storage
+    participant HTTP as HTTP DLR dispatcher
+    participant App as Originating HTTP application
+    participant SMPPApp as Originating SMPP client
+
+    alt HTTP ingress with dlr-url
+        Ingress->>Ingress: Attach HTTP return metadata
+        Ingress->>Router: Enqueue accepted message
+    else SMPP ingress requesting DLR
+        Ingress->>Ingress: Attach SMPP return metadata
+        Ingress-->>SMPPApp: Queue submit_sm_resp (gateway message ID)
+        Ingress->>Router: Enqueue accepted message
+    end
+    Router->>Worker: Route outbound message
+    Worker->>SMSC: submit_sm
+    alt Provider accepts with message ID
+        SMSC-->>Worker: submit_sm_resp success (provider message ID)
+        Worker->>Tracker: recordProviderAccepted
+        Tracker->>Service: Persist return metadata and provider pair
+        Service->>Database: Atomically upsert DLR row and correlation
+    else Provider rejects
+        SMSC-->>Worker: submit_sm_resp failure
+        Worker->>Tracker: recordProviderRejected
+        Tracker->>Service: Persist terminal pending delivery
+        Service->>Database: Upsert DLR row without correlation
+    else Provider accepts without message ID
+        SMSC-->>Worker: submit_sm_resp success
+        Worker->>Worker: Log and skip DLR tracking
+    end
 
     SMSC->>Worker: deliver_sm delivery receipt
-    Worker->>Tracker: createAndEnqueueDLR
-    Tracker->>Store: Resolve operator message ID
-    Store->>DLRHook: Forward DLR callback if URL exists
-    DLRHook->>App: HTTP GET callback
-    Tracker->>Router: Enqueue internal MSG_DLR
+    alt ACCEPTD or ENROUTE receipt
+        Worker-->>SMSC: deliver_sm_resp (success)
+    else Terminal receipt
+        Worker->>Tracker: createAndEnqueueDLR
+        Tracker->>Service: resolveDlr(provider pair, exact state/error)
+        Service->>Database: Lock, resolve, consume correlations, retain pending delivery
+        Database-->>Service: Resolved message state
+        alt persistence succeeds
+            Worker-->>SMSC: deliver_sm_resp (success)
+        else persistence fails
+            Worker-->>SMSC: deliver_sm_resp (SYSERR)
+        end
+    end
+
+    alt HTTP delivery channel
+        loop Poll durable due rows
+            HTTP->>Database: Start fenced attempt
+            HTTP->>App: HTTP GET callback
+            HTTP->>Database: Delete on success or persist retry/failure
+        end
+    else SMPP delivery channel
+        Tracker->>Router: Enqueue internal MSG_DLR
+        Router->>SMPPApp: deliver_sm receipt part(s)
+        SMPPApp-->>Router: deliver_sm_resp for every part
+        Router->>Database: Delete only after all responses succeed
+    end
 ```
+
+HTTP and SMPP delivery are acknowledgement-driven and at-least-once. A crash after the receiver accepts a callback or response can cause the same receipt, including already acknowledged multipart SMPP parts, to be delivered again.
 
 ## MO Handling
 
@@ -209,9 +262,9 @@ Sendium expects runtime files in the configured `conf` directory.
 
 ## Persistence Boundaries
 
-Most runtime queues are in-memory. The DLR correlation service uses H2 MVStore at `data/dlr-mvstore.db` by default and falls back to in-memory maps if the store cannot be opened.
+Most runtime queues are in memory. DLR messages, provider correlations, and terminal HTTP/SMPP delivery state use PostgreSQL. Sendium persists required state before HTTP routing and acceptance, while downstream SMPP submissions receive a generated UUID before persistence and are routed only after persistence succeeds. Queued and in-flight messages remain process-local.
 
-This means operators should treat queued, in-flight messages as process-local state, while DLR correlation has lightweight local persistence.
+PostgreSQL does not make multipart assembly or router and worker queues durable. See [DLR Persistence](13-dlr-persistence.md) for retention, restart guarantees, and the remaining crash windows.
 
 ## Related Documentation
 
@@ -221,3 +274,4 @@ This means operators should treat queued, in-flight messages as process-local st
 * [Routing Engine](05-routing-engine.md)
 * [Webhooks](07-webhooks.md)
 * [Docker Deployment](02-docker-deployment.md)
+* [DLR Persistence](13-dlr-persistence.md)
