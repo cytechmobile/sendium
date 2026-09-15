@@ -10,14 +10,13 @@ permissions:
 
 concurrency:
   group: ReleasePlease-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       sha: ${{ steps.release.outputs.sha }}
@@ -39,23 +38,15 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-      - name: Checkout released code
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ steps.release.outputs.sha }}
-      - name: Setup Java
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        uses: actions/setup-java@v6
-        with:
-          java-version: "25"
-          distribution: "graalvm"
-          server-id: github
-      - name: Publish to GitHub Packages
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        run: ./mvnw -B deploy -DskipTests
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  publish-maven:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ needs.release-please.outputs.sha }}
   docker-jvm:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}

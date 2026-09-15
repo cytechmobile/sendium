@@ -2,6 +2,17 @@ name: Publish package
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to publish. Defaults to the selected workflow ref.
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to publish.
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -11,11 +22,29 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-java@v6
         with:
           java-version: '25'
           distribution: 'graalvm'
           server-id: github # Matches the ID in pom.xml
+      - name: Bootstrap Maven
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if ./mvnw --version; then
+              exit 0
+            fi
+
+            if [[ "${attempt}" -eq 3 ]]; then
+              echo "::error::Maven bootstrap failed after ${attempt} attempts"
+              exit 1
+            fi
+
+            echo "::warning::Maven bootstrap attempt ${attempt} failed; retrying"
+            sleep $((attempt * 10))
+          done
       - name: Publish to GitHub Packages
         run: |
           ./mvnw -B deploy -DskipTests
