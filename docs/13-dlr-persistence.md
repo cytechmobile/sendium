@@ -84,7 +84,7 @@ Size the pool against measured gateway concurrency and the database connection b
 
 ## Delivery Claim Settings
 
-`SENDIUM_DLR_DELIVERY_CLAIM_DURATION` controls how long an active HTTP callback claim excludes other Sendium replicas. It defaults to `5M`. Configure a duration longer than the longest callback operation; an expired claim can be acquired by another replica while the original sender is still running.
+`SENDIUM_DLR_DELIVERY_CLAIM_DURATION` controls how long an active HTTP or SMPP delivery claim excludes other Sendium replicas. It defaults to `5M`. Configure a duration longer than the longest downstream delivery operation; an expired claim can be acquired by another replica while the original sender is still running.
 
 ## Startup And Monitoring
 
@@ -112,7 +112,7 @@ Sendium requests final delivery receipts from upstream SMPP providers. A valid u
 
 An accepted upstream `submit_sm_resp` with a provider message ID creates the message row and correlation atomically. If that transaction fails, Sendium preserves the provider success and does not resend the SMS; the later DLR may be lost because it cannot be correlated. An accepted response without a usable provider message ID is also not persisted. A provider rejection is persisted directly as terminal pending delivery so it can be returned downstream without waiting for a provider receipt.
 
-A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP delivery is pending or after HTTP delivery reaches terminal `FAILED` status. The delivery attempt number is a fencing token: a stale completion or failure cannot mutate a newer attempt. HTTP uses leased PostgreSQL claims across replicas; SMPP temporarily retains a process-local guard.
+A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP delivery is pending or after HTTP delivery reaches terminal `FAILED` status. The delivery attempt number is a fencing token: a stale completion or failure cannot mutate a newer attempt. HTTP and SMPP use leased PostgreSQL claims across replicas.
 
 ## Retention
 
@@ -138,15 +138,15 @@ Cleanup is best-effort maintenance and is isolated from message handling. One ca
 | Gateway-to-provider message correlation | The `dlr_message` row and exact provider correlation are committed atomically after provider acceptance. Intermediate `ACCEPTD` and `ENROUTE` receipts leave the correlation intact. | Provider success is not retried if this write fails, so a later receipt may be unresolvable. Success without a provider ID is not tracked. The first terminal receipt consumes every correlation for the gateway message. |
 | Provider submission rejection | A terminal pending-delivery row is committed directly without a correlation. | If this write fails, no durable downstream rejection exists. The outbound submission is not retried because the provider already returned an outcome. |
 | Terminal HTTP/SMPP delivery | The common payload and exact provider outcome remain in one row until fenced completion. | Delivery is at-least-once; acknowledgement can be received before the final delete commits. |
-| Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. HTTP batch claims use a database lease so active replicas skip the same callback. | SMPP delivery still uses a process-local active-ID guard. |
+| Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. HTTP batch claims and SMPP attempt starts use a database lease so active replicas cannot start the same delivery. | An attempt that outlives its lease can overlap a replacement. |
 | Multipart submission | Segments and aggregate payloads remain in memory. After provider acceptance, the aggregate DLR row retains the original gateway part IDs needed for downstream receipt delivery. | Multipart assembly and its pending timers are process-local and are not reconstructed after restart. |
 | HTTP DLR callback retry | Pending state, attempt count, next-attempt timestamp, and active lease are durable. Due rows are atomically claimed with locked-row skipping in non-overlapping batches, with each callback dispatched on its own virtual thread and at most 10 callbacks in flight per host; failures retry after one hour and attempt 10 failures become `FAILED`. | A request accepted before a crash or failed completion update can be repeated. A running batch delays the next due-callback check, and an attempt that outlives its lease can overlap a replacement. |
-| SMPP DLR delivery | One attempt covers every generated receipt part and completes only after matching successful `deliver_sm_resp` PDUs for all parts. Pending rows are enqueued when the same `system_id` binds. | Timeout, `generic_nack`, wrong/non-OK response, enqueue/send failure, or session closure releases the attempt. Replay is bind-driven rather than periodic, and partial success is not checkpointed. |
+| SMPP DLR delivery | One leased attempt covers every generated receipt part and completes only after matching successful `deliver_sm_resp` PDUs for all parts. Pending rows are enqueued when the same `system_id` binds. | Timeout, `generic_nack`, wrong/non-OK response, enqueue/send failure, or session closure releases the attempt. Replay is bind-driven rather than periodic, and partial success is not checkpointed. |
 | Database files | The Quick Start named volume survives normal container replacement and `docker compose down`. | Volume deletion, host-disk loss, and disaster recovery require backups or external PostgreSQL replication managed by the operator. |
 
 Downstream delivery uses bounded at-least-once attempt semantics, not exactly-once delivery. A crash or storage failure after an HTTP receiver accepts a callback, or after an SMPP client sends a successful `deliver_sm_resp`, can cause the receipt to be delivered again. Multipart SMPP replay can repeat already acknowledged parts. Consumers must be idempotent using the gateway or receipted message ID. HTTP retry limits, SMPP bind availability, and seven-day retention mean this is not an unlimited eventual-success guarantee.
 
-These limits are intentional V1 boundaries. PostgreSQL provides provider-outcome correlation, DLR persistence, and delivery fencing; it is not outbound queue persistence, a distributed worker coordinator, or a replacement for the router and worker queues. SMPP attempt guards remain process-local, so multiple active Sendium replicas sharing one database can still start duplicate SMPP deliveries.
+These limits are intentional V1 boundaries. PostgreSQL provides provider-outcome correlation, DLR persistence, and delivery fencing; it is not outbound queue persistence, a general distributed worker coordinator, or a replacement for the router and worker queues.
 
 ## Related Documentation
 
