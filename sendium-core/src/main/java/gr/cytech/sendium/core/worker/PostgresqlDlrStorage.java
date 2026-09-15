@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -31,7 +30,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
     private static final long EXPIRY_CHECK_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(1);
     private static final Duration DEFAULT_DELIVERY_CLAIM_DURATION = Duration.ofMinutes(5);
     private static final int MAX_DELIVERY_BATCH_SIZE = 1_000;
-    private static final int STARTING_ATTEMPT = -1;
 
     private static final String STATE_COLUMNS = """
             gateway_message_id, account_id, system_id, source_address, destination_address,
@@ -185,8 +183,10 @@ public class PostgresqlDlrStorage implements DlrStorage {
             UPDATE sendium_dlr.dlr_message
             SET delivery_attempt_count = delivery_attempt_count + 1,
                 last_attempt_at = CURRENT_TIMESTAMP,
+                claimed_until = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
                 updated_at = CURRENT_TIMESTAMP
             WHERE gateway_message_id = ? AND delivery_channel = ? AND delivery_status = 'PENDING'
+              AND (claimed_until IS NULL OR claimed_until <= CURRENT_TIMESTAMP)
             RETURNING %s
             """.formatted(STATE_COLUMNS);
 
@@ -240,7 +240,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
     private final DataSource dataSource;
     private final long deliveryClaimDurationMillis;
     private final long expiryCheckIntervalMillis;
-    private final ConcurrentHashMap<UUID, Integer> activeDeliveryAttempts = new ConcurrentHashMap<>();
     private final AtomicBoolean expiryInProgress = new AtomicBoolean();
     private volatile long lastExpiryCheck;
 
@@ -457,26 +456,16 @@ public class PostgresqlDlrStorage implements DlrStorage {
         if (expectedChannel == MessageState.DeliveryChannel.NONE) {
             throw new IllegalArgumentException("A delivery attempt requires HTTP or SMPP channel");
         }
-        UUID gatewayId = parseGatewayId(gatewayMsgId);
-        if (activeDeliveryAttempts.putIfAbsent(gatewayId, STARTING_ATTEMPT) != null) {
-            return Optional.empty();
-        }
 
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(START_DELIVERY_SQL)) {
-            statement.setObject(1, gatewayId);
-            statement.setString(2, expectedChannel.name());
+            statement.setLong(1, deliveryClaimDurationMillis);
+            statement.setObject(2, parseGatewayId(gatewayMsgId));
+            statement.setString(3, expectedChannel.name());
             try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
-                    activeDeliveryAttempts.remove(gatewayId, STARTING_ATTEMPT);
-                    return Optional.empty();
-                }
-                MessageState state = readState(resultSet);
-                activeDeliveryAttempts.replace(gatewayId, STARTING_ATTEMPT, state.getDeliveryAttemptCount());
-                return Optional.of(state);
+                return resultSet.next() ? Optional.of(readState(resultSet)) : Optional.empty();
             }
         } catch (SQLException e) {
-            activeDeliveryAttempts.remove(gatewayId, STARTING_ATTEMPT);
             throw failure("start DLR delivery attempt", e);
         }
     }
@@ -534,15 +523,12 @@ public class PostgresqlDlrStorage implements DlrStorage {
             throw new IllegalArgumentException("Expected attempt must be positive");
         }
         checkExpiry();
-        UUID gatewayId = parseGatewayId(gatewayMsgId);
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             binder.bind(statement);
             return statement.executeUpdate() == 1;
         } catch (SQLException e) {
             throw failure(operation, e);
-        } finally {
-            activeDeliveryAttempts.remove(gatewayId, expectedAttempt);
         }
     }
 

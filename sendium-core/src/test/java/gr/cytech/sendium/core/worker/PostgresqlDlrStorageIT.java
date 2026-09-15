@@ -243,19 +243,26 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
-    void deliveryAttemptIncrementsOnceAndLocalGuardPreventsDuplicateStart() {
+    void liveSmppClaimBlocksAnotherAdapterUntilTheLeaseExpires() throws SQLException {
         MessageState state = pendingSmpp("attempt-once");
 
         assertThat(storage.startDeliveryAttempt(
                 state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP)).isEmpty();
         MessageState attempt = storage.startDeliveryAttempt(
                 state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
+        PostgresqlDlrStorage otherAdapter = new PostgresqlDlrStorage(dataSource);
 
         assertThat(attempt.getDeliveryAttemptCount()).isOne();
         assertThat(attempt.getLastAttemptAt()).isNotNull();
-        assertThat(storage.startDeliveryAttempt(
+        assertThat(otherAdapter.startDeliveryAttempt(
                 state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP)).isEmpty();
         assertThat(storage.getState(state.getGatewayMsgId()).orElseThrow().getDeliveryAttemptCount()).isOne();
+
+        setClaimedUntil(state.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '1 second'");
+        MessageState retried = otherAdapter.startDeliveryAttempt(
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
+
+        assertThat(retried.getDeliveryAttemptCount()).isEqualTo(2);
     }
 
     @Test
@@ -265,7 +272,8 @@ class PostgresqlDlrStorageIT {
                 state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
         assertThat(storage.retryDelivery(state.getGatewayMsgId(), first.getDeliveryAttemptCount(),
                 " first retry ", System.currentTimeMillis())).isTrue();
-        MessageState second = storage.startDeliveryAttempt(
+        PostgresqlDlrStorage otherAdapter = new PostgresqlDlrStorage(dataSource);
+        MessageState second = otherAdapter.startDeliveryAttempt(
                 state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
 
         assertThat(storage.retryDelivery(state.getGatewayMsgId(), first.getDeliveryAttemptCount(),
