@@ -47,8 +47,8 @@ public class DlrService {
         return storage.listPendingSmppDeliveries(systemId);
     }
 
-    public List<MessageState> listDueHttpDeliveries(int limit) {
-        return storage.listDueHttpDeliveries(limit);
+    public List<MessageState> claimDueHttpDeliveries(int limit) {
+        return storage.claimDueHttpDeliveries(limit);
     }
 
     public Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
@@ -68,8 +68,8 @@ public class DlrService {
         return storage.failDelivery(gatewayMsgId, expectedAttempt, result);
     }
 
-    public boolean failInvalidDelivery(String gatewayMsgId, String result) {
-        return storage.failInvalidDelivery(gatewayMsgId, result);
+    public boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        return storage.failInvalidDelivery(gatewayMsgId, expectedAttempt, result);
     }
 
     private MessageState.MessageStatus mapDlrState(int dlrState) {

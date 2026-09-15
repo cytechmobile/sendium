@@ -16,6 +16,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,6 +50,10 @@ public class ManagedDlrStorage implements DlrStorage {
     @Inject
     MeterRegistry meterRegistry;
 
+    @Inject
+    @ConfigProperty(name = "sendium.dlr.delivery-claim-duration", defaultValue = "5M")
+    Duration deliveryClaimDuration;
+
     private final Map<String, Timer> timers = new ConcurrentHashMap<>();
 
     private DlrStorage delegate;
@@ -62,7 +67,7 @@ public class ManagedDlrStorage implements DlrStorage {
                     "PostgreSQL DLR storage requires the active 'dlr' datasource and Flyway migration");
         }
         selectedPostgresqlDataSource = postgresqlDataSource.get();
-        delegate = new PostgresqlDlrStorage(selectedPostgresqlDataSource);
+        delegate = new PostgresqlDlrStorage(selectedPostgresqlDataSource, deliveryClaimDuration);
 
         Gauge.builder("sendium.dlr.storage.selected", this, ignored -> 1.0)
                 .description("Active Sendium DLR storage backend")
@@ -117,8 +122,8 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     @Override
-    public List<MessageState> listDueHttpDeliveries(int limit) {
-        return timed("list_due_http", () -> delegate.listDueHttpDeliveries(limit));
+    public List<MessageState> claimDueHttpDeliveries(int limit) {
+        return timed("claim_due_http", () -> delegate.claimDueHttpDeliveries(limit));
     }
 
     @Override
@@ -144,8 +149,9 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     @Override
-    public boolean failInvalidDelivery(String gatewayMsgId, String result) {
-        return timed("fail_invalid_delivery", () -> delegate.failInvalidDelivery(gatewayMsgId, result));
+    public boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        return timed("fail_invalid_delivery", () -> delegate.failInvalidDelivery(
+                gatewayMsgId, expectedAttempt, result));
     }
 
     private <T> T timed(String operation, Supplier<T> action) {

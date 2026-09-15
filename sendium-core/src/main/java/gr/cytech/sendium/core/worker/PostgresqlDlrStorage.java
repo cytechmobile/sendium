@@ -10,6 +10,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -28,6 +29,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
     private static final Logger logger = LoggerFactory.getLogger(PostgresqlDlrStorage.class);
 
     private static final long EXPIRY_CHECK_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(1);
+    private static final Duration DEFAULT_DELIVERY_CLAIM_DURATION = Duration.ofMinutes(5);
     private static final int MAX_DELIVERY_BATCH_SIZE = 1_000;
     private static final int STARTING_ATTEMPT = -1;
 
@@ -158,13 +160,25 @@ public class PostgresqlDlrStorage implements DlrStorage {
             ORDER BY resolved_at, created_at, gateway_message_id
             """.formatted(STATE_COLUMNS);
 
-    private static final String LIST_DUE_HTTP_SQL = """
-            SELECT %s
-            FROM sendium_dlr.dlr_message
-            WHERE delivery_channel = 'HTTP' AND delivery_status = 'PENDING'
-              AND next_attempt_at <= CURRENT_TIMESTAMP
-            ORDER BY next_attempt_at, gateway_message_id
-            LIMIT ?
+    private static final String CLAIM_DUE_HTTP_SQL = """
+            WITH due AS (
+                SELECT gateway_message_id AS due_gateway_message_id
+                FROM sendium_dlr.dlr_message
+                WHERE delivery_channel = 'HTTP' AND delivery_status = 'PENDING'
+                  AND next_attempt_at <= CURRENT_TIMESTAMP
+                  AND (claimed_until IS NULL OR claimed_until <= CURRENT_TIMESTAMP)
+                ORDER BY next_attempt_at, gateway_message_id
+                LIMIT ?
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE sendium_dlr.dlr_message message
+            SET delivery_attempt_count = message.delivery_attempt_count + 1,
+                last_attempt_at = CURRENT_TIMESTAMP,
+                claimed_until = CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond'),
+                updated_at = CURRENT_TIMESTAMP
+            FROM due
+            WHERE message.gateway_message_id = due.due_gateway_message_id
+            RETURNING %s
             """.formatted(STATE_COLUMNS);
 
     private static final String START_DELIVERY_SQL = """
@@ -183,22 +197,23 @@ public class PostgresqlDlrStorage implements DlrStorage {
 
     private static final String RETRY_DELIVERY_SQL = """
             UPDATE sendium_dlr.dlr_message
-            SET last_delivery_result = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP
+            SET last_delivery_result = ?, next_attempt_at = ?, claimed_until = NULL,
+                updated_at = CURRENT_TIMESTAMP
             WHERE gateway_message_id = ? AND delivery_status = 'PENDING' AND delivery_attempt_count = ?
             """;
 
     private static final String FAIL_DELIVERY_SQL = """
             UPDATE sendium_dlr.dlr_message
-            SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL,
+            SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL, claimed_until = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE gateway_message_id = ? AND delivery_status = 'PENDING' AND delivery_attempt_count = ?
             """;
 
     private static final String FAIL_INVALID_DELIVERY_SQL = """
             UPDATE sendium_dlr.dlr_message
-            SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL,
+            SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL, claimed_until = NULL,
                 resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-            WHERE gateway_message_id = ? AND delivery_status = 'PENDING'
+            WHERE gateway_message_id = ? AND delivery_status = 'PENDING' AND delivery_attempt_count = ?
             """;
 
     private static final String DELETE_EXPIRED_CORRELATIONS_SQL = """
@@ -223,20 +238,36 @@ public class PostgresqlDlrStorage implements DlrStorage {
             """;
 
     private final DataSource dataSource;
+    private final long deliveryClaimDurationMillis;
     private final long expiryCheckIntervalMillis;
     private final ConcurrentHashMap<UUID, Integer> activeDeliveryAttempts = new ConcurrentHashMap<>();
     private final AtomicBoolean expiryInProgress = new AtomicBoolean();
     private volatile long lastExpiryCheck;
 
     public PostgresqlDlrStorage(DataSource dataSource) {
-        this(dataSource, EXPIRY_CHECK_INTERVAL_MILLIS);
+        this(dataSource, DEFAULT_DELIVERY_CLAIM_DURATION, EXPIRY_CHECK_INTERVAL_MILLIS);
     }
 
     PostgresqlDlrStorage(DataSource dataSource, long expiryCheckIntervalMillis) {
+        this(dataSource, DEFAULT_DELIVERY_CLAIM_DURATION, expiryCheckIntervalMillis);
+    }
+
+    PostgresqlDlrStorage(DataSource dataSource, Duration deliveryClaimDuration) {
+        this(dataSource, deliveryClaimDuration, EXPIRY_CHECK_INTERVAL_MILLIS);
+    }
+
+    private PostgresqlDlrStorage(DataSource dataSource, Duration deliveryClaimDuration,
+                                 long expiryCheckIntervalMillis) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        Objects.requireNonNull(deliveryClaimDuration, "deliveryClaimDuration");
+        long claimDurationMillis = deliveryClaimDuration.toMillis();
+        if (claimDurationMillis < 1) {
+            throw new IllegalArgumentException("Delivery claim duration must be positive");
+        }
         if (expiryCheckIntervalMillis < 0) {
             throw new IllegalArgumentException("Invalid expiry policy");
         }
+        this.deliveryClaimDurationMillis = claimDurationMillis;
         this.expiryCheckIntervalMillis = expiryCheckIntervalMillis;
     }
 
@@ -407,14 +438,16 @@ public class PostgresqlDlrStorage implements DlrStorage {
     }
 
     @Override
-    public List<MessageState> listDueHttpDeliveries(int limit) {
+    public List<MessageState> claimDueHttpDeliveries(int limit) {
         checkExpiry();
         if (limit < 1) {
             throw new IllegalArgumentException("Delivery limit must be positive");
         }
         int boundedLimit = Math.min(limit, MAX_DELIVERY_BATCH_SIZE);
-        return listStates(LIST_DUE_HTTP_SQL, statement -> statement.setInt(1, boundedLimit),
-                "list due HTTP deliveries");
+        return listStates(CLAIM_DUE_HTTP_SQL, statement -> {
+            statement.setInt(1, boundedLimit);
+            statement.setLong(2, deliveryClaimDurationMillis);
+        }, "claim due HTTP deliveries");
     }
 
     @Override
@@ -479,12 +512,16 @@ public class PostgresqlDlrStorage implements DlrStorage {
     }
 
     @Override
-    public boolean failInvalidDelivery(String gatewayMsgId, String result) {
+    public boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        if (expectedAttempt < 1) {
+            throw new IllegalArgumentException("Expected attempt must be positive");
+        }
         checkExpiry();
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(FAIL_INVALID_DELIVERY_SQL)) {
             statement.setString(1, normalizeResult(result));
             statement.setObject(2, parseGatewayId(gatewayMsgId));
+            statement.setInt(3, expectedAttempt);
             return statement.executeUpdate() == 1;
         } catch (SQLException e) {
             throw failure("mark invalid DLR delivery failed", e);

@@ -216,7 +216,7 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
-    void dueHttpDeliveriesAreFilteredOrderedAndLimited() throws SQLException {
+    void dueHttpDeliveriesAreClaimedInOrderAndHiddenAcrossAdapters() throws SQLException {
         MessageState later = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/later");
         MessageState first = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/first");
         MessageState future = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/future");
@@ -229,41 +229,44 @@ class PostgresqlDlrStorageIT {
         setNextAttemptAt(later.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '1 hour'");
         setNextAttemptAt(future.getGatewayMsgId(), "CURRENT_TIMESTAMP + INTERVAL '1 hour'");
 
-        assertThat(storage.listDueHttpDeliveries(1))
+        assertThat(storage.claimDueHttpDeliveries(1))
                 .extracting(MessageState::getGatewayMsgId)
                 .containsExactly(first.getGatewayMsgId());
-        assertThat(storage.listDueHttpDeliveries(10))
+        PostgresqlDlrStorage otherAdapter = new PostgresqlDlrStorage(dataSource);
+        assertThat(otherAdapter.claimDueHttpDeliveries(10))
                 .extracting(MessageState::getGatewayMsgId)
-                .containsExactly(first.getGatewayMsgId(), later.getGatewayMsgId());
-        assertThatThrownBy(() -> storage.listDueHttpDeliveries(0))
+                .containsExactly(later.getGatewayMsgId());
+        assertThat(storage.getState(first.getGatewayMsgId()).orElseThrow().getDeliveryAttemptCount()).isOne();
+        assertThat(storage.getState(later.getGatewayMsgId()).orElseThrow().getDeliveryAttemptCount()).isOne();
+        assertThatThrownBy(() -> storage.claimDueHttpDeliveries(0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void deliveryAttemptIncrementsOnceAndLocalGuardPreventsDuplicateStart() {
-        MessageState state = pendingHttp("attempt-once");
+        MessageState state = pendingSmpp("attempt-once");
 
         assertThat(storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP)).isEmpty();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP)).isEmpty();
         MessageState attempt = storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
 
         assertThat(attempt.getDeliveryAttemptCount()).isOne();
         assertThat(attempt.getLastAttemptAt()).isNotNull();
         assertThat(storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP)).isEmpty();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP)).isEmpty();
         assertThat(storage.getState(state.getGatewayMsgId()).orElseThrow().getDeliveryAttemptCount()).isOne();
     }
 
     @Test
     void staleAttemptCannotCompleteOrFailNewerAttempt() {
-        MessageState state = pendingHttp("stale-fence");
+        MessageState state = pendingSmpp("stale-fence");
         MessageState first = storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
         assertThat(storage.retryDelivery(state.getGatewayMsgId(), first.getDeliveryAttemptCount(),
                 " first retry ", System.currentTimeMillis())).isTrue();
         MessageState second = storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
 
         assertThat(storage.retryDelivery(state.getGatewayMsgId(), first.getDeliveryAttemptCount(),
                 "stale", System.currentTimeMillis())).isFalse();
@@ -271,7 +274,7 @@ class PostgresqlDlrStorageIT {
         assertThat(storage.failDelivery(state.getGatewayMsgId(), first.getDeliveryAttemptCount(), "stale"))
                 .isFalse();
         assertThat(storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP)).isEmpty();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP)).isEmpty();
         assertThat(storage.failDelivery(state.getGatewayMsgId(), second.getDeliveryAttemptCount(), " final "))
                 .isTrue();
         assertThat(storage.getState(state.getGatewayMsgId())).get().satisfies(actual -> {
@@ -283,9 +286,9 @@ class PostgresqlDlrStorageIT {
 
     @Test
     void matchingCompletionDeletesPendingDelivery() {
-        MessageState state = pendingHttp("complete");
+        MessageState state = pendingSmpp("complete");
         MessageState attempt = storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+                state.getGatewayMsgId(), MessageState.DeliveryChannel.SMPP).orElseThrow();
 
         assertThat(storage.completeDelivery(state.getGatewayMsgId(), attempt.getDeliveryAttemptCount())).isTrue();
         assertThat(storage.getState(state.getGatewayMsgId())).isEmpty();
@@ -295,8 +298,7 @@ class PostgresqlDlrStorageIT {
     @Test
     void retryStoresNormalizedResultAndSchedulesNextAttempt() {
         MessageState state = pendingHttp("retry");
-        MessageState attempt = storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+        MessageState attempt = storage.claimDueHttpDeliveries(1).getFirst();
         long nextAttemptAt = System.currentTimeMillis() + Duration.ofHours(1).toMillis();
 
         assertThat(storage.retryDelivery(state.getGatewayMsgId(), attempt.getDeliveryAttemptCount(),
@@ -307,31 +309,34 @@ class PostgresqlDlrStorageIT {
             assertThat(actual.getLastDeliveryResult()).isEqualTo("timeout");
             assertThat(actual.getNextAttemptAt()).isEqualTo(nextAttemptAt);
         });
-        assertThat(storage.listDueHttpDeliveries(10)).isEmpty();
+        assertThat(storage.claimDueHttpDeliveries(10)).isEmpty();
     }
 
     @Test
-    void invalidDeliveryFailsWithoutIncrementingAttempts() {
+    void invalidClaimedDeliveryFailsWithExpectedAttempt() {
         MessageState state = pendingHttp("invalid");
+        MessageState attempt = storage.claimDueHttpDeliveries(1).getFirst();
 
-        assertThat(storage.failInvalidDelivery(state.getGatewayMsgId(), "  missing URL  ")).isTrue();
+        assertThat(storage.failInvalidDelivery(state.getGatewayMsgId(), attempt.getDeliveryAttemptCount(),
+                "  missing URL  ")).isTrue();
 
         assertThat(storage.getState(state.getGatewayMsgId())).get().satisfies(actual -> {
             assertThat(actual.getDeliveryStatus()).isEqualTo(MessageState.DeliveryStatus.FAILED);
-            assertThat(actual.getDeliveryAttemptCount()).isZero();
+            assertThat(actual.getDeliveryAttemptCount()).isOne();
             assertThat(actual.getLastDeliveryResult()).isEqualTo("missing URL");
         });
     }
 
     @Test
-    void adapterRecreationCanRetryAttemptThatWasActiveBeforeCrash() {
+    void liveHttpClaimBlocksAnotherAdapterUntilTheLeaseExpires() throws SQLException {
         MessageState state = pendingHttp("adapter-recreation");
-        assertThat(storage.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP)).isPresent();
+        assertThat(storage.claimDueHttpDeliveries(1)).hasSize(1);
 
         PostgresqlDlrStorage recreated = new PostgresqlDlrStorage(dataSource);
-        MessageState retried = recreated.startDeliveryAttempt(
-                state.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+        assertThat(recreated.claimDueHttpDeliveries(1)).isEmpty();
+
+        setClaimedUntil(state.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '1 second'");
+        MessageState retried = recreated.claimDueHttpDeliveries(1).getFirst();
 
         assertThat(retried.getDeliveryAttemptCount()).isEqualTo(2);
     }
@@ -368,10 +373,17 @@ class PostgresqlDlrStorageIT {
         setResolvedAt(oldPending.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '8 days'");
 
         MessageState freshFailed = pendingHttp("fresh-failed");
-        storage.failInvalidDelivery(freshFailed.getGatewayMsgId(), "invalid");
+        MessageState freshFailedAttempt = storage.claimDueHttpDeliveries(10).stream()
+                .filter(state -> state.getGatewayMsgId().equals(freshFailed.getGatewayMsgId()))
+                .findFirst().orElseThrow();
+        storage.failInvalidDelivery(freshFailed.getGatewayMsgId(),
+                freshFailedAttempt.getDeliveryAttemptCount(), "invalid");
 
         MessageState oldFailed = pendingHttp("old-failed");
-        storage.failInvalidDelivery(oldFailed.getGatewayMsgId(), "invalid");
+        MessageState oldFailedAttempt = storage.claimDueHttpDeliveries(1).getFirst();
+        assertThat(oldFailedAttempt.getGatewayMsgId()).isEqualTo(oldFailed.getGatewayMsgId());
+        storage.failInvalidDelivery(oldFailed.getGatewayMsgId(),
+                oldFailedAttempt.getDeliveryAttemptCount(), "invalid");
         setResolvedAt(oldFailed.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '8 days'");
 
         PostgresqlDlrStorage cleanup = new PostgresqlDlrStorage(dataSource, 0);
@@ -433,6 +445,12 @@ class PostgresqlDlrStorageIT {
         return state;
     }
 
+    private MessageState pendingSmpp(String providerMessageId) {
+        MessageState state = state(MessageState.DeliveryChannel.SMPP, "system", null);
+        saveResolve(state, providerMessageId);
+        return state;
+    }
+
     private void saveResolve(MessageState state, String providerMessageId) {
         acceptProviderMessage(state, providerMessageId);
         resolve(providerMessageId).orElseThrow();
@@ -485,6 +503,10 @@ class PostgresqlDlrStorageIT {
 
     private void setNextAttemptAt(String gatewayMsgId, String expression) throws SQLException {
         updateTimestamp(gatewayMsgId, "next_attempt_at", expression);
+    }
+
+    private void setClaimedUntil(String gatewayMsgId, String expression) throws SQLException {
+        updateTimestamp(gatewayMsgId, "claimed_until", expression);
     }
 
     private void updateTimestamp(String gatewayMsgId, String column, String expression) throws SQLException {

@@ -73,7 +73,7 @@ class PostgresqlMigrationIT {
             assertThat(loadColumnNames(connection, "dlr_message"))
                     .contains("dlr_state", "error_code", "delivery_channel", "delivery_status",
                             "delivery_attempt_count", "last_attempt_at", "next_attempt_at",
-                            "last_delivery_result", "resolved_at")
+                            "claimed_until", "last_delivery_result", "resolved_at")
                     .doesNotContain("generation_id");
         }
     }

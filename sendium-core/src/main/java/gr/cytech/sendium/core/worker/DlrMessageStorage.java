@@ -17,7 +17,7 @@ public interface DlrMessageStorage {
 
     List<MessageState> listPendingSmppDeliveries(String systemId);
 
-    List<MessageState> listDueHttpDeliveries(int limit);
+    List<MessageState> claimDueHttpDeliveries(int limit);
 
     Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
                                                 MessageState.DeliveryChannel expectedChannel);
@@ -28,5 +28,5 @@ public interface DlrMessageStorage {
 
     boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result);
 
-    boolean failInvalidDelivery(String gatewayMsgId, String result);
+    boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result);
 }

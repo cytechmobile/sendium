@@ -53,6 +53,7 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `SENDIUM_DLR_POSTGRESQL_POOL_MIN_SIZE` | `0` | Minimum datasource pool size. |
 | `SENDIUM_DLR_POSTGRESQL_POOL_MAX_SIZE` | `10` | Maximum datasource pool size. |
 | `SENDIUM_DLR_POSTGRESQL_ACQUISITION_TIMEOUT` | `5S` | Maximum wait for a pooled connection. |
+| `SENDIUM_DLR_DELIVERY_CLAIM_DURATION` | `5M` | PostgreSQL lease duration for an active HTTP DLR callback attempt. |
 
 PostgreSQL is the only DLR persistence backend, and startup is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
 
@@ -60,7 +61,7 @@ PostgreSQL is the only DLR persistence backend, and startup is fail-closed. Star
 
 `sendium.dlr.persistence.enabled` is a build-time setting. The `sendium-core` module leaves it undefined, which means disabled; the standalone `sendium-app` sets it to `true`.
 
-When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. Submissions are still accepted and routed, but no gateway DLR state is stored and Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` must declare the property as `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. Enabled persistence is fail-closed at startup, but HTTP and downstream SMPP ingress remain database-independent at runtime. If PostgreSQL is unavailable when an upstream provider outcome arrives, the outbound message is not resubmitted and its later receipt may be unresolvable.
+When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. Submissions are still accepted and routed, but no gateway DLR state is stored and Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` must declare the property as `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. The claim duration is configured with `sendium.dlr.delivery-claim-duration`. Enabled persistence is fail-closed at startup, but HTTP and downstream SMPP ingress remain database-independent at runtime. If PostgreSQL is unavailable when an upstream provider outcome arrives, the outbound message is not resubmitted and its later receipt may be unresolvable.
 
 ## Logs
 
