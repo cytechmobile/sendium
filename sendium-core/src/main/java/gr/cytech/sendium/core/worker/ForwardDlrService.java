@@ -102,7 +102,7 @@ public class ForwardDlrService {
         int attempt = started.orElseThrow().getDeliveryAttemptCount();
         try {
             HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
-            if (response.statusCode() >= 200 && response.statusCode() < 400) {
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 completeDelivery(gatewayMsgId, attempt);
             } else {
                 handleAttemptFailure(gatewayMsgId, attempt, "http_failure");
