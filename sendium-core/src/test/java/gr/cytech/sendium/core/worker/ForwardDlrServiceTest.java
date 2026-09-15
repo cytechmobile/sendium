@@ -89,7 +89,7 @@ class ForwardDlrServiceTest {
     }
 
     @Test
-    void directRedirectCompletesAndIsNotFollowed() throws Exception {
+    void directRedirectSchedulesRetryAndIsNotFollowed() throws Exception {
         AtomicInteger redirectTargetRequests = new AtomicInteger();
         server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         server.createContext("/redirect", exchange -> {
@@ -106,12 +106,14 @@ class ForwardDlrServiceTest {
         MessageState due = dueState("http://" + server.getAddress().getHostString() + ':'
                 + server.getAddress().getPort() + "/redirect");
         dueAttempt(due, 1);
-        when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
+        when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(1), eq("http_failure"), anyLong()))
+                .thenReturn(true);
         service = new ForwardDlrService(dlrService, ForwardDlrService.newHttpClient());
 
         service.dispatchDueDeliveries();
 
-        verify(dlrService).completeDelivery(GATEWAY_ID, 1);
+        verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(1), eq("http_failure"), anyLong());
+        verify(dlrService, never()).completeDelivery(GATEWAY_ID, 1);
         assertThat(redirectTargetRequests).hasValue(0);
         assertThat(ForwardDlrService.newHttpClient().followRedirects()).isEqualTo(HttpClient.Redirect.NEVER);
     }
