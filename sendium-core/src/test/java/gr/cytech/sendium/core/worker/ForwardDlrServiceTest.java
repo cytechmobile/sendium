@@ -281,7 +281,9 @@ class ForwardDlrServiceTest {
 
         ArgumentCaptor<Long> nextAttempt = ArgumentCaptor.forClass(Long.class);
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(1), eq("http_failure"), nextAttempt.capture());
-        assertThat(nextAttempt.getValue()).isBetween(beforeFailure + 120_000, System.currentTimeMillis() + 120_000);
+        long retryIntervalMillis = java.time.Duration.ofHours(1).toMillis();
+        assertThat(nextAttempt.getValue()).isBetween(
+                beforeFailure + retryIntervalMillis, System.currentTimeMillis() + retryIntervalMillis);
         assertThat(deliveryResult().getValue()).isEqualTo("http_failure");
     }
 

@@ -25,7 +25,7 @@ public class ForwardDlrService {
 
     private static final int DUE_BATCH_SIZE = 100;
     private static final int MAX_ATTEMPTS = 10;
-    private static final long RETRY_INTERVAL_MS = 120_000;
+    private static final long RETRY_INTERVAL_MS = Duration.ofHours(1).toMillis();
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
     private static final int DLR_DELIVERED = 1;
