@@ -472,7 +472,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
 
     @Override
     public boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
-        return finishAttempt(gatewayMsgId, expectedAttempt, COMPLETE_DELIVERY_SQL,
+        return finishAttempt(expectedAttempt, COMPLETE_DELIVERY_SQL,
                 statement -> {
                     statement.setObject(1, parseGatewayId(gatewayMsgId));
                     statement.setInt(2, expectedAttempt);
@@ -481,7 +481,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
 
     @Override
     public boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
-        return finishAttempt(gatewayMsgId, expectedAttempt, RETRY_DELIVERY_SQL,
+        return finishAttempt(expectedAttempt, RETRY_DELIVERY_SQL,
                 statement -> {
                     statement.setString(1, normalizeResult(result));
                     statement.setObject(2, toOffsetDateTime(nextAttemptAt));
@@ -492,7 +492,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
 
     @Override
     public boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
-        return finishAttempt(gatewayMsgId, expectedAttempt, FAIL_DELIVERY_SQL,
+        return finishAttempt(expectedAttempt, FAIL_DELIVERY_SQL,
                 statement -> {
                     statement.setString(1, normalizeResult(result));
                     statement.setObject(2, parseGatewayId(gatewayMsgId));
@@ -517,7 +517,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
         }
     }
 
-    private boolean finishAttempt(String gatewayMsgId, int expectedAttempt, String sql,
+    private boolean finishAttempt(int expectedAttempt, String sql,
                                   StatementBinder binder, String operation) {
         if (expectedAttempt < 1) {
             throw new IllegalArgumentException("Expected attempt must be positive");
