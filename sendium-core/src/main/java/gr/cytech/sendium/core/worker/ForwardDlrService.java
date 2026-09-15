@@ -16,7 +16,11 @@ import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 @ApplicationScoped
 @IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
@@ -24,6 +28,7 @@ public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
 
     private static final int DUE_BATCH_SIZE = 100;
+    private static final int MAX_IN_FLIGHT_PER_HOST = 10;
     private static final int MAX_ATTEMPTS = 10;
     private static final long RETRY_INTERVAL_MS = Duration.ofHours(1).toMillis();
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
@@ -66,19 +71,23 @@ public class ForwardDlrService {
             return;
         }
 
-        for (MessageState state : dueDeliveries) {
-            try {
-                dispatch(state);
-                if (Thread.currentThread().isInterrupted()) {
-                    return;
-                }
-            } catch (RuntimeException e) {
-                logger.error("Unexpected HTTP DLR dispatch failure for gatewayMsgId={}", state.getGatewayMsgId());
+        Map<String, Semaphore> hostLimits = new ConcurrentHashMap<>();
+        try (var senders = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (MessageState state : dueDeliveries) {
+                senders.submit(() -> dispatchSafely(state, hostLimits));
             }
         }
     }
 
-    private void dispatch(MessageState dueState) {
+    private void dispatchSafely(MessageState state, Map<String, Semaphore> hostLimits) {
+        try {
+            dispatch(state, hostLimits);
+        } catch (RuntimeException e) {
+            logger.error("Unexpected HTTP DLR dispatch failure for gatewayMsgId={}", state.getGatewayMsgId());
+        }
+    }
+
+    private void dispatch(MessageState dueState, Map<String, Semaphore> hostLimits) {
         String gatewayMsgId = dueState.getGatewayMsgId();
         HttpRequest request;
         try {
@@ -100,7 +109,12 @@ public class ForwardDlrService {
         }
 
         int attempt = started.orElseThrow().getDeliveryAttemptCount();
+        Semaphore hostLimit = hostLimits.computeIfAbsent(
+                request.uri().getHost().toLowerCase(Locale.ROOT), ignored -> new Semaphore(MAX_IN_FLIGHT_PER_HOST));
+        boolean acquired = false;
         try {
+            hostLimit.acquire();
+            acquired = true;
             HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 completeDelivery(gatewayMsgId, attempt);
@@ -114,6 +128,10 @@ public class ForwardDlrService {
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
             handleAttemptFailure(gatewayMsgId, attempt, "transport_failure");
+        } finally {
+            if (acquired) {
+                hostLimit.release();
+            }
         }
     }
 

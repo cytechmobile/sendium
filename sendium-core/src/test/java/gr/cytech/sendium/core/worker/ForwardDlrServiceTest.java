@@ -185,30 +185,18 @@ class ForwardDlrServiceTest {
     }
 
     @Test
-    void interruptionSchedulesRetryRestoresInterruptAndStopsBatch() throws Exception {
+    void senderInterruptionSchedulesRetryWithoutInterruptingDispatcher() throws Exception {
         MessageState due = dueState("https://example.test/dlr");
-        String laterGatewayId = "1e5fc768-c60d-4417-95bf-d39642381a1c";
-        MessageState later = new MessageState(laterGatewayId, "account", "system", "source", "destination",
-                "https://example.test/later");
-        MessageState started = dueState(due.getForwardDlrUrl());
-        started.setDeliveryAttemptCount(5);
-        when(dlrService.listDueHttpDeliveries(100)).thenReturn(List.of(due, later));
-        when(dlrService.startDeliveryAttempt(GATEWAY_ID, MessageState.DeliveryChannel.HTTP))
-                .thenReturn(Optional.of(started));
+        dueAttempt(due, 5);
         when(httpClient.send(any(HttpRequest.class), anyBodyHandler()))
                 .thenThrow(new InterruptedException("interrupted"));
         when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(5), eq("interrupted"), anyLong()))
                 .thenReturn(true);
 
-        try {
-            service.dispatchDueDeliveries();
+        service.dispatchDueDeliveries();
 
-            verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(5), eq("interrupted"), anyLong());
-            verify(dlrService, never()).startDeliveryAttempt(laterGatewayId, MessageState.DeliveryChannel.HTTP);
-            assertThat(Thread.currentThread().isInterrupted()).isTrue();
-        } finally {
-            Thread.interrupted();
-        }
+        verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(5), eq("interrupted"), anyLong());
+        assertThat(Thread.currentThread().isInterrupted()).isFalse();
     }
 
     @Test
