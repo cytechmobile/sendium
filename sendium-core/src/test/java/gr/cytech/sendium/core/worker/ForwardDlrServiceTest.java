@@ -17,7 +17,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -60,11 +59,11 @@ class ForwardDlrServiceTest {
 
     @Test
     void schedulerUsesBoundedBatchAndDoesNothingWhenNoDeliveryIsDue() throws Exception {
-        when(dlrService.listDueHttpDeliveries(100)).thenReturn(List.of());
+        when(dlrService.claimDueHttpDeliveries(100)).thenReturn(List.of());
 
         service.dispatchDueDeliveries();
 
-        verify(dlrService).listDueHttpDeliveries(100);
+        verify(dlrService).claimDueHttpDeliveries(100);
         verifyNoInteractions(httpClient);
     }
 
@@ -84,7 +83,7 @@ class ForwardDlrServiceTest {
         assertThat(request.getValue().timeout()).contains(java.time.Duration.ofSeconds(5));
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
         var order = inOrder(dlrService, httpClient);
-        order.verify(dlrService).startDeliveryAttempt(GATEWAY_ID, MessageState.DeliveryChannel.HTTP);
+        order.verify(dlrService).claimDueHttpDeliveries(100);
         order.verify(httpClient).send(any(HttpRequest.class), anyBodyHandler());
     }
 
@@ -200,27 +199,14 @@ class ForwardDlrServiceTest {
     }
 
     @Test
-    void invalidUriFailsWithoutStartingAnAttempt() {
+    void invalidClaimedUriFailsExpectedAttempt() {
         MessageState due = dueState("https://example.test/%ZZ?secret=value");
-        when(dlrService.listDueHttpDeliveries(100)).thenReturn(List.of(due));
-        when(dlrService.failInvalidDelivery(GATEWAY_ID, "invalid_uri")).thenReturn(true);
+        dueAttempt(due, 1);
+        when(dlrService.failInvalidDelivery(GATEWAY_ID, 1, "invalid_uri")).thenReturn(true);
 
         service.dispatchDueDeliveries();
 
-        verify(dlrService).failInvalidDelivery(GATEWAY_ID, "invalid_uri");
-        verify(dlrService, never()).startDeliveryAttempt(any(), any());
-        verifyNoInteractions(httpClient);
-    }
-
-    @Test
-    void activeAttemptIsSkippedBeforeSending() {
-        MessageState due = dueState("https://example.test/dlr");
-        when(dlrService.listDueHttpDeliveries(100)).thenReturn(List.of(due));
-        when(dlrService.startDeliveryAttempt(GATEWAY_ID, MessageState.DeliveryChannel.HTTP))
-                .thenReturn(Optional.empty());
-
-        service.dispatchDueDeliveries();
-
+        verify(dlrService).failInvalidDelivery(GATEWAY_ID, 1, "invalid_uri");
         verifyNoInteractions(httpClient);
     }
 
@@ -239,7 +225,7 @@ class ForwardDlrServiceTest {
 
     @Test
     void schedulerStorageFailureDoesNotSend() {
-        when(dlrService.listDueHttpDeliveries(100)).thenThrow(new DlrStorageException("database unavailable"));
+        when(dlrService.claimDueHttpDeliveries(100)).thenThrow(new DlrStorageException("database unavailable"));
 
         service.dispatchDueDeliveries();
 
@@ -284,9 +270,7 @@ class ForwardDlrServiceTest {
     private void dueAttempt(MessageState due, int attempt) {
         MessageState started = dueState(due.getForwardDlrUrl());
         started.setDeliveryAttemptCount(attempt);
-        when(dlrService.listDueHttpDeliveries(100)).thenReturn(List.of(due));
-        when(dlrService.startDeliveryAttempt(GATEWAY_ID, MessageState.DeliveryChannel.HTTP))
-                .thenReturn(Optional.of(started));
+        when(dlrService.claimDueHttpDeliveries(100)).thenReturn(List.of(started));
     }
 
     private MessageState dueState(String callbackUrl) {

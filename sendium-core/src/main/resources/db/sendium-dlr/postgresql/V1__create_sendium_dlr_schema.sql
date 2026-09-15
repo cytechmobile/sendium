@@ -18,6 +18,7 @@ CREATE TABLE sendium_dlr.dlr_message (
     delivery_attempt_count INTEGER NOT NULL DEFAULT 0,
     last_attempt_at TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
+    claimed_until TIMESTAMPTZ,
     last_delivery_result TEXT,
     resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

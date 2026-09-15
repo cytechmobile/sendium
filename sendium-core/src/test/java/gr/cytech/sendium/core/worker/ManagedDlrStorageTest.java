@@ -6,6 +6,8 @@ import io.quarkus.arc.InjectableInstance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
@@ -26,6 +28,7 @@ class ManagedDlrStorageTest {
         storage = new ManagedDlrStorage();
         storage.postgresqlDataSource = postgresqlDataSource;
         storage.meterRegistry = new SimpleMeterRegistry();
+        storage.deliveryClaimDuration = Duration.ofMinutes(5);
     }
 
     @Test

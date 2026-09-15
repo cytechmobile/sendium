@@ -17,7 +17,6 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
@@ -65,9 +64,9 @@ public class ForwardDlrService {
     void dispatchDueDeliveries() {
         List<MessageState> dueDeliveries;
         try {
-            dueDeliveries = dlrService.listDueHttpDeliveries(DUE_BATCH_SIZE);
+            dueDeliveries = dlrService.claimDueHttpDeliveries(DUE_BATCH_SIZE);
         } catch (RuntimeException e) {
-            logger.error("Unable to list due HTTP DLR deliveries");
+            logger.error("Unable to claim due HTTP DLR deliveries");
             return;
         }
 
@@ -93,22 +92,11 @@ public class ForwardDlrService {
         try {
             request = buildRequest(dueState);
         } catch (RuntimeException e) {
-            failInvalidDelivery(gatewayMsgId);
+            failInvalidDelivery(gatewayMsgId, dueState.getDeliveryAttemptCount());
             return;
         }
 
-        Optional<MessageState> started;
-        try {
-            started = dlrService.startDeliveryAttempt(gatewayMsgId, MessageState.DeliveryChannel.HTTP);
-        } catch (RuntimeException e) {
-            recordStorageError(gatewayMsgId, 0, "start");
-            return;
-        }
-        if (started.isEmpty()) {
-            return;
-        }
-
-        int attempt = started.orElseThrow().getDeliveryAttemptCount();
+        int attempt = dueState.getDeliveryAttemptCount();
         Semaphore hostLimit = hostLimits.computeIfAbsent(
                 request.uri().getHost().toLowerCase(Locale.ROOT), ignored -> new Semaphore(MAX_IN_FLIGHT_PER_HOST));
         boolean acquired = false;
@@ -184,14 +172,14 @@ public class ForwardDlrService {
         }
     }
 
-    private void failInvalidDelivery(String gatewayMsgId) {
+    private void failInvalidDelivery(String gatewayMsgId, int attempt) {
         logger.warn("Invalid HTTP DLR callback for gatewayMsgId={}", gatewayMsgId);
         try {
-            if (!dlrService.failInvalidDelivery(gatewayMsgId, "invalid_uri")) {
-                recordStorageError(gatewayMsgId, 0, "invalid");
+            if (!dlrService.failInvalidDelivery(gatewayMsgId, attempt, "invalid_uri")) {
+                recordStorageError(gatewayMsgId, attempt, "invalid");
             }
         } catch (RuntimeException e) {
-            recordStorageError(gatewayMsgId, 0, "invalid");
+            recordStorageError(gatewayMsgId, attempt, "invalid");
         }
     }
 
