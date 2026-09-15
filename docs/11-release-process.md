@@ -13,10 +13,11 @@ On each run, the workflow:
 3. Reads `.release-please-manifest.json` for the current released version.
 4. Creates or updates a release pull request when releasable changes exist.
 5. Creates the GitHub release and tag after the release pull request is merged.
-6. Checks out the released commit SHA.
-7. Sets up GraalVM Java 25.
-8. Publishes Maven artifacts to GitHub Packages with `./mvnw -B deploy -DskipTests`.
-9. Publishes JVM and native Docker images to Docker Hub.
+6. Starts independent Maven, JVM Docker, and native Docker publishing jobs for the released commit SHA.
+7. Publishes Maven artifacts to GitHub Packages with `./mvnw -B deploy -DskipTests`.
+8. Publishes JVM and native Docker images to Docker Hub.
+
+Artifact publishing jobs are independent. A failure in one registry does not suppress publication to the others, and the failed job still makes the release workflow fail visibly. Release workflow runs are queued rather than cancelled when another commit reaches `main`, so a later push cannot interrupt an active publication.
 
 ## Developer Responsibilities
 
@@ -76,9 +77,11 @@ Publishing uses:
 
 The workflow uses `GITHUB_TOKEN` for Maven publishing. The `pom.xml` `distributionManagement` section controls where artifacts are deployed.
 
+The Maven wrapper is bootstrapped separately with up to three attempts before deployment starts. The deployment command itself is not retried because GitHub Packages can contain a partially published reactor after a failure.
+
 ## Docker Publishing
 
-After Maven publishing succeeds, the release workflow calls both Docker workflows:
+After a release is created, the release workflow calls both Docker workflows independently from Maven publishing:
 
 - `.github/workflows/docker.yml` builds the JVM image.
 - `.github/workflows/dockerNative.yml` builds the native image.
@@ -118,7 +121,7 @@ The installed GitHub App must have access to the repository. The workflow reques
 The workflow grants these `GITHUB_TOKEN` permissions:
 
 - `contents: read` for checkout and repository reads.
-- `packages: write` on the release job so Maven can publish artifacts to GitHub Packages after a release is created.
+- `packages: write` only on the Maven publishing job so it can deploy artifacts to GitHub Packages.
 
 Release PR creation, tag creation, release creation, and Release Please issue/PR metadata use the GitHub App token, not the workflow `GITHUB_TOKEN`.
 
@@ -139,14 +142,17 @@ If no release PR appears after merging to `main`, check:
 If artifacts are not published after merging the release PR, check:
 
 - The Release Please step created a release and set `release_created=true`.
-- The checkout step used `steps.release.outputs.sha`.
+- The Maven publishing workflow received the Release Please `sha` output as its `ref` input.
 - Java 25 setup completed successfully.
 - `./mvnw -B deploy -DskipTests` passed.
 - GitHub Packages permissions allow writes for this repository.
 
+Recover a failed Maven publication by manually running the `Publish package` workflow against the release tag. When invoking it through the API or CLI, set its optional `ref` input to the same tag, such as `v0.5.0`.
+
 If Docker images are not published after a release, check:
 
-- Maven publishing succeeded first.
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are configured.
 - The called Docker workflow received the Release Please `sha` and `tag_name` outputs.
 - Docker Hub permissions allow pushing to `cytechmobile/sendium`.
+
+Recover a failed Docker publication by manually running the corresponding JVM or native Docker workflow with both `ref` and `version` set to the release tag and `publish-latest` enabled. Each workflow publishes its versioned and moving tags from the same released commit.
