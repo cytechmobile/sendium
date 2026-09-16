@@ -39,13 +39,20 @@ jobs:
         working-directory: sendium-kannel-converter
         run: npm run check
 
+      - name: Stage Pages site
+        working-directory: sendium-kannel-converter
+        run: |
+          mkdir -p "$RUNNER_TEMP/pages/kannelconverter"
+          cp -R dist/. "$RUNNER_TEMP/pages/kannelconverter/"
+          cp github-pages-root.html "$RUNNER_TEMP/pages/index.html"
+
       - name: Configure Pages
         uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: sendium-kannel-converter/dist
+          path: ${{ runner.temp }}/pages
 
   deploy:
     needs: build
