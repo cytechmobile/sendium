@@ -103,7 +103,7 @@ See the [Docker deployment guide](docs/02-docker-deployment.md) for the complete
 
 The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, roadmap, and community resources.
 
-Migrating from Kannel? Use the browser-only **[Kannel migration converter](https://cytechmobile.github.io/sendium/)** to paste a legacy `kannel.conf` and generate Sendium starter files locally in your browser.
+Migrating from Kannel? Use the browser-only **[Kannel migration converter](https://cytechmobile.github.io/sendium/kannelconverter/)** to paste a legacy `kannel.conf` and generate Sendium starter files locally in your browser.
 
 If you run into issues, have questions, or want to share what you're building, we'd love to hear from you! We use **[GitHub Discussions](https://github.com/cytechmobile/sendium/discussions)** for our community hub.
 

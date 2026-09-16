@@ -22,7 +22,7 @@ npm run check
 
 The converter is published by `.github/workflows/kannel-converter-pages.yml` from the Vite production build in `dist/`.
 
-Public URL: <https://cytechmobile.github.io/sendium/>
+Public URL: <https://cytechmobile.github.io/sendium/kannelconverter/>
 
 ## Current Beta Scope
 
