@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/cytechmobile/sendium/compare/v0.5.0...v0.5.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **converter:** deploy under dedicated path ([51b1ce9](https://github.com/cytechmobile/sendium/commit/51b1ce9ea15024d745a3969b4854641bd772685d))
+
 ## [0.5.0](https://github.com/cytechmobile/sendium/compare/v0.4.2...v0.5.0) (2026-09-15)
 
 
