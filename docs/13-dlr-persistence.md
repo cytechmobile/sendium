@@ -118,11 +118,12 @@ A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP deliv
 
 The V1 retention thresholds are fixed application behavior, not environment settings:
 
-| State | Eligible for cleanup after |
+| DLR lifecycle state | Eligible for cleanup after |
 | :--- | :--- |
-| Provider message correlation | 3 days |
-| Message waiting for provider receipt | 7 days from creation |
-| Pending or failed terminal delivery | 7 days from resolution |
+| Waiting for final provider DLR | 7 days from provider acceptance |
+| Waiting to forward final DLR to the client | 7 days from receiving the final provider outcome |
+
+Waiting for a final provider DLR includes both the message row and its provider-message correlations. These are separate database records with separate cleanup conditions, but both use the same seven-day threshold. After Sendium records a final provider DLR or provider rejection, it removes the correlations and retains the message row while forwarding the outcome to the HTTP or SMPP client. Successful client delivery deletes the row immediately; pending or failed forwarding remains eligible for cleanup seven days after provider resolution.
 
 Cleanup is triggered by storage activity and runs no more than once per hour. These values are therefore eligibility thresholds, not exact physical deletion deadlines: idle records can remain in the database longer, and an active deployment can retain newly eligible state until the next cleanup pass. A provider receipt cannot be matched after its correlation has been removed. Making the thresholds or cleanup schedule configurable is outside the V1 storage replacement.
 

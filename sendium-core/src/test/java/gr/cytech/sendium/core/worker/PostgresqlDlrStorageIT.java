@@ -405,21 +405,18 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
-    void correlationRetentionRemainsThreeDays() throws SQLException {
+    void correlationRetentionMatchesWaitingMessageRetention() throws SQLException {
         MessageState state = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
         acceptProviderMessage(state, "old-correlation");
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement("""
-                     UPDATE sendium_dlr.provider_correlation
-                     SET created_at = CURRENT_TIMESTAMP - INTERVAL '4 days'
-                     WHERE provider_name = ? AND provider_message_id = ?
-                     """)) {
-            statement.setString(1, PROVIDER);
-            statement.setString(2, "old-correlation");
-            statement.executeUpdate();
-        }
+        setCorrelationCreatedAt("old-correlation", "CURRENT_TIMESTAMP - INTERVAL '4 days'");
 
         PostgresqlDlrStorage cleanup = new PostgresqlDlrStorage(dataSource, 0);
+        assertThat(cleanup.getState(state.getGatewayMsgId())).isPresent();
+        assertThat(countCorrelations(state.getGatewayMsgId())).isOne();
+
+        setCorrelationCreatedAt("old-correlation", "CURRENT_TIMESTAMP - INTERVAL '8 days'");
+
+        cleanup = new PostgresqlDlrStorage(dataSource, 0);
         assertThat(cleanup.getState(state.getGatewayMsgId())).isPresent();
         assertThat(countCorrelations(state.getGatewayMsgId())).isZero();
     }
@@ -498,6 +495,17 @@ class PostgresqlDlrStorageIT {
                 resultSet.next();
                 return resultSet.getInt(1);
             }
+        }
+    }
+
+    private void setCorrelationCreatedAt(String providerMessageId, String expression) throws SQLException {
+        String sql = "UPDATE sendium_dlr.provider_correlation SET created_at = " + expression
+                + " WHERE provider_name = ? AND provider_message_id = ?";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, PROVIDER);
+            statement.setString(2, providerMessageId);
+            statement.executeUpdate();
         }
     }
 

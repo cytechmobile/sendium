@@ -218,7 +218,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
 
     private static final String DELETE_EXPIRED_CORRELATIONS_SQL = """
             DELETE FROM sendium_dlr.provider_correlation
-            WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '3 days'
+            WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
             """;
 
     private static final String DELETE_EXPIRED_MESSAGES_SQL = """
