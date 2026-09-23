@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/cytechmobile/sendium/compare/v0.5.1...v0.5.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* **dlr:** retain provider correlations for seven days ([7bb60b6](https://github.com/cytechmobile/sendium/commit/7bb60b658cbb93f0f25f4ab440aacd696f917d6a))
+
 ## [0.5.1](https://github.com/cytechmobile/sendium/compare/v0.5.0...v0.5.1) (2026-09-16)
 
 
