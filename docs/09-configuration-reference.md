@@ -64,8 +64,10 @@ fallback to a less durable backend.
 Validation runs before Sendium's file-watcher and router/worker startup observers. The validated
 profile is retained for the process lifetime. Startup logs the effective profile and a prominent
 `NON-DURABLE` warning: accepted messages and in-flight work can be lost on restart. The current
-runtime pipeline is still memory-backed; the new stage implementations and end-to-end coordinator
-wiring are subsequent work in #338. See [Outbound Storage Contracts](14-outbound-storage.md).
+runtime pipeline is still memory-backed. Pending and selected-router memory stores exist as library
+components; end-to-end coordinator and ingress/worker wiring are subsequent work in #338. Their
+capacity bounds are constructor arguments at this stage, not additional operator settings.
+See [Outbound Storage Contracts](14-outbound-storage.md).
 
 The producer and startup observer live only in `sendium-app`. Embedding `sendium-core` does not
 activate this validation, configure an outbound coordinator, or enforce the standalone profile list.
