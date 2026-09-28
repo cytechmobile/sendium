@@ -22,6 +22,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 | Understand releases and publishing | [11. Release Process](11-release-process.md) |
 | Review current features and roadmap | [12. Features And Roadmap](12-features-roadmap.md) |
 | Configure PostgreSQL DLR persistence and review durability | [13. DLR Persistence](13-dlr-persistence.md) |
+| Review outbound storage extension contracts | [14. Outbound Storage Contracts](14-outbound-storage.md) |
 | Contribute code or docs | [Contributing](../.github/CONTRIBUTING.md) |
 
 ## Core Concepts
@@ -63,6 +64,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [11. Release Process](11-release-process.md) | Release Please flow, Conventional Commit rules, release PR handling, GitHub Packages, and Docker publishing. |
 | [12. Features And Roadmap](12-features-roadmap.md) | Current product capabilities, planned roadmap phases, and related feature documentation. |
 | [13. DLR Persistence](13-dlr-persistence.md) | PostgreSQL setup, retention, restart guarantees, and durability limits. |
+| [14. Outbound Storage Contracts](14-outbound-storage.md) | Initial stage APIs, ownership transitions, embedding boundaries, and planned standalone profiles. |
 | [Kannel migration converter](https://cytechmobile.github.io/sendium/kannelconverter/) | Browser-only helper for turning a legacy `kannel.conf` into Sendium starter files. |
 
 ## API Discovery
