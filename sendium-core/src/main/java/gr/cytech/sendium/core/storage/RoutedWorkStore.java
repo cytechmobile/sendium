@@ -15,11 +15,12 @@ public interface RoutedWorkStore<M extends StandardMessage> extends OutboundStag
     /**
      * Records the execution payload and one destination consistently before its work may be taken.
      * Future recovery resumes this recorded work at its worker, not through routing again.
-     * Repeating a selection returns its original assignment and work ID without reactivating
+     * While retained, repeating a selection returns its original assignment and work ID without reactivating
      * completed/transferred work or overwriting content.
      * Callers retry with the same assignment; changing an active destination requires transfer, not
      * another assignment. There is at most one active destination work item per selection.
      * Conflicting source identities or destinations for an existing selection fail as INVALID_TRANSITION.
+     * After forget, the coordinator must reject stale recording attempts using its lifecycle ownership.
      */
     Routed<M> record(Assignment<M> assignment);
 
@@ -27,6 +28,7 @@ public interface RoutedWorkStore<M extends StandardMessage> extends OutboundStag
      * Takes one work projection without completing it or silently changing earlier-stage records.
      * Zero timeout polls; negative timeouts are invalid. Destination must be nonblank.
      * A work item has at most one active taker.
+     * Retain the returned Routed value as the local attempt handle when returning unfinished work.
      */
     Optional<Routed<M>> take(String destination, Duration timeout) throws InterruptedException;
 
@@ -35,6 +37,7 @@ public interface RoutedWorkStore<M extends StandardMessage> extends OutboundStag
      * in-flight work. Identity, selection, and destination must match the take. Repeated release cannot
      * duplicate work or reactivate completed/transferred work. Earlier-stage state cannot silently change;
      * preserving runtime mutations does not promise durable retry counters or timing.
+     * Pass the take result itself with its message updated, not a reconstructed projection.
      */
     void release(Routed<M> work);
 
