@@ -2,10 +2,9 @@
 
 This describes the initial contracts for [#338](https://github.com/cytechmobile/sendium/issues/338),
 under [#337](https://github.com/cytechmobile/sendium/issues/337). The stage contracts are library APIs,
-and standalone profile selection, early validation, and startup logging are implemented. Memory pending
-and selected-router stores are available as explicitly constructed library components. The coordinator,
-routed-work store, and end-to-end production wiring are subsequent tasks. Existing ingress and queue
-behavior remains non-durable.
+and standalone profile selection, early validation, and startup logging are implemented. All three
+memory stage stores are available as explicitly constructed library components. The coordinator and
+end-to-end production wiring are subsequent tasks. Existing ingress and queue behavior remains non-durable.
 
 ## Ownership model
 
@@ -65,6 +64,7 @@ storage/
   memory/
     MemoryPendingMessageStore.java
     MemorySelectedRouterStore.java
+    MemoryRoutedWorkStore.java
 ```
 
 Memory implementations live under `storage.memory`. Standalone configuration
@@ -190,6 +190,61 @@ or make its claimed sources eligible again; shutdown finishes by closing the pen
 All state is instance-local. New instances start empty and provide no restart recovery. Counts bound
 admission and active routing, not message byte size; required terminal bookkeeping is removed by
 coordinated cleanup in the later integration tasks.
+
+## Memory routed-work implementation
+
+`MemoryRoutedWorkStore<M>` is independently constructed with a positive selection capacity and a
+`UnaryOperator<M>` snapshot function, with the same isolation/subtype requirements as the pending
+memory backend. It has its own lock and does not depend on a concrete pending or selected store.
+Coordination across stores belongs to the upcoming coordinator.
+
+```text
+record assignment → QUEUED → take → TAKEN
+                        ↑             |
+                        +-- release --+
+                                      |
+                 +--------------------+-------------------+
+                 |                                        |
+             transfer                                  complete
+                 |                                        |
+       previous: TRANSFERRED                           COMPLETED
+       successor: QUEUED                                  |
+       (new ID, same selection)                  repeatable cleanup result
+                                                          |
+                                            coordinator finishes cleanup
+                                                          |
+                                                        forget
+```
+
+- `record` retains one assignment per selection. Matching retries return its original work ID and
+  original assignment payload, even after forwarding or completion, without re-enqueueing it. A
+  changed source set/destination is invalid. A source cannot belong to two retained routed selections.
+- `record` and `transfer` results describe recorded work; they do not claim execution. Only `take`
+  claims a work item. Each destination schedules in publication order. Take and return preserve one
+  active taker and updated execution state; return the actual take result as its local attempt handle.
+- `transfer` requires taken work and atomically moves responsibility to one successor under the same
+  selection. It works even at full selection capacity because it reuses that selection's slot. Retrying
+  the predecessor returns its original immediate successor, even if that successor has moved onward.
+  A conflicting retry destination is invalid. Old work is never scheduled again.
+- `complete` requires taken work after the caller has established terminal processing and required
+  handoff. Repeated completion returns the same source set. Completion for any transferred predecessor
+  returns empty, including after its successor completes, so late callbacks cannot release sources early.
+- `forget` rejects nonterminal selections. After the coordinator completes pending/selected cleanup,
+  it removes that selection's entire forwarding history and source claims, freeing capacity. Repeated
+  forget is harmless. Unknown work IDs fail explicitly. Replay guarantees apply while records are
+  retained; the coordinator must reject stale route/transfer requests and absorb duplicate terminal
+  callbacks after cleanup rather than recreating old work.
+
+Capacity counts retained selections, including taken work and terminal selections awaiting cleanup.
+Return and forwarding cannot create additional active selections or exhaust a separate return slot.
+Forwarding history and original replay payloads are retained once per hop until forget; the selection
+count is not a bound on history length or message bytes. The later worker integration owns retry and
+forwarding policy.
+
+All required snapshots, including the returned result, are prepared before record/transfer publication.
+If a snapshot fails, no partial assignment or successor is published, and the current work remains
+retryable. Takes are interruptible and wake on publication or close. Closure clears instance-local state
+without manufacturing completion; closed instances cannot reopen and fresh instances recover nothing.
 
 ## Completion and retry boundaries
 
