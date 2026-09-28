@@ -25,6 +25,7 @@ public interface SelectedRouterStore<M extends StandardMessage> extends Outbound
      * Takes an execution projection without completing selected or pending ownership.
      * Execution mutations must not silently modify retained earlier-stage state.
      * Zero timeout polls; negative timeouts are invalid. An item has at most one active taker.
+     * Retain the returned Selected value as the local attempt handle when returning unfinished work.
      */
     Optional<Selected<M>> take(Duration timeout) throws InterruptedException;
 
@@ -32,6 +33,7 @@ public interface SelectedRouterStore<M extends StandardMessage> extends Outbound
      * Returns taken, not-yet-routed work with its updated execution projection, without silently changing
      * earlier-stage state. Identity/source ownership must match the take. Repeated release cannot enqueue
      * duplicates. Preserving runtime mutations does not promise durable retry counters or timing.
+     * Pass the take result itself with its message updated, not a reconstructed or unrelated projection.
      */
     void release(Selected<M> selected);
 

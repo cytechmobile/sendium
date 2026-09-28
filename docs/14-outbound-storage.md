@@ -2,9 +2,10 @@
 
 This describes the initial contracts for [#338](https://github.com/cytechmobile/sendium/issues/338),
 under [#337](https://github.com/cytechmobile/sendium/issues/337). The stage contracts are library APIs,
-and standalone profile selection, early validation, and startup logging are implemented. The coordinator,
-memory stage implementations, and end-to-end production wiring are subsequent tasks. Existing ingress
-and queue behavior remains non-durable.
+and standalone profile selection, early validation, and startup logging are implemented. Memory pending
+and selected-router stores are available as explicitly constructed library components. The coordinator,
+routed-work store, and end-to-end production wiring are subsequent tasks. Existing ingress and queue
+behavior remains non-durable.
 
 ## Ownership model
 
@@ -61,9 +62,12 @@ storage/
   SelectedRouterStore.java
   RoutedWorkStore.java
   OutboundStorageException.java
+  memory/
+    MemoryPendingMessageStore.java
+    MemorySelectedRouterStore.java
 ```
 
-Memory implementations will live under `storage.memory` when introduced. Standalone configuration
+Memory implementations live under `storage.memory`. Standalone configuration
 assembly lives separately in `sendium-app`, under `gr.cytech.sendium.app.storage`:
 
 - `SmsStorageProfile` is an immutable validated configuration value. Its constructor is the single
@@ -127,6 +131,65 @@ copies of every intermediate message. Work performed after the last recorded bou
 provider-outcome checkpoints and exactly-once submission remain outside the guarantee.
 
 These are requirements for the later durable implementations, not a restart guarantee for memory.
+
+## Memory pending and selected-router implementation
+
+These two classes are plain Java components with no CDI activation or background refill threads:
+
+- `MemoryPendingMessageStore<M>` takes a positive maximum source count and a
+  `UnaryOperator<M>` snapshot function. An optional `Function<? super M, Instant>` supplies absolute
+  eligibility time at admission; the default makes every admitted source immediately eligible. No new
+  interpretation of HTTP deferred-delivery or validity fields is introduced by this library step.
+- `MemorySelectedRouterStore<M>` takes that pending store, a positive routing capacity, and optionally
+  a `Clock` (UTC by default). Open pending first, then the selected store. A pending instance accepts
+  only one selected-router owner for its lifetime, including after that router closes.
+
+The snapshot function is a concrete memory-backend constructor dependency, not a new public copier
+interface. It must preserve the concrete subtype and all fields, detach mutable state, and not retain
+references that a caller could later mutate. The backend rejects null, identity, and subtype-flattening
+results. It cannot generically prove deep isolation of arbitrary application-specific objects; supplying
+a correct snapshot function belongs to assembly. Functions run under the store lock and must be
+side-effect-free, nonblocking, and must not reenter these stores. The standalone message mapper is
+supplied when ingress is wired; this step does not serialize messages or define a durable codec.
+
+Pending admission is idempotent by source ID while that source exists, even at capacity. New source
+admission fails with `CAPACITY_EXCEEDED` when the bound is reached. Admission or snapshot failure
+does not reserve a source slot. A single-source `find` returns an isolated value for backend consumers;
+there is no all-backlog loading API. Pending completion remains the caller's terminal-processing
+decision, not a side effect of selection, take, or routing.
+
+Selection uses priority-indexed ordered sets maintained at admission. It inspects due candidates rather
+than copying or sorting the whole backlog on each refill. Higher numeric priorities select first; within
+a priority, earlier eligibility comes first, then admission order. Future work in a higher-priority group
+does not block eligible work at a lower priority. A batch captures one clock instant. This is an
+in-process scheduling policy, not a durable global-order guarantee.
+
+`selectAndStage(limit)` publishes at most the smaller of the requested limit and free routing slots.
+Each selected source is removed from the eligibility index but retained in pending storage. Shared
+locking makes publication and removal from eligibility indivisible per source. If snapshotting a later
+item fails, the published prefix remains available and the failed item remains eligible; retry neither
+duplicates selected sources nor loses accepted work.
+
+The selected backlog schedules in publication order. Routing capacity counts both queued and taken
+items, so returning taken work never requires another slot. `markRouted` releases the routing slot but
+retains selected ownership; only after pending completion may selected `complete` remove the record.
+Routed sources are not eligible for another batch. The caller invokes bounded refill as slots become
+available; taking work does not implicitly select a new batch.
+
+Take returns an isolated execution projection. Return the actual `Selected` value from that take after
+updating its message; it serves as the local attempt handle, while its stable selection ID remains the
+stage identity. Return snapshots the updated execution payload without changing accepted content.
+Duplicate returns do not enqueue duplicates, and an older attempt cannot replace an active newer
+take. Reconstructed or unrelated projections are rejected. This local handle is not a persisted dequeue
+stage or a multi-process lease.
+
+Blocking takes support zero-time polling, timeout, interruption, and wake-up when work is published
+or either store closes. Close selected before pending after stopping execution. Closing is idempotent;
+neither store can reopen after close. Closing a selected store does not complete its pending sources
+or make its claimed sources eligible again; shutdown finishes by closing the pending store as well.
+All state is instance-local. New instances start empty and provide no restart recovery. Counts bound
+admission and active routing, not message byte size; required terminal bookkeeping is removed by
+coordinated cleanup in the later integration tasks.
 
 ## Completion and retry boundaries
 
@@ -221,7 +284,7 @@ properties. Changes require a restart; they do not require rebuilding the applic
 The startup observer uses `Interceptor.Priority.PLATFORM_BEFORE`, ahead of the existing file watchers
 (`LIBRARY_BEFORE`) and router/worker observers (`APPLICATION`). Injecting the singleton profile into
 that observer forces validation before those later observers run. Successful startup logs the profile
-and a `NON-DURABLE` warning. The concrete stage stores are not constructed at this intermediate step.
+and a `NON-DURABLE` warning. The library memory stores are not yet constructed by this startup observer.
 
 This milestone includes actionable errors and startup profile/non-durable logging. Metrics,
 readiness endpoints, and broader observability are deferred. Contract-level status is not a health endpoint.
