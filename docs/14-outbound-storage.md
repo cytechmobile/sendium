@@ -1,9 +1,10 @@
 # Outbound storage contracts
 
 This describes the initial contracts for [#338](https://github.com/cytechmobile/sendium/issues/338),
-under [#337](https://github.com/cytechmobile/sendium/issues/337). At this step these are library APIs:
-the coordinator, memory stage implementations, configuration selector, and production wiring are
-subsequent tasks. Existing ingress and queue behavior has not changed.
+under [#337](https://github.com/cytechmobile/sendium/issues/337). The stage contracts are library APIs,
+and standalone profile selection, early validation, and startup logging are implemented. The coordinator,
+memory stage implementations, and end-to-end production wiring are subsequent tasks. Existing ingress
+and queue behavior remains non-durable.
 
 ## Ownership model
 
@@ -42,7 +43,7 @@ must reject a copied-route request as `UNSUPPORTED` before assignment or dispatc
 lookup happens to produce only one destination. It must not silently choose one result, strip the
 copy flag, or emulate fan-out using several assignments or forwarding calls.
 
-This guard belongs to the upcoming routing integration task; this contract-only step does not change
+This guard belongs to the upcoming routing integration task; this profile-selection step does not change
 existing routing behavior. The single-destination scope is the owner's revision to the copied-route
 requirements previously described in #337/#338. Those issue bodies have not been edited here.
 
@@ -62,8 +63,15 @@ storage/
   OutboundStorageException.java
 ```
 
-Memory implementations will live under `storage.memory` when introduced. No backend implementation
-package is needed for this contract-only step.
+Memory implementations will live under `storage.memory` when introduced. Standalone configuration
+assembly lives separately in `sendium-app`, under `gr.cytech.sendium.app.storage`:
+
+- `SmsStorageProfile` is an immutable validated configuration value. Its constructor is the single
+  supported-profile validator; it accepts only `memory/memory/memory`.
+- `StandaloneSmsStorage` produces that profile as a CDI singleton from runtime configuration and
+  requires it in an early startup observer. The observer logs the effective profile and non-durable warning.
+
+These classes are absent from the `sendium-core` artifact; they do not activate inside an embedding application.
 
 | Contract | Responsibility |
 |---|---|
@@ -163,8 +171,8 @@ An application assembles compatible `PendingMessageStore<M>`, `SelectedRouterSto
 `RoutedWorkStore<M>` instances and passes them directly as three constructor dependencies to its
 coordinator implementation. There is no dependency-bundle type or public copier contract. The
 coordinator remains an interface at this step; the concrete constructor and wiring arrive with its
-implementation. Constructors must have no activation side effects. Standalone CDI assembly is a
-separate integration task; these APIs require no CDI annotations or container.
+implementation. Constructors must have no activation side effects. The standalone profile is assembled
+through CDI in `sendium-app`; the reusable lifecycle/storage APIs require no CDI annotations or container.
 
 For example, mCore's `Message extends StandardMessage`, billing-aware batch preparation,
 asynchronous committed tracking, and own lifecycle orchestration can be adapted without importing
@@ -179,9 +187,9 @@ quiescence. Unrouted work returns to the router; already-routed work retains its
 worker removal is a separate policy, not an alias for application shutdown. Closure is idempotent,
 cannot mark unfinished work terminal, and does not imply that memory survives a restart.
 
-## Planned standalone profile support
+## Standalone profile selection
 
-The following selectors will be introduced by the standalone wiring task:
+The standalone application reads these selectors once during startup:
 
 ```properties
 sendium.sms.pending.backend=memory
@@ -191,17 +199,29 @@ sendium.sms.routed-work.backend=memory
 
 | Pending / router / routed | Availability | Restart behavior |
 |---|---|---|
-| `memory/memory/memory` | Target of #338; not yet wired at this contract-only step | Non-durable. |
+| `memory/memory/memory` | Only selectable profile; stage implementations/coordinator wiring follow in #338 | Non-durable. |
 | `file/memory/memory` | #339 | Recover accepted work; reselect and reroute. |
 | `file/file/memory` | #345 | Recover selected work; reroute. |
 | `file/memory/file` | #345 | Reselect not-yet-routed work; restore recorded destinations. |
 | `file/file/file` | #345 | Restore selected work and recorded destinations. |
 | PostgreSQL profiles | #333 | Only explicitly implemented combinations will be supported. |
 
-Standalone validation will accept only the implemented profile and reject unsupported requests before
+Standalone validation accepts only this profile and rejects unsupported requests before
 admission, without falling back to memory. A custom backend identity in the library does not register
 a supported standalone profile. DLR storage remains independent of outbound stage selection.
 Future durable guarantees require surviving storage and remain at least once.
+
+Missing selectors default to `memory`. Explicit blanks, unknown values, and every unimplemented
+combination fail startup with the requested profile and supported choice. The values are case-sensitive
+and are read from Quarkus runtime configuration, not hot-reloaded `smsg.properties` worker settings.
+Use the corresponding environment variables `SENDIUM_SMS_PENDING_BACKEND`,
+`SENDIUM_SMS_ROUTER_QUEUE_BACKEND`, and `SENDIUM_SMS_ROUTED_WORK_BACKEND`, or JVM `-D`
+properties. Changes require a restart; they do not require rebuilding the application.
+
+The startup observer uses `Interceptor.Priority.PLATFORM_BEFORE`, ahead of the existing file watchers
+(`LIBRARY_BEFORE`) and router/worker observers (`APPLICATION`). Injecting the singleton profile into
+that observer forces validation before those later observers run. Successful startup logs the profile
+and a `NON-DURABLE` warning. The concrete stage stores are not constructed at this intermediate step.
 
 This milestone includes actionable errors and startup profile/non-durable logging. Metrics,
 readiness endpoints, and broader observability are deferred. Contract-level status is not a health endpoint.

@@ -43,6 +43,35 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `QUARKUS_HTTP_ACCESS_LOG_ENABLE` | `true` | Enables HTTP access logging. |
 | `QUARKUS_HTTP_ACCESS_LOG_DIRECTORY` | `/work/logs` | HTTP access log directory. |
 
+## Outbound SMS Storage Profile
+
+The standalone application reads these global, startup-only settings from Quarkus configuration
+(`application.properties`, JVM `-D` properties, or the environment). They are not hot-reloaded worker
+settings in `smsg.properties`.
+
+| Property | Environment variable | Default |
+| :--- | :--- | :--- |
+| `sendium.sms.pending.backend` | `SENDIUM_SMS_PENDING_BACKEND` | `memory` |
+| `sendium.sms.router-queue.backend` | `SENDIUM_SMS_ROUTER_QUEUE_BACKEND` | `memory` |
+| `sendium.sms.routed-work.backend` | `SENDIUM_SMS_ROUTED_WORK_BACKEND` | `memory` |
+
+Only **`memory/memory/memory`** is currently selectable. Missing settings default to `memory`;
+explicitly empty, unknown, or unsupported values fail startup. Values are case-sensitive. Requests
+such as `file/file/memory`, partial-file combinations, or any PostgreSQL outbound combination fail
+with an error naming the requested profile, supported profile, and configuration keys. There is no
+fallback to a less durable backend.
+
+Validation runs before Sendium's file-watcher and router/worker startup observers. The validated
+profile is retained for the process lifetime. Startup logs the effective profile and a prominent
+`NON-DURABLE` warning: accepted messages and in-flight work can be lost on restart. The current
+runtime pipeline is still memory-backed; the new stage implementations and end-to-end coordinator
+wiring are subsequent work in #338. See [Outbound Storage Contracts](14-outbound-storage.md).
+
+The producer and startup observer live only in `sendium-app`. Embedding `sendium-core` does not
+activate this validation, configure an outbound coordinator, or enforce the standalone profile list.
+Embedding applications own their assembly. Outbound SMS selectors do not change the independently
+configured DLR subsystem below.
+
 ## DLR Storage Environment Variables
 
 | Variable | Default | Description |
@@ -98,3 +127,4 @@ When the HTTP server is running, Sendium exposes:
 - [SMPP Configuration](04-smpp-configuration.md)
 - [Routing Engine](05-routing-engine.md)
 - [DLR Persistence](13-dlr-persistence.md)
+- [Outbound Storage Contracts](14-outbound-storage.md)
