@@ -4,12 +4,16 @@ This describes the initial contracts for [#338](https://github.com/cytechmobile/
 under [#337](https://github.com/cytechmobile/sendium/issues/337). The stage contracts are library APIs,
 and standalone profile selection, early validation, and startup logging are implemented. All three
 memory stage stores and the default coordinator are available as explicitly constructed library components.
-End-to-end production wiring is subsequent work. Existing ingress and queue behavior remains non-durable.
+HTTP/SMPP admission can bind to an explicitly supplied coordinator. Standalone activation remains deferred
+until dispatch, completion, retry/rerouting, and shutdown are connected. The default runtime remains non-durable.
 
 ## Ownership model
 
 ```text
-accepted pending source
+accepted pending sources
+    | ready admission, or publishReady after held admission
+    v
+ready pending work
     | bounded, eligible, priority-aware select-and-stage
     v
 selected router work ---- take/release ---- router execution
@@ -28,8 +32,9 @@ forget routed terminal bookkeeping
 Pending sources remain authoritative throughout. Taking work does not delete source or stage
 ownership. Source IDs, selection IDs, and destination work IDs are distinct opaque UUID-backed types;
 none is inferred from mutable message equality or a protocol serial. One selected item may retain
-several source IDs, allowing later multipart integration without treating an aggregate as a new
-independent admission. Detailed multipart admission and reconstruction are owned by #343.
+several source IDs. Held admission and ready-work publication retain those sources without treating
+an aggregate as a new independent admission. Protocol wiring follows separately; detailed multipart
+grouping, deduplication, recovery, and codec contracts are owned by #343.
 
 Each routed selection has one destination and one work identity through execution, same-worker retry,
 and terminal cleanup. Direct worker-to-worker forwarding is outside this abstraction's scope.
@@ -91,7 +96,7 @@ These classes are absent from the `sendium-core` artifact; they do not activate 
 
 | Contract | Responsibility |
 |---|---|
-| `PendingMessageStore<M>` | Record accepted source state under a stable caller-supplied identity and complete sources idempotently. |
+| `PendingMessageStore<M>` | Admit ready or held sources, publish prepared work using held source IDs, and complete sources idempotently. |
 | `SelectedRouterStore<M>` | Own bounded select-and-stage, exclusive runtime takes, return-to-router, and retained selected state. |
 | `RoutedWorkStore<M>` | Record one destination, own same-destination scheduling/retry, and report terminal source ownership. |
 | `OutboundCoordinator<M>` | Application-facing admission, transitions, required handoff, source completion, and lifecycle coordination. |
@@ -151,8 +156,10 @@ These two classes are plain Java components with no CDI activation or background
 
 - `MemoryPendingMessageStore<M>` takes a positive maximum source count and a
   `UnaryOperator<M>` snapshot function. An optional `Function<? super M, Instant>` supplies absolute
-  eligibility time at admission; the default makes every admitted source immediately eligible. No new
-  interpretation of HTTP deferred-delivery or validity fields is introduced by this library step.
+  eligibility time when ready work is first published. Ordinary `admit` publishes a singleton immediately;
+  `admitHeld` does not evaluate eligibility or put anything in the selection index. The default time policy
+  makes published work immediately eligible. No new interpretation of HTTP deferred-delivery or validity
+  fields is introduced by this library step.
 - `MemorySelectedRouterStore<M>` takes that pending store, a positive routing capacity, and optionally
   a `Clock` (UTC by default). Open pending first, then the selected store. A pending instance accepts
   only one selected-router owner for its lifetime, including after that router closes.
@@ -165,21 +172,25 @@ a correct snapshot function belongs to assembly. Functions run under the store l
 side-effect-free, nonblocking, and must not reenter these stores. The standalone message mapper is
 supplied when ingress is wired; this step does not serialize messages or define a durable codec.
 
-Pending admission is idempotent by source ID while that source exists, even at capacity. New source
+Pending admission is idempotent by source ID while that source exists, even at capacity. Repeating either
+admission method preserves the first accepted payload and admission disposition: an `admit` retry cannot
+make a held source ready, and an `admitHeld` retry cannot withdraw ordinarily admitted work. New source
 admission fails with `CAPACITY_EXCEEDED` when the bound is reached. Admission or snapshot failure
 does not reserve a source slot. A single-source `find` returns an isolated value for backend consumers;
 there is no all-backlog loading API. Pending completion remains the caller's terminal-processing
 decision, not a side effect of selection, take, or routing.
 
-Selection uses priority-indexed ordered sets maintained at admission. It inspects due candidates rather
+Selection uses priority-indexed ordered sets maintained at ready publication. It inspects due candidates rather
 than copying or sorting the whole backlog on each refill. Higher numeric priorities select first; within
-a priority, earlier eligibility comes first, then admission order. Future work in a higher-priority group
+a priority, earlier eligibility comes first, then ready-publication order (admission order for ordinary
+singletons). Future work in a higher-priority group
 does not block eligible work at a lower priority. A batch captures one clock instant. This is an
 in-process scheduling policy, not a durable global-order guarantee.
 
 `selectAndStage(limit)` publishes at most the smaller of the requested limit and free routing slots.
-Each selected source is removed from the eligibility index but retained in pending storage. Shared
-locking makes publication and removal from eligibility indivisible per source. If snapshotting a later
+Each selected ready item is removed from the eligibility index while all its sources remain in pending storage.
+A prepared aggregate occupies one routing slot, not one per source. Shared
+locking makes staging and removal from eligibility indivisible per ready item. If snapshotting a later
 item fails, the published prefix remains available and the failed item remains eligible; retry neither
 duplicates selected sources nor loses accepted work.
 
@@ -203,6 +214,122 @@ or make its claimed sources eligible again; shutdown finishes by closing the pen
 All state is instance-local. New instances start empty and provide no restart recovery. Counts bound
 admission and active routing, not message byte size; required terminal bookkeeping is removed by
 coordinated cleanup in the later integration tasks.
+
+## Held-source admission and ready-work publication
+
+The pending interface and coordinator expose two operations for the initial multipart ownership boundary:
+
+```java
+coordinator.admitHeld(firstSourceId, firstPart);
+coordinator.admitHeld(secondSourceId, secondPart);
+
+// The existing reassembler supplies this message and its accepted source IDs.
+coordinator.publishReady(Set.of(firstSourceId, secondSourceId), assembledMessage);
+
+coordinator.selectAndStage(batchLimit);
+```
+
+This example describes the library boundary used by the opt-in admission integration below. Successful held admission gives
+the protocol integration an ownership boundary at which to acknowledge an individual part without
+waiting for assembly. Held records consume pending source capacity but can never be selected on their
+own, regardless of their priority or timestamp. A snapshot/admission failure must not be acknowledged.
+
+`publishReady` accepts a nonempty set of already admitted, initially held source IDs and one prepared
+execution message. It validates all sources and prepares the snapshot/eligibility metadata before binding
+the whole set and exposing one candidate to normal selection. It does not enqueue directly to the router,
+create a new accepted source, free source capacity, or overwrite the original accepted part payloads.
+Publication therefore works even when the held sources fill pending capacity. Selection still observes
+batch size, routing capacity, the prepared message's priority, and its eligibility time.
+
+In memory, accepted-source records and ready scheduling entries are separate. Each source links to
+its first ready entry; multiple sources can share one entry. The shared lock prevents a selector from
+seeing a partially bound group. The ready-entry link remains after selection so retries do not publish
+another candidate. The source snapshot remains available through `find(sourceId)` independently of
+the prepared aggregate and its subsequent execution mutations.
+
+While every source is retained, repeating the exact source set is a successful no-op: the first published
+payload, priority, and eligibility time win, including after the item is selected, taken, or routed. Missing
+or ordinarily admitted sources and overlapping/subset/superset regroupings fail as `INVALID_TRANSITION`.
+All validation precedes binding, so failure cannot consume otherwise-unpublished sources. Snapshot or
+eligibility failure leaves held sources available for a whole-publication retry. Once any source has been
+removed during terminal cleanup, publishing that set is invalid; publication never recreates sources or
+retains completed-publication tombstones forever.
+
+The caller owns assembly and expiry decisions. To release an expired incomplete part independently,
+publish a singleton source set and its execution message. This primitive introduces no UDH parsing,
+group-key policy, ordinal deduplication, timer, persisted deadline, or codec. Those detailed contracts
+remain #343 work; the admission integration reuses the existing reassembler.
+
+`admitHeld` requires a running coordinator, just like ordinary admission. `publishReady` is an
+existing-work transition and remains available while quiescing, so an assembler may release already
+accepted work during shutdown. New selection/takes remain stopped. Held and prepared memory state
+is instance-local and disappears on close/restart; no new durability guarantee is implied.
+
+## HTTP/SMPP admission binding
+
+`KannelResource` and the standard outgoing-worker factory resolve a default-qualified CDI
+`OutboundCoordinator<StandardMessage>` when one is supplied by application assembly. HTTP calls
+`admit` on that coordinator; the factory binds it to each standard SMPP server before worker startup.
+Other explicitly assembled SMPP workers can use `setIngressCoordinator` with their own message type.
+The SMPP binding cannot be changed after startup or any submission has begun.
+
+No production coordinator producer is added at this intermediate step. With no coordinator binding,
+the existing memory-queue admission path remains available. When a binding exists, resolution or
+admission failure does not fall back to that queue. Applications must supply a long-lived, started
+coordinator and connect selection, dispatch, completion, and retry policies before enabling the new
+pipeline. The standard message snapshot mapper and standalone activation are subsequent integration work.
+
+### HTTP
+
+After authentication, parameter handling, gateway UUID generation, and DLR return-metadata creation,
+HTTP admission calls `admit` with a typed source ID wrapping the same UUID as the gateway message ID.
+It returns `202` only after admission succeeds; the response contains that gateway UUID as text.
+The source ID remains a distinct lifecycle type so other applications can use their own protocol IDs.
+Lifecycle failures map to:
+
+| Failure | HTTP response |
+|---|---|
+| Capacity, unavailable storage/lifecycle, or ownership conflict | `503` with a retry-later response |
+| Unsupported submission | `400` |
+| Invalid internal transition or unexpected resolution/processing error | `500` |
+
+Error responses do not expose storage exception details. The legacy interrupted-admission path also
+returns `503` and preserves the thread's interrupt flag.
+
+### SMPP and existing reassembly
+
+Before-insert filters and gateway UUID/timestamp assignment still precede admission. A complete SMS
+is admitted directly as ready work. A submission with a concatenation header must pass the existing
+reassembler's supported-header check, then uses `admitHeld` before `STATUS_OK`. It enters the ingress
+queue with its accepted source ID (the same UUID as that part's gateway message ID); it is not
+independently selected for routing. In legacy mode, local
+ingress-queue insertion now also precedes `STATUS_OK`.
+
+Capacity rejection returns `STATUS_THROTTLED`; unsupported input returns `STATUS_SUBMITFAIL`;
+other lifecycle/storage failures return `STATUS_SYSERR`. Rejections do not publish a successful response
+or enter the legacy router queue. No new UDH syntax or detailed ordinal-validation policy is introduced.
+
+The existing reassembler produces either an aggregate or individually expired parts. Their internal
+`InEvent` values carry an immutable source-ID set and no `submitSm`; processing calls `publishReady`
+instead of admitting a new source or enqueueing directly to the legacy router. Publication failure requeues
+that prepared event with the same payload and source IDs. It does not reassemble again, issue another
+client acknowledgement, or release accepted sources. Original part payloads remain in pending storage.
+
+Per-worker identity-based metadata associates accepted raw part objects with source IDs until the
+association is handed to a prepared event. The existing first-part-wins ordinal behavior remains; a
+default-compatible `onDuplicateMessagePart` listener hook associates an ignored duplicate's held source
+with the retained original. Its source therefore finishes with that message instead of leaking pending
+capacity. This does not change duplicate response IDs or downstream receipt policy, which remain part
+of the detailed multipart follow-up.
+
+Part insertion and completion/expiry callbacks are serialized within the existing handler so source
+associations cannot cross group removal. Delayed tasks capture the actual group instance: a cancelled
+old timer cannot consume a newer group that reused the same reference. Expiry only publishes the
+parts already in that group, not accepted parts still waiting in the ingress queue. Group-key rules,
+body assembly, relative timeout settings, and first-part-wins policy otherwise remain unchanged.
+
+These changes do not activate provider dispatch or implement worker-to-router retry. No mCore-specific
+workflow or storage adapter is added.
 
 ## Memory routed-work implementation
 

@@ -123,6 +123,10 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     @Override
     public void admit(SourceId source, M message) {
+        admit(source, message, false);
+    }
+
+    private void admit(SourceId source, M message, boolean held) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(message, "message");
         lock.lock();
@@ -131,7 +135,27 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             if (sourceSelections.containsKey(source)) {
                 return;
             }
-            pending.admit(source, message);
+            if (held) {
+                pending.admitHeld(source, message);
+            } else {
+                pending.admit(source, message);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public void admitHeld(SourceId source, M message) {
+        admit(source, message, true);
+    }
+
+    @Override
+    public void publishReady(Set<SourceId> sources, M message) {
+        lock.lock();
+        try {
+            requireActive(Role.PENDING);
+            pending.publishReady(sources, message);
         } finally {
             lock.unlock();
         }

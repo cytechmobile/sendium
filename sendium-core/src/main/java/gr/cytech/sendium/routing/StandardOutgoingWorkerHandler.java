@@ -7,6 +7,7 @@ import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
 import gr.cytech.sendium.core.smpp.server.StandardSmppServerMessageStore;
@@ -56,6 +57,8 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
     @Inject
     @Any
     Instance<AbstractOutWorker<StandardMessage>> availableWorkers;
+    @Inject
+    Instance<OutboundCoordinator<StandardMessage>> outboundCoordinators;
     @Inject
     SendiumConfigurationHandler configurationHandler;
     @Inject
@@ -206,6 +209,9 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             worker.init(workerResourceProvider, new StandardMessageTracker(worker));
             if (SmppServerWorker.TYPE_SMPP_SERVER.equals(worker.getType())) {
                 var smppServer = (SmppServerWorker<StandardMessage>) worker;
+                if (!outboundCoordinators.isUnsatisfied()) {
+                    smppServer.setIngressCoordinator(outboundCoordinators.get());
+                }
                 smppServer.setMessageStore(new StandardSmppServerMessageStore(smppServer));
             }
         } catch (Exception e) {

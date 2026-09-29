@@ -20,12 +20,16 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundCoordinator;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.smpp.server.tasks.InTask;
 import gr.cytech.sendium.core.smpp.server.tasks.InactivityTimeTask;
 import gr.cytech.sendium.core.smpp.server.tasks.OutTask;
 import gr.cytech.sendium.core.smpp.server.tasks.PrintStatisticsTask;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.worker.FailDelayPolicy;
 import gr.cytech.sendium.core.worker.FailDelayPolicyAction;
 import gr.cytech.sendium.core.worker.WorkerType;
@@ -47,8 +51,11 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -141,6 +148,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     protected MessagePartsHandler<M> messagePartsHandler;
     protected boolean isFastUnsafeStop = false;
     private final ReentrantReadWriteLock ingressLifecycleLock = new ReentrantReadWriteLock(true);
+    private final Map<M, Set<SourceId>> pendingPartSources = Collections.synchronizedMap(new IdentityHashMap<>());
+    private volatile OutboundCoordinator<M> ingressCoordinator;
+    private volatile boolean ingressStarted;
 
     public SmppServerWorker() {
         this.authProvider = new BasicSmppAuthenticationProvider(this);
@@ -194,6 +204,23 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         this.messageStore = messageStore;
     }
 
+    /** Select the ingress lifecycle before starting this worker or admitting any submissions. */
+    public void setIngressCoordinator(OutboundCoordinator<M> coordinator) {
+        Objects.requireNonNull(coordinator, "coordinator");
+        if (ingressStarted || inExecutor != null) {
+            throw new IllegalStateException("Ingress lifecycle must be selected before worker startup/admission");
+        }
+        ingressLifecycleLock.writeLock().lock();
+        try {
+            if (ingressStarted || inExecutor != null || (ingressCoordinator != null && ingressCoordinator != coordinator)) {
+                throw new IllegalStateException("Ingress lifecycle cannot change after selection/startup");
+            }
+            ingressCoordinator = coordinator;
+        } finally {
+            ingressLifecycleLock.writeLock().unlock();
+        }
+    }
+
     @Override
     public String getType() {
         return TYPE_SMPP_SERVER;
@@ -201,6 +228,12 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     @Override
     public Thread start() {
+        ingressLifecycleLock.writeLock().lock();
+        try {
+            ingressStarted = true;
+        } finally {
+            ingressLifecycleLock.writeLock().unlock();
+        }
         logger.info("starting SmppServer");
         this.keepOnRunning = true;
         stopExecutor(inExecutor, "in");
@@ -943,6 +976,16 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     public void enqueueIn(InEvent<M> ine) {
+        ingressLifecycleLock.readLock().lock();
+        try {
+            ingressStarted = true;
+            acceptIngress(ine);
+        } finally {
+            ingressLifecycleLock.readLock().unlock();
+        }
+    }
+
+    private void acceptIngress(InEvent<M> ine) {
         if (printMsgs) {
             logger.debug("IN: {}", ine);
         }
@@ -955,15 +998,68 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         if (filtered == null) {
             return;
         }
-        filtered.pMsg.serial = UUID.randomUUID().toString();
+        UUID gatewayMessageId = UUID.randomUUID();
+        filtered.pMsg.serial = gatewayMessageId.toString();
         filtered.pMsg.ctstamp = ine.localTimestamp.getTime();
         filtered.pMsg.onetwork = ine.mpid;
+        if (ingressCoordinator != null) {
+            if (!admitToLifecycle(filtered, gatewayMessageId)) {
+                return;
+            }
+        } else {
+            inEventQueue.add(filtered);
+        }
         if (filtered.submitSm != null) {
             enqueueOut(SmppServerUtil.createSubmitRsp(
                     filtered.submitSm, SmppConstants.STATUS_OK, filtered.pMsg.serial));
             filtered.waitingForResponse = false;
         }
-        inEventQueue.add(filtered);
+    }
+
+    private boolean admitToLifecycle(InEvent<M> event, UUID gatewayMessageId) {
+        try {
+            SourceId source = new SourceId(gatewayMessageId);
+            if (event.submitSm != null && !Strings.isNullOrEmpty(event.pMsg.binheader)) {
+                if (!messagePartsHandler.isSupportedMessagePart(event.pMsg)) {
+                    throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNSUPPORTED,
+                            "Unsupported multipart header");
+                }
+                ingressCoordinator.admitHeld(source, event.pMsg);
+                synchronized (pendingPartSources) {
+                    pendingPartSources.computeIfAbsent(event.pMsg, ignored -> new HashSet<>()).add(source);
+                }
+                InEvent<M> accepted = new InEvent<>(event.pMsg, event.submitSm, event.mpid, event.localTimestamp,
+                        false, event.responseMessageId, Set.of(source));
+                accepted.notifyClient = event.notifyClient;
+                inEventQueue.add(accepted);
+            } else {
+                ingressCoordinator.admit(source, event.pMsg);
+            }
+            if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
+                logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(), MessageTrace.identifiers(event.pMsg));
+            }
+            return true;
+        } catch (OutboundStorageException failure) {
+            logger.warn("SMPP admission failed stage={} reason={}", failure.stage(), failure.reason());
+            int status = switch (failure.reason()) {
+                case CAPACITY_EXCEEDED -> SmppConstants.STATUS_THROTTLED;
+                case UNSUPPORTED -> SmppConstants.STATUS_SUBMITFAIL;
+                default -> SmppConstants.STATUS_SYSERR;
+            };
+            rejectIngress(event, status);
+            return false;
+        } catch (RuntimeException failure) {
+            logger.error("SMPP admission failed before acknowledgement", failure);
+            rejectIngress(event, SmppConstants.STATUS_SYSERR);
+            return false;
+        }
+    }
+
+    private void rejectIngress(InEvent<M> event, int status) {
+        if (event.submitSm != null) {
+            enqueueOut(SmppServerUtil.createSubmitRsp(event.submitSm, status, null));
+            event.waitingForResponse = false;
+        }
     }
 
     protected boolean checkReassembling(M msg) {
@@ -989,6 +1085,18 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             }
 
             try {
+                if (ingressCoordinator != null) {
+                    if (event.sourceIds.isEmpty()) {
+                        throw new IllegalStateException("Accepted ingress event has no lifecycle source ownership");
+                    }
+                    if (event.submitSm == null) {
+                        ingressCoordinator.publishReady(event.sourceIds, event.pMsg);
+                    } else if (pendingPartSources.containsKey(event.pMsg)) {
+                        messagePartsHandler.addMessagePart(event.pMsg);
+                    }
+                    // A replayed raw event may already have handed its sources to a retained part or ready event.
+                    continue;
+                }
                 if (event.submitSm != null && !Strings.isNullOrEmpty(event.pMsg.binheader)) {
                     messagePartsHandler.addMessagePart(event.pMsg);
                 } else {
@@ -1302,8 +1410,29 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     public class CcatMessagePartsEventsListener implements MessagePartsEventsListener<M> {
         @Override
+        public void onDuplicateMessagePart(M original, M duplicate) {
+            if (ingressCoordinator == null || original == duplicate) {
+                return;
+            }
+            synchronized (pendingPartSources) {
+                Set<SourceId> originalSources = requirePartSources(original);
+                Set<SourceId> duplicateSources = requirePartSources(duplicate);
+                originalSources.addAll(duplicateSources);
+                pendingPartSources.remove(duplicate);
+            }
+        }
+
+        @Override
         public void onMessagePartsHandlingEvent(MessagePartsHandler.MessagePartsEventType type, List<M> parts) {
 
+            List<Set<SourceId>> sources = new ArrayList<>();
+            if (ingressCoordinator != null) {
+                synchronized (pendingPartSources) {
+                    for (M part : parts) {
+                        sources.add(Set.copyOf(requirePartSources(part)));
+                    }
+                }
+            }
             if (type == MessagePartsHandler.MessagePartsEventType.COMPLETE) {
                 //The first part contains the id that we need to send to the provider
                 M message = parts.getFirst();
@@ -1312,12 +1441,32 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                 message.body = parts.stream().map(m -> m.body).collect(Collectors.joining(""));
                 message.reassembledParts = parts.stream().map(m -> m.serial).collect(Collectors.toCollection(ArrayList::new));
 
-                InEvent<M> event = new InEvent<M>(message, null, message.onetwork, new Timestamp(message.ctstamp));
+                Set<SourceId> allSources = sources.stream().flatMap(Set::stream).collect(Collectors.toSet());
+                InEvent<M> event = new InEvent<>(message, null, message.onetwork, new Timestamp(message.ctstamp),
+                        ingressCoordinator == null, null, allSources);
                 reEnqueueIn(List.of(event));
             } else {
-                var messages = parts.stream().map(m -> new InEvent<M>(m, null, m.onetwork, new Timestamp(m.ctstamp))).collect(Collectors.toList());
+                List<InEvent<M>> messages = new ArrayList<>();
+                for (int i = 0; i < parts.size(); i++) {
+                    M part = parts.get(i);
+                    messages.add(new InEvent<>(part, null, part.onetwork, new Timestamp(part.ctstamp),
+                            ingressCoordinator == null, null, ingressCoordinator == null ? Set.of() : sources.get(i)));
+                }
                 reEnqueueIn(messages);
             }
+            if (ingressCoordinator != null) {
+                synchronized (pendingPartSources) {
+                    parts.forEach(pendingPartSources::remove);
+                }
+            }
+        }
+
+        private Set<SourceId> requirePartSources(M part) {
+            Set<SourceId> sources = pendingPartSources.get(part);
+            if (sources == null || sources.isEmpty()) {
+                throw new IllegalStateException("Reassembled part has no lifecycle source ownership");
+            }
+            return sources;
         }
 
         @Override

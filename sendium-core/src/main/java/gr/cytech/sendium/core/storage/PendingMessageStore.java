@@ -10,9 +10,24 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * Records accepted source state before protocol success. Later execution mutations must not
      * silently change that state. Repeating the same source ID while it remains pending is idempotent
      * and never overwrites its accepted content. A failure must
-     * not be acknowledged. Deduplication after terminal source removal is not promised.
+     * not be acknowledged. This admits ready work, subject to the selection eligibility policy.
+     * Repeating either admission method preserves the first accepted payload and held/ready disposition.
+     * Deduplication after terminal source removal is not promised.
      */
     void admit(SourceId source, M message);
+
+    /** Retains an accepted source without making it eligible for selection until publishReady succeeds. */
+    void admitHeld(SourceId source, M message);
+
+    /**
+     * Publishes one execution message referring to a nonempty set of admitted held sources. Original
+     * source records remain authoritative. Publication must bind the whole set before exposing work
+     * to selection; it does not bypass selection limits or create another accepted source.
+     * While all sources remain retained, repeating the exact source set preserves the first published
+     * payload and cannot duplicate work, including after selection/routing. Missing, ordinarily admitted,
+     * or differently grouped sources fail explicitly. The caller owns assembly/expiry policy.
+     */
+    void publishReady(Set<SourceId> sources, M message);
 
     /**
      * Called only after all work and required handoffs are terminal. Missing sources are already
