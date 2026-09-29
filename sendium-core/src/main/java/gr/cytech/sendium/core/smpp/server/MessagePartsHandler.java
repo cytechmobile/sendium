@@ -53,7 +53,7 @@ public class MessagePartsHandler<M extends StandardMessage> {
                         .factory()));
     }
 
-    public boolean stop() {
+    public synchronized boolean stop() {
         logger.info("Stopping MessagePartsHandler: {} ...", listener.getName());
 
         //process any scheduled tasks and stop the executor
@@ -83,7 +83,7 @@ public class MessagePartsHandler<M extends StandardMessage> {
      * @param part The part to be added. It must be a valid part based on the {@link MessagePartsHandler#isSupportedMessagePart}
      * @throws IllegalArgumentException If the {@link MessagePartsHandler#isSupportedMessagePart} return false
      */
-    public void addMessagePart(M part) throws IllegalArgumentException {
+    public synchronized void addMessagePart(M part) throws IllegalArgumentException {
         if (!isSupportedMessagePart(part)) {
             throw new IllegalArgumentException("The provided message part does not contain a supported UDH");
         }
@@ -94,7 +94,9 @@ public class MessagePartsHandler<M extends StandardMessage> {
                 k -> new ConcurrentSkipListSet<>(new MessagePartsComparator()));
 
         logger.debug("adding message part for msgRefNum: {} with udh: {}", msgRefNum, part.binheader);
-        receivedParts.add(part);
+        if (!receivedParts.add(part)) {
+            listener.onDuplicateMessagePart(receivedParts.tailSet(part).first(), part);
+        }
 
         scheduledTasks.computeIfAbsent(msgRefNum, this::scheduleDelayedMessagePartsTask);
 
@@ -124,15 +126,11 @@ public class MessagePartsHandler<M extends StandardMessage> {
      */
     private List<M> cancelScheduledDelayedMessagePartsTask(String msgRefNum) {
         Future<Boolean> futureCall = scheduledTasks.remove(msgRefNum);
-        List<M> receivedParts = null;
-        //Remove all the related information because all message parts have been received
-        if (futureCall != null && futureCall.cancel(false)) {
-            Set<M> parts = pendingMessageParts.remove(msgRefNum);
-            if (parts != null) {
-                receivedParts = new ArrayList<>(parts);
-            }
+        if (futureCall != null) {
+            futureCall.cancel(false);
         }
-        return receivedParts;
+        Set<M> parts = pendingMessageParts.remove(msgRefNum);
+        return parts == null ? null : new ArrayList<>(parts);
     }
 
     /**
@@ -170,9 +168,11 @@ public class MessagePartsHandler<M extends StandardMessage> {
      */
     public class DelayedMessagePartsTask implements Runnable, Callable<Boolean> {
         private final String msgRefNum;
+        private final SortedSet<M> expectedParts;
 
         public DelayedMessagePartsTask(String msgRefNum) {
             this.msgRefNum = msgRefNum;
+            this.expectedParts = pendingMessageParts.get(msgRefNum);
         }
 
         public void run() {
@@ -184,13 +184,22 @@ public class MessagePartsHandler<M extends StandardMessage> {
         }
 
         private boolean handleReceivedParts() {
+            synchronized (MessagePartsHandler.this) {
+                return handleCurrentGroup();
+            }
+        }
+
+        private boolean handleCurrentGroup() {
             try {
-                Set<M> parts = pendingMessageParts.remove(msgRefNum);
-                if (parts != null && !parts.isEmpty()) {
-                    //Just remove the reference to the task as it has already been executed.
-                    scheduledTasks.remove(msgRefNum);
+                // A cancelled timer may still run after the reference has been reused for a new group.
+                if (expectedParts != null && pendingMessageParts.get(msgRefNum) == expectedParts) {
+                    pendingMessageParts.remove(msgRefNum);
+                    Future<Boolean> task = scheduledTasks.remove(msgRefNum);
+                    if (task != null) {
+                        task.cancel(false);
+                    }
                     //notify the registered listener
-                    listener.onMessagePartsHandlingEvent(MessagePartsEventType.DELAYED, new ArrayList<>(parts));
+                    listener.onMessagePartsHandlingEvent(MessagePartsEventType.DELAYED, new ArrayList<>(expectedParts));
                 }
             } catch (Exception ex) {
                 logger.error("exception caught while handling the delayed parts with msgRefNum: " + msgRefNum);

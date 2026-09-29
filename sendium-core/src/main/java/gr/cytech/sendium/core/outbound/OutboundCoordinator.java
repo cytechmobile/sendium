@@ -10,6 +10,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletionStage;
 
 /**
@@ -34,6 +35,16 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
     void quiesce();
 
     void admit(SourceId source, M message);
+
+    /** Accepts source ownership without making this source routable yet. */
+    void admitHeld(SourceId source, M message);
+
+    /**
+     * Makes one execution message available to bounded selection using the original held source IDs.
+     * The caller decides which sources form an assembled message or an individual expired part.
+     * This is an existing-work transition and remains available during quiescence; new admissions do not.
+     */
+    void publishReady(Set<SourceId> sources, M message);
 
     int selectAndStage(int limit);
 

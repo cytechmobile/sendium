@@ -7,9 +7,10 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Storage identities are independent of protocol message IDs. Message-bearing values contain
- * mutable execution projections. Mutations are intentional but must not silently change an
- * earlier-stage record; implementations keep recorded payload and stage consistent.
+ * Storage identity types are independent of protocol message IDs. An ingress may reuse its gateway
+ * message UUID as a source ID; later stage IDs still identify their own lifecycle steps.
+ * Message-bearing values contain mutable execution projections. Mutations are intentional but must
+ * not silently change an earlier-stage record; implementations keep recorded payload and stage consistent.
  */
 public final class OutboundWork {
     private OutboundWork() {
