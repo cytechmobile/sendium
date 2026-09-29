@@ -65,7 +65,8 @@ Validation runs before Sendium's file-watcher and router/worker startup observer
 profile is retained for the process lifetime. Startup logs the effective profile and a prominent
 `NON-DURABLE` warning: accepted messages and in-flight work can be lost on restart. The current
 runtime pipeline is still memory-backed. All three memory stage stores and the default lifecycle
-coordinator exist as library components; ingress/worker wiring is subsequent work in #338. Their
+coordinator exist as library components. HTTP/SMPP can bind to an explicitly supplied coordinator;
+standalone activation still awaits connected dispatch, completion, and retry/rerouting work in #338. Their
 capacity bounds are constructor arguments at this stage, not additional operator settings.
 See [Outbound Storage Contracts](14-outbound-storage.md).
 

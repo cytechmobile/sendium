@@ -23,7 +23,7 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNA
 
 /**
  * One selected-router owner per pending-store lifetime. A shared lock makes memory selection and
- * publication indivisible per source to other operations. Capacity includes queued and taken routing work;
+ * publication indivisible per ready item to other operations. Capacity includes queued and taken routing work;
  * routed records remain retained until source cleanup but no longer occupy a routing slot.
  */
 public final class MemorySelectedRouterStore<M extends StandardMessage> implements SelectedRouterStore<M> {
@@ -90,7 +90,7 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
                     break;
                 }
                 M message = pending.snapshot(source.message, Role.ROUTER_QUEUE);
-                Entry<M> entry = new Entry<>(new SelectionId(UUID.randomUUID()), Set.of(source.source), message);
+                Entry<M> entry = new Entry<>(new SelectionId(UUID.randomUUID()), source.sources, message);
                 records.put(entry.id, entry);
                 ready.addLast(entry);
                 pending.removeWaiting(source);

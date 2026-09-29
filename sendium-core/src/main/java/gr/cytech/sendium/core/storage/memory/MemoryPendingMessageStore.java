@@ -39,7 +39,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
     private final int capacity;
     private final UnaryOperator<M> snapshots;
     private final Function<? super M, Instant> eligibleAt;
-    private final Map<SourceId, Entry<M>> records = new HashMap<>();
+    private final Map<SourceId, Source<M>> records = new HashMap<>();
     private final NavigableMap<Integer, NavigableSet<Entry<M>>> waiting = new TreeMap<>(Comparator.reverseOrder());
     private State state = State.NEW;
     private Object selectorOwner;
@@ -49,7 +49,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         this(capacity, snapshots, message -> Instant.MIN);
     }
 
-    /** Eligibility is evaluated once at admission; subsequent message mutations cannot change it. */
+    /** Eligibility is evaluated when ready work is first published; held admission does not evaluate it. */
     public MemoryPendingMessageStore(int capacity, UnaryOperator<M> snapshots, Function<? super M, Instant> eligibleAt) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("Pending capacity must be positive");
@@ -84,6 +84,10 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
 
     @Override
     public void admit(SourceId source, M message) {
+        admit(source, message, false);
+    }
+
+    private void admit(SourceId source, M message, boolean held) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(message, "message");
         lock.lock();
@@ -96,20 +100,86 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
                 throw new OutboundStorageException(Role.PENDING, CAPACITY_EXCEEDED, "Memory pending capacity reached");
             }
             M snapshot = snapshot(message, Role.PENDING);
-            Instant available;
-            try {
-                available = Objects.requireNonNull(eligibleAt.apply(snapshot), "eligibleAt result");
-            } catch (RuntimeException failure) {
-                throw new OutboundStorageException(Role.PENDING, UNSUPPORTED, "Cannot determine source eligibility", failure);
+            Source<M> accepted = new Source<>(snapshot, held);
+            Entry<M> ready = held ? null : readyEntry(Set.of(source), snapshot);
+            records.put(source, accepted);
+            if (ready != null) {
+                accepted.ready = ready;
+                addWaiting(ready);
             }
-            Entry<M> entry = new Entry<>(source, snapshot, available, sequence++);
-            records.put(source, entry);
-            waiting.computeIfAbsent(entry.priority, ignored -> new TreeSet<>(Comparator
-                    .comparing((Entry<M> item) -> item.available)
-                    .thenComparingLong(item -> item.sequence))).add(entry);
         } finally {
             lock.unlock();
         }
+    }
+
+    @Override
+    public void admitHeld(SourceId source, M message) {
+        admit(source, message, true);
+    }
+
+    @Override
+    public void publishReady(Set<SourceId> sources, M message) {
+        Set<SourceId> checked = Set.copyOf(sources);
+        Objects.requireNonNull(message, "message");
+        if (checked.isEmpty()) {
+            throw new IllegalArgumentException("Ready work must reference at least one source");
+        }
+        lock.lock();
+        try {
+            requireReady(Role.PENDING);
+            Entry<M> existing = null;
+            for (SourceId source : checked) {
+                Source<M> accepted = records.get(source);
+                if (accepted == null || !accepted.initiallyHeld) {
+                    throw invalidPublication();
+                }
+                if (accepted.ready != null) {
+                    if (existing != null && accepted.ready != existing) {
+                        throw invalidPublication();
+                    }
+                    existing = accepted.ready;
+                }
+            }
+            if (existing != null) {
+                if (!existing.sources.equals(checked)) {
+                    throw invalidPublication();
+                }
+                for (SourceId source : checked) {
+                    if (records.get(source).ready != existing) {
+                        throw invalidPublication();
+                    }
+                }
+                return;
+            }
+            Entry<M> entry = readyEntry(checked, snapshot(message, Role.PENDING));
+            for (SourceId source : checked) {
+                records.get(source).ready = entry;
+            }
+            addWaiting(entry);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private Entry<M> readyEntry(Set<SourceId> sources, M message) {
+        Instant available;
+        try {
+            available = Objects.requireNonNull(eligibleAt.apply(message), "eligibleAt result");
+        } catch (RuntimeException failure) {
+            throw new OutboundStorageException(Role.PENDING, UNSUPPORTED, "Cannot determine work eligibility", failure);
+        }
+        return new Entry<>(sources, message, available, sequence++);
+    }
+
+    private void addWaiting(Entry<M> entry) {
+        waiting.computeIfAbsent(entry.priority, ignored -> new TreeSet<>(Comparator
+                .comparing((Entry<M> item) -> item.available)
+                .thenComparingLong(item -> item.sequence))).add(entry);
+    }
+
+    private static OutboundStorageException invalidPublication() {
+        return new OutboundStorageException(Role.PENDING, INVALID_TRANSITION,
+                "Ready publication requires retained held sources with one matching source set");
     }
 
     /** Single-source lookup for memory-backend consumers; returns an isolated execution value. */
@@ -118,7 +188,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         lock.lock();
         try {
             requireReady(Role.PENDING);
-            Entry<M> entry = records.get(source);
+            Source<M> entry = records.get(source);
             return entry == null ? Optional.empty() : Optional.of(snapshot(entry.message, Role.PENDING));
         } finally {
             lock.unlock();
@@ -132,9 +202,9 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         try {
             requireReady(Role.PENDING);
             for (SourceId source : checked) {
-                Entry<M> entry = records.remove(source);
-                if (entry != null) {
-                    removeWaiting(entry);
+                Source<M> entry = records.remove(source);
+                if (entry != null && entry.ready != null) {
+                    removeWaiting(entry.ready);
                 }
             }
         } finally {
@@ -209,18 +279,29 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
     }
 
     static final class Entry<M extends StandardMessage> {
-        final SourceId source;
+        final Set<SourceId> sources;
         final M message;
         final int priority;
         final Instant available;
         final long sequence;
 
-        Entry(SourceId source, M message, Instant available, long sequence) {
-            this.source = source;
+        Entry(Set<SourceId> sources, M message, Instant available, long sequence) {
+            this.sources = sources;
             this.message = message;
             this.priority = message.priority;
             this.available = available;
             this.sequence = sequence;
+        }
+    }
+
+    private static final class Source<M extends StandardMessage> {
+        private final M message;
+        private final boolean initiallyHeld;
+        private Entry<M> ready;
+
+        private Source(M message, boolean held) {
+            this.message = message;
+            this.initiallyHeld = held;
         }
     }
 }

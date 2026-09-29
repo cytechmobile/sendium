@@ -5,11 +5,9 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Completed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
-import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
-import gr.cytech.sendium.core.storage.SelectedRouterStore;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
@@ -22,7 +20,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -44,7 +41,6 @@ import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -355,20 +351,18 @@ class DefaultOutboundCoordinatorTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
     void multiSourceCleanupCanRetryAfterPartialRemoval() throws Exception {
         var pending = spy(new MemoryPendingMessageStore<Payload>(2, Payload::copy));
-        SelectedRouterStore<Payload> router = mock(SelectedRouterStore.class);
+        var router = spy(new MemorySelectedRouterStore<>(pending, 1));
         var routed = spy(new MemoryRoutedWorkStore<Payload>(1, Payload::copy));
-        when(router.status()).thenReturn(new OutboundStage.Status("test", false, OutboundStage.State.NEW),
-                new OutboundStage.Status("test", false, OutboundStage.State.READY));
         var sources = Set.of(source(), source());
-        var selected = new Selected<>(new SelectionId(UUID.randomUUID()), sources, new Payload("aggregate"));
-        when(router.take(Duration.ZERO)).thenReturn(Optional.of(selected), Optional.empty());
         try (var coordinator = new DefaultOutboundCoordinator<>(pending, router, routed)) {
             coordinator.start();
-            sources.forEach(source -> coordinator.admit(source, new Payload("part")));
-            coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            sources.forEach(source -> coordinator.admitHeld(source, new Payload("part")));
+            coordinator.publishReady(sources, new Payload("aggregate"));
+            coordinator.selectAndStage(1);
+            var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            assertThat(selected.sources()).isEqualTo(sources);
             coordinator.route(selected, destination("A", "aggregate"));
             var taken = coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
             AtomicBoolean first = new AtomicBoolean(true);
@@ -383,7 +377,9 @@ class DefaultOutboundCoordinatorTest {
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
             assertThat(sources.stream().filter(source -> pending.find(source).isPresent()).count()).isEqualTo(1);
             sources.forEach(source -> coordinator.admit(source, new Payload("duplicate during cleanup")));
+            sources.forEach(source -> coordinator.admitHeld(source, new Payload("held duplicate during cleanup")));
             assertThat(sources.stream().filter(source -> pending.find(source).isPresent()).count()).isEqualTo(1);
+            fails(() -> coordinator.publishReady(sources, new Payload("late publication")), INVALID_TRANSITION);
             coordinator.complete(taken.id(), new CompletableFuture<>()).toCompletableFuture().join();
             sources.forEach(source -> assertThat(pending.find(source)).isEmpty());
             verify(routed, times(1)).complete(taken.id());
