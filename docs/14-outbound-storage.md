@@ -3,8 +3,8 @@
 This describes the initial contracts for [#338](https://github.com/cytechmobile/sendium/issues/338),
 under [#337](https://github.com/cytechmobile/sendium/issues/337). The stage contracts are library APIs,
 and standalone profile selection, early validation, and startup logging are implemented. All three
-memory stage stores are available as explicitly constructed library components. The coordinator and
-end-to-end production wiring are subsequent tasks. Existing ingress and queue behavior remains non-durable.
+memory stage stores and the default coordinator are available as explicitly constructed library components.
+End-to-end production wiring is subsequent work. Existing ingress and queue behavior remains non-durable.
 
 ## Ownership model
 
@@ -16,7 +16,6 @@ selected router work ---- take/release ---- router execution
     | record one destination assignment, then mark routed
     v
 destination work ------- take/release ---- worker execution
-    |                                    | forward: transfer to one successor
     | all provider parts terminal AND successful required handoffs
     v
 current destination work terminal
@@ -32,8 +31,20 @@ none is inferred from mutable message equality or a protocol serial. One selecte
 several source IDs, allowing later multipart integration without treating an aggregate as a new
 independent admission. Detailed multipart admission and reconstruction are owned by #343.
 
-There is at most one active destination work item per selection. Forwarding transfers that ownership
-to a successor with a new work ID under the same selection; it does not create simultaneous destinations.
+Each routed selection has one destination and one work identity through execution, same-worker retry,
+and terminal cleanup. Direct worker-to-worker forwarding is outside this abstraction's scope.
+
+## Sendium retry integration boundary
+
+The new library supports returning unfinished routing work through `returnToRouter(Selected)` and
+retrying taken work at the same destination through `returnToDestination(Routed)`. The former cannot
+be used after destination assignment and is not a worker-to-router transition.
+
+Sendium's existing `AbstractOutWorker` failure policies can call `enqueueToRouter` to let routing choose
+again. That production behavior remains intact. Its source-retaining lifecycle integration is planned
+separately; it must be implemented before the new pipeline replaces that path. No direct worker-to-worker
+API is substituted for it. Consumer-specific dispatchers, including mCore's queue worker, remain the
+consumer team's responsibility and require separate approval for Sendium support.
 
 ## Copied routing boundary
 
@@ -41,7 +52,7 @@ The existing `+vendor`/`copied` routing feature and its public API remain availa
 routing path. The new storage abstraction does not support copied routing. Its routing integration
 must reject a copied-route request as `UNSUPPORTED` before assignment or dispatch, even if the
 lookup happens to produce only one destination. It must not silently choose one result, strip the
-copy flag, or emulate fan-out using several assignments or forwarding calls.
+copy flag, or emulate fan-out using several assignments for the same source.
 
 This guard belongs to the upcoming routing integration task; this profile-selection step does not change
 existing routing behavior. The single-destination scope is the owner's revision to the copied-route
@@ -54,6 +65,7 @@ The public APIs are grouped by responsibility under `gr.cytech.sendium.core`:
 ```text
 outbound/
   OutboundCoordinator.java
+  DefaultOutboundCoordinator.java
   OutboundWork.java
 storage/
   OutboundStage.java
@@ -81,8 +93,9 @@ These classes are absent from the `sendium-core` artifact; they do not activate 
 |---|---|
 | `PendingMessageStore<M>` | Record accepted source state under a stable caller-supplied identity and complete sources idempotently. |
 | `SelectedRouterStore<M>` | Own bounded select-and-stage, exclusive runtime takes, return-to-router, and retained selected state. |
-| `RoutedWorkStore<M>` | Record one destination, own its scheduling, transfer responsibility on forwarding, and report terminal source ownership. |
+| `RoutedWorkStore<M>` | Record one destination, own same-destination scheduling/retry, and report terminal source ownership. |
 | `OutboundCoordinator<M>` | Application-facing admission, transitions, required handoff, source completion, and lifecycle coordination. |
+| `DefaultOutboundCoordinator<M>` | Executable coordinator for fresh non-durable stages, with owned transitions and retryable handoff/cleanup. |
 | `OutboundWork` | Source/selection/work identities and typed execution, assignment, and completion values. |
 | `OutboundStage` | Explicit open/close, backend identity, durability declaration, and lifecycle availability. |
 | `OutboundStorageException` | Identify the failing stage and distinguish unavailable, capacity, ownership, unsupported, and invalid-transition failures. |
@@ -96,7 +109,7 @@ ownership/state transitions use the categorized storage failure.
 
 `OutboundWork.Assignment` carries exactly one `Destination`, and `Routed` identifies its execution
 with a `WorkId`. The work values freeze source identity sets, not message objects. Worker and filter
-mutations are intentional execution state. They continue through transitions, returns, and forwarding;
+mutations are intentional execution state. They continue through routing and same-worker returns;
 they must not silently change a retained earlier-stage record through a shared mutable reference.
 
 The contract requires consistent ownership and stored payload/stage, not a public copying service or
@@ -196,55 +209,127 @@ coordinated cleanup in the later integration tasks.
 `MemoryRoutedWorkStore<M>` is independently constructed with a positive selection capacity and a
 `UnaryOperator<M>` snapshot function, with the same isolation/subtype requirements as the pending
 memory backend. It has its own lock and does not depend on a concrete pending or selected store.
-Coordination across stores belongs to the upcoming coordinator.
+Coordination across stores belongs to `DefaultOutboundCoordinator`.
 
 ```text
 record assignment → QUEUED → take → TAKEN
                         ↑             |
                         +-- release --+
                                       |
-                 +--------------------+-------------------+
-                 |                                        |
-             transfer                                  complete
-                 |                                        |
-       previous: TRANSFERRED                           COMPLETED
-       successor: QUEUED                                  |
-       (new ID, same selection)                  repeatable cleanup result
-                                                          |
-                                            coordinator finishes cleanup
-                                                          |
-                                                        forget
+                                   complete
+                                      |
+                                  COMPLETED
+                                      |
+                           repeatable cleanup result
+                                      |
+                         coordinator finishes cleanup
+                                      |
+                                    forget
 ```
 
 - `record` retains one assignment per selection. Matching retries return its original work ID and
-  original assignment payload, even after forwarding or completion, without re-enqueueing it. A
+  original assignment payload, even after completion, without re-enqueueing it. A
   changed source set/destination is invalid. A source cannot belong to two retained routed selections.
-- `record` and `transfer` results describe recorded work; they do not claim execution. Only `take`
+- The `record` result describes recorded work; it does not claim execution. Only `take`
   claims a work item. Each destination schedules in publication order. Take and return preserve one
   active taker and updated execution state; return the actual take result as its local attempt handle.
-- `transfer` requires taken work and atomically moves responsibility to one successor under the same
-  selection. It works even at full selection capacity because it reuses that selection's slot. Retrying
-  the predecessor returns its original immediate successor, even if that successor has moved onward.
-  A conflicting retry destination is invalid. Old work is never scheduled again.
 - `complete` requires taken work after the caller has established terminal processing and required
-  handoff. Repeated completion returns the same source set. Completion for any transferred predecessor
-  returns empty, including after its successor completes, so late callbacks cannot release sources early.
+  handoff. It returns `Completed` directly; repeated completion returns the same selection/source set.
+  There is no transferred-predecessor case or empty completion result.
 - `forget` rejects nonterminal selections. After the coordinator completes pending/selected cleanup,
-  it removes that selection's entire forwarding history and source claims, freeing capacity. Repeated
+  it removes that selection's one work record and source claims, freeing capacity. Repeated
   forget is harmless. Unknown work IDs fail explicitly. Replay guarantees apply while records are
-  retained; the coordinator must reject stale route/transfer requests and absorb duplicate terminal
+  retained; the coordinator must reject stale routing requests and absorb duplicate terminal
   callbacks after cleanup rather than recreating old work.
 
 Capacity counts retained selections, including taken work and terminal selections awaiting cleanup.
-Return and forwarding cannot create additional active selections or exhaust a separate return slot.
-Forwarding history and original replay payloads are retained once per hop until forget; the selection
-count is not a bound on history length or message bytes. The later worker integration owns retry and
-forwarding policy.
+Same-worker return reuses that selection's slot even at full capacity. The same entry is indexed by
+selection ID and work ID; no successor chain or forwarding history is stored. The original assignment
+payload is retained for record retries alongside current execution state. Selection count does not bound
+message bytes. Sendium's retry/rerouting policy is integrated in the later worker task.
 
-All required snapshots, including the returned result, are prepared before record/transfer publication.
-If a snapshot fails, no partial assignment or successor is published, and the current work remains
+All required snapshots, including the returned result, are prepared before assignment publication.
+If a snapshot fails, no partial assignment is published, and the current work remains
 retryable. Takes are interruptible and wake on publication or close. Closure clears instance-local state
 without manufacturing completion; closed instances cannot reopen and fresh instances recover nothing.
+
+## Default lifecycle coordinator
+
+Construct `DefaultOutboundCoordinator<M>` with the pending, selected-router, and routed-work stores
+as three direct dependencies. Construction is passive. `start()` opens them in that order; failed startup
+closes every attempted stage in reverse order, including a stage whose open failed, and preserves
+cleanup failures as suppressed exceptions.
+
+This implementation currently requires fresh, unopened, non-durable stages. Already-opened stages
+are not silently adopted, and durable stages fail with `UNSUPPORTED` because startup recovery and
+cross-backend reconciliation are not implemented yet. Non-durable embedding implementations can
+use the interfaces directly; there is no requirement for their backend identity string to be `memory`.
+
+The application must use the coordinator exclusively for scheduling and transitions. `admit` does not
+implicitly refill the router; invoke bounded `selectAndStage` explicitly. Blocking takes poll the owned
+store with a zero timeout and then wait on the coordinator's publication/quiescence condition.
+They support interruption and timeouts and wake when coordinated work is published or quiescence begins.
+
+### Owned transitions
+
+The coordinator tracks live selections, source ownership, and destination executions. It validates the
+actual take projection when returning or routing work. Recording a destination precedes marking the
+selection routed. A failed route retains its original destination intent; retry the same `route` operation,
+not the routing/filter lookup. While that transition is unresolved, its source cannot return to routing
+or be dispatched at the destination. Other existing destination work can still complete and free capacity.
+
+A backend that committed an assignment before reporting a failure can be reconciled using the same selection/work identities;
+observing its published take associates it with the retained intent. An unexposed take whose return
+failed is retained for a return retry rather than disappearing from ownership.
+
+### Required handoff and cleanup
+
+`complete(workId, requiredHandoff)` begins terminal processing for a taken destination. `discard`
+does the equivalent for a taken, unassigned routing item. Concurrent duplicate reports share the active
+completion attempt. No source is removed while the handoff is pending, failed, or cancelled. Retry a
+failed handoff explicitly with another completion call; the work cannot meanwhile be returned for
+provider redispatch.
+
+Once the handoff succeeds, the coordinator remembers that success and performs:
+
+```text
+destination complete (when routed)
+    → verify returned selection/source identities
+    → pending sources complete
+    → selected record complete
+    → routed bookkeeping forget (when routed)
+    → remove coordinator ownership
+```
+
+Each successful cleanup step is remembered. A failed step is retried through `complete`/`discard`
+without awaiting another handoff or dispatching provider work. Partial multi-source deletion retries
+the full source set idempotently. Duplicate admission of a still-owned source does not recreate a
+source record during an unfinished cleanup. The source identity must represent the same admission;
+after all ownership is forgotten, long-term admission deduplication is not promised.
+
+Completion results are read-only stages: cancelling a caller's `toCompletableFuture()` view cannot
+cancel the owned handoff or cleanup. Returned-stage listeners run outside the coordinator lock.
+Handoff or cleanup failures settle that attempt exceptionally and retain ownership for retry.
+
+To avoid retaining completed-ID tombstones forever, terminal reports for unknown/no-longer-owned
+work or selections are harmless no-ops. They never recreate work, remove another source, or wait on
+an unrelated supplied handoff. Route and return requests still require live ownership and
+reject stale IDs/projections. Unknown-ID errors raised for an operation on live owned work propagate;
+they are not treated as successful cleanup.
+
+### Quiescence and close
+
+`quiesce()` stops new admission, selection, and takes while allowing existing transitions, returns,
+handoff completion, and cleanup retries. The application stops/joins its processors before `close`.
+Close returns taken routing work to the router and taken destination work to that same destination,
+then closes routed, selected, and pending stores. It never completes sources merely to shut down.
+
+Outstanding handoff attempts, unfinished routing intents, and failed terminal cleanup must be
+resolved/retried before close can finish. A refused close leaves the coordinator quiescing and its
+stores open. A return failure also leaves ownership available for a subsequent close retry. Once
+draining succeeds, close attempts every store and preserves close failures; closure is idempotent and
+restart is forbidden. This library lifecycle does not stop application executors or provide a forced
+shutdown policy. Actual ingress/worker activation and application shutdown ordering remain integration work.
 
 ## Completion and retry boundaries
 
@@ -255,14 +340,10 @@ without manufacturing completion; closed instances cannot reopen and fresh insta
   and retry mutations without silently changing earlier-stage state. The take's identities and
   destination cannot change on return. This does not promise durable retry counters or timing.
 - `record` publishes a single assignment before its work can be taken. Retrying the same selection
-  returns its original work ID without reactivating completed/transferred work. Conflicting source
+  returns its original work ID without reactivating completed work. Conflicting source
   identities or destinations fail as `INVALID_TRANSITION`, rather than creating another assignment.
 - Marking selected work routed stops router scheduling but retains the selected record until terminal
   source cleanup. This leaves room for a future durable router with memory-backed routed work.
-- `transfer` atomically moves responsibility to one successor before that successor can be taken.
-  Retrying with the previous ID returns the original successor; a conflicting successor destination
-  fails as `INVALID_TRANSITION`. Completion of the previous work is ignored, even after its successor
-  completes. A late previous-worker callback must never complete the successor.
 - Provider multipart is aggregated by provider-processing integration: all parts must have terminal
   outcomes and all required handoffs must succeed before completing the one destination work item.
   Part submissions are not represented as multiple routed destinations.
@@ -287,9 +368,9 @@ exactly-once provider submission is promised.
 
 An application assembles compatible `PendingMessageStore<M>`, `SelectedRouterStore<M>`, and
 `RoutedWorkStore<M>` instances and passes them directly as three constructor dependencies to its
-coordinator implementation. There is no dependency-bundle type or public copier contract. The
-coordinator remains an interface at this step; the concrete constructor and wiring arrive with its
-implementation. Constructors must have no activation side effects. The standalone profile is assembled
+coordinator implementation. There is no dependency-bundle type or public copier contract.
+`DefaultOutboundCoordinator` provides that constructor and the initial non-durable lifecycle. Constructors
+have no activation side effects. The standalone profile is assembled
 through CDI in `sendium-app`; the reusable lifecycle/storage APIs require no CDI annotations or container.
 
 For example, mCore's `Message extends StandardMessage`, billing-aware batch preparation,

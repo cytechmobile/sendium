@@ -3,7 +3,6 @@ package gr.cytech.sendium.core.storage.memory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Assignment;
 import gr.cytech.sendium.core.outbound.OutboundWork.Completed;
-import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
@@ -13,9 +12,7 @@ import gr.cytech.sendium.core.storage.RoutedWorkStore;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -31,7 +28,7 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNA
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
 
 /**
- * Single-destination execution with instance-local forwarding history. Capacity counts retained
+ * Single-destination execution with one work item per selection. Capacity counts retained
  * selections, including terminal selections awaiting forget. Snapshots must detach mutable fields,
  * preserve subtype/data, and be nonblocking, side-effect-free, and non-reentrant.
  */
@@ -40,7 +37,7 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
     private final Condition changed = lock.newCondition();
     private final int capacity;
     private final UnaryOperator<M> snapshots;
-    private final Map<SelectionId, Selection<M>> selections = new HashMap<>();
+    private final Map<SelectionId, Entry<M>> selections = new HashMap<>();
     private final Map<SourceId, SelectionId> sourceOwners = new HashMap<>();
     private final Map<WorkId, Entry<M>> work = new HashMap<>();
     private final Map<String, ArrayDeque<Entry<M>>> ready = new HashMap<>();
@@ -83,13 +80,13 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
         lock.lock();
         try {
             requireReady();
-            Selection<M> existing = selections.get(assignment.selection());
+            Entry<M> existing = selections.get(assignment.selection());
             if (existing != null) {
                 if (!existing.sources.equals(assignment.sources()) ||
-                        !existing.initial.destination.equals(assignment.destination().name())) {
-                    throw invalid("An existing selection cannot change sources or its initial destination");
+                        !existing.destination.equals(assignment.destination().name())) {
+                    throw invalid("An existing selection cannot change sources or destination");
                 }
-                return projection(existing.initial, existing.initial.original);
+                return projection(existing, existing.original);
             }
             if (assignment.sources().stream().anyMatch(sourceOwners::containsKey)) {
                 throw invalid("A source already belongs to another routed selection");
@@ -97,13 +94,13 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
             if (selections.size() >= capacity) {
                 throw new OutboundStorageException(Role.ROUTED_WORK, CAPACITY_EXCEEDED, "Memory routed selection capacity reached");
             }
-            Selection<M> selection = new Selection<>(assignment.selection(), assignment.sources());
-            Entry<M> entry = entry(selection, assignment.destination());
+            Entry<M> entry = new Entry<>(new WorkId(UUID.randomUUID()), assignment.selection(), assignment.sources(),
+                    assignment.destination().name(), snapshot(assignment.destination().message()));
             final Routed<M> result = projection(entry, entry.original);
-            selection.initial = entry;
-            selections.put(selection.id, selection);
-            selection.sources.forEach(source -> sourceOwners.put(source, selection.id));
-            publish(entry);
+            selections.put(entry.selection, entry);
+            entry.sources.forEach(source -> sourceOwners.put(source, entry.selection));
+            work.put(entry.id, entry);
+            enqueue(entry);
             return result;
         } finally {
             lock.unlock();
@@ -165,55 +162,24 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
     }
 
     @Override
-    public Routed<M> transfer(WorkId previous, Destination<M> destination) {
-        Objects.requireNonNull(previous, "previous");
-        Objects.requireNonNull(destination, "destination");
-        lock.lock();
-        try {
-            requireReady();
-            Entry<M> entry = requireEntry(previous);
-            if (entry.phase == Phase.TRANSFERRED) {
-                Entry<M> successor = requireEntry(entry.successor);
-                if (!successor.destination.equals(destination.name())) {
-                    throw invalid("A transfer retry cannot change the successor destination");
-                }
-                return projection(successor, successor.original);
-            }
-            if (entry.phase != Phase.TAKEN) {
-                throw invalid("Only taken destination work can be transferred");
-            }
-            Entry<M> successor = entry(entry.selection, destination);
-            final Routed<M> result = projection(successor, successor.original);
-            entry.phase = Phase.TRANSFERRED;
-            entry.successor = successor.id;
-            clearExecution(entry);
-            publish(successor);
-            return result;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    @Override
-    public Optional<Completed> complete(WorkId id) {
+    public Completed complete(WorkId id) {
         Objects.requireNonNull(id, "id");
         lock.lock();
         try {
             requireReady();
             Entry<M> entry = requireEntry(id);
-            if (entry.phase == Phase.TRANSFERRED) {
-                return Optional.empty();
-            }
             if (entry.phase == Phase.COMPLETED) {
-                return Optional.of(entry.selection.completed);
+                return entry.completed;
             }
             if (entry.phase != Phase.TAKEN) {
                 throw invalid("Only taken destination work can complete");
             }
-            entry.selection.completed = new Completed(entry.selection.id, entry.selection.sources);
+            entry.completed = new Completed(entry.selection, entry.sources);
             entry.phase = Phase.COMPLETED;
-            clearExecution(entry);
-            return Optional.of(entry.selection.completed);
+            entry.message = null;
+            entry.inFlight = null;
+            entry.lastReturned = null;
+            return entry.completed;
         } finally {
             lock.unlock();
         }
@@ -225,15 +191,15 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
         lock.lock();
         try {
             requireReady();
-            Selection<M> selection = selections.get(id);
-            if (selection == null) {
+            Entry<M> entry = selections.get(id);
+            if (entry == null) {
                 return;
             }
-            if (selection.completed == null) {
+            if (entry.completed == null) {
                 throw invalid("Nonterminal routed work cannot be forgotten");
             }
-            selection.history.forEach(work::remove);
-            selection.sources.forEach(sourceOwners::remove);
+            work.remove(entry.id);
+            entry.sources.forEach(sourceOwners::remove);
             selections.remove(id);
         } finally {
             lock.unlock();
@@ -255,23 +221,13 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
         }
     }
 
-    private Entry<M> entry(Selection<M> selection, Destination<M> destination) {
-        return new Entry<>(new WorkId(UUID.randomUUID()), selection, destination.name(), snapshot(destination.message()));
-    }
-
-    private void publish(Entry<M> entry) {
-        work.put(entry.id, entry);
-        entry.selection.history.add(entry.id);
-        enqueue(entry);
-    }
-
     private void enqueue(Entry<M> entry) {
         ready.computeIfAbsent(entry.destination, ignored -> new ArrayDeque<>()).addLast(entry);
         changed.signalAll();
     }
 
     private Routed<M> projection(Entry<M> entry, M message) {
-        return new Routed<>(entry.id, entry.selection.id, entry.destination, snapshot(message));
+        return new Routed<>(entry.id, entry.selection, entry.destination, snapshot(message));
     }
 
     private M snapshot(M message) {
@@ -286,12 +242,6 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
                     "Memory snapshots must be independent and preserve the concrete message type");
         }
         return copy;
-    }
-
-    private void clearExecution(Entry<M> entry) {
-        entry.message = null;
-        entry.inFlight = null;
-        entry.lastReturned = null;
     }
 
     private void requireReady() {
@@ -332,36 +282,25 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
     }
 
     private enum Phase {
-        QUEUED, TAKEN, TRANSFERRED, COMPLETED
-    }
-
-    private static final class Selection<M extends StandardMessage> {
-        private final SelectionId id;
-        private final Set<SourceId> sources;
-        private final List<WorkId> history = new ArrayList<>();
-        private Entry<M> initial;
-        private Completed completed;
-
-        private Selection(SelectionId id, Set<SourceId> sources) {
-            this.id = id;
-            this.sources = sources;
-        }
+        QUEUED, TAKEN, COMPLETED
     }
 
     private static final class Entry<M extends StandardMessage> {
         private final WorkId id;
-        private final Selection<M> selection;
+        private final SelectionId selection;
+        private final Set<SourceId> sources;
         private final String destination;
         private final M original;
         private M message;
         private Phase phase = Phase.QUEUED;
-        private WorkId successor;
+        private Completed completed;
         private Routed<M> inFlight;
         private Routed<M> lastReturned;
 
-        private Entry(WorkId id, Selection<M> selection, String destination, M original) {
+        private Entry(WorkId id, SelectionId selection, Set<SourceId> sources, String destination, M original) {
             this.id = id;
             this.selection = selection;
+            this.sources = sources;
             this.destination = destination;
             this.original = original;
             this.message = original;
