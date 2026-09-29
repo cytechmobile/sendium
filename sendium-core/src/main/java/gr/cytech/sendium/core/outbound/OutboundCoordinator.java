@@ -39,6 +39,7 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
 
     Optional<Selected<M>> takeForRouting(Duration timeout) throws InterruptedException;
 
+    /** Returns unfinished routing work; this is not a transition from a worker back to routing. */
     void returnToRouter(Selected<M> selected);
 
     /**
@@ -53,17 +54,13 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
 
     void returnToDestination(Routed<M> work);
 
-    /** Transfers responsibility to one successor without treating the previous work as terminal delivery. */
-    Routed<M> forward(WorkId previous, Destination<M> destination);
-
     /**
      * Reports terminal processing of all provider parts for this work, conditional on successful required
      * handoff for all parts. The provider-processing integration aggregates part outcomes and handoffs.
      * Pass an already successful stage when no handoff is required. Failure or cancellation retains work
      * and source ownership; retrying completion must not redispatch provider work. The returned stage
      * completes after work completion and pending/selected cleanup. Duplicate callbacks are harmless,
-     * including after cleanup. A late callback for transferred work is a successful no-op, not a signal
-     * that its successor or source has completed.
+     * including after cleanup, and may never complete unrelated work.
      */
     CompletionStage<Void> complete(WorkId work, CompletionStage<Void> requiredHandoff);
 

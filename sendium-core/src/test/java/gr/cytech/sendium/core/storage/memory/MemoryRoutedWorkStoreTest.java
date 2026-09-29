@@ -104,61 +104,25 @@ class MemoryRoutedWorkStoreTest {
     }
 
     @Test
-    void forwardingTransfersTheSlotAndLateCallbacksCannotCompleteTheSuccessor() throws Exception {
-        try (var store = store(1)) {
-            var assignment = assignment("A", "original");
-            var original = store.record(assignment);
-            fails(() -> store.transfer(original.id(), destination("B", "premature")), INVALID_TRANSITION);
-            fails(() -> store.complete(original.id()), INVALID_TRANSITION);
-            var previous = store.take("A", Duration.ZERO).orElseThrow();
-            var next = store.transfer(previous.id(), destination("B", "forwarded"));
-            assertThat(next.id()).isNotEqualTo(previous.id());
-            assertThat(next.selection()).isEqualTo(previous.selection());
-            assertThat(store.complete(previous.id())).isEmpty();
-            fails(() -> store.release(previous), INVALID_TRANSITION);
-            fails(() -> store.forget(assignment.selection()), INVALID_TRANSITION);
-            var replay = store.transfer(previous.id(), destination("B", "different retry payload"));
-            assertThat(replay.id()).isEqualTo(next.id());
-            assertThat(replay.message().body).isEqualTo("forwarded");
-            fails(() -> store.transfer(previous.id(), destination("C", "conflict")), INVALID_TRANSITION);
-            assertThat(store.record(assignment).id()).isEqualTo(original.id());
-            assertThat(store.take("A", Duration.ZERO)).isEmpty();
-            assertThat(store.take("B", Duration.ZERO).orElseThrow().id()).isEqualTo(next.id());
-            assertThat(store.take("B", Duration.ZERO)).isEmpty();
-            var completed = store.complete(next.id()).orElseThrow();
-            assertThat(completed.sources()).isEqualTo(assignment.sources());
-            assertThat(store.complete(previous.id())).isEmpty();
-            assertThat(store.complete(next.id())).contains(completed);
-            store.record(assignment);
-            store.transfer(previous.id(), destination("B", "late retry"));
-            assertThat(store.take("A", Duration.ZERO)).isEmpty();
-            assertThat(store.take("B", Duration.ZERO)).isEmpty();
-        }
-    }
-
-    @Test
-    void cleanupRetainsAllSourceIdsAndHistoryUntilForget() throws Exception {
+    void cleanupRetainsAllSourceIdsAndTerminalResultUntilForget() throws Exception {
         try (var store = store(1)) {
             var sources = Set.of(source(), source());
             var assignment = new Assignment<>(selection(), sources, destination("A", "multipart aggregate"));
-            var first = store.record(assignment);
-            store.take("A", Duration.ZERO).orElseThrow();
-            var second = store.transfer(first.id(), destination("B", "second"));
-            store.take("B", Duration.ZERO).orElseThrow();
-            var third = store.transfer(second.id(), destination("A", "third"));
-            assertThat(store.transfer(first.id(), destination("B", "retry")).id()).isEqualTo(second.id());
-            assertThat(store.take("B", Duration.ZERO)).isEmpty();
-            assertThat(store.take("A", Duration.ZERO).orElseThrow().id()).isEqualTo(third.id());
-            var completed = store.complete(third.id()).orElseThrow();
+            var recorded = store.record(assignment);
+            fails(() -> store.complete(recorded.id()), INVALID_TRANSITION);
+            var taken = store.take("A", Duration.ZERO).orElseThrow();
+            fails(() -> store.forget(assignment.selection()), INVALID_TRANSITION);
+            var completed = store.complete(taken.id());
             assertThat(completed.sources()).isEqualTo(sources);
-            assertThat(store.complete(first.id())).isEmpty();
-            assertThat(store.complete(second.id())).isEmpty();
+            assertThat(completed.selection()).isEqualTo(assignment.selection());
             fails(() -> store.record(assignment("B", "capacity still held")), CAPACITY_EXCEEDED);
-            assertThat(store.complete(third.id())).contains(completed);
+            assertThat(store.complete(taken.id())).isEqualTo(completed);
+            assertThat(store.record(assignment).id()).isEqualTo(taken.id());
+            assertThat(store.take("A", Duration.ZERO)).isEmpty();
+            fails(() -> store.release(taken), INVALID_TRANSITION);
             store.forget(assignment.selection());
             store.forget(assignment.selection());
-            fails(() -> store.complete(first.id()), INVALID_TRANSITION);
-            fails(() -> store.complete(third.id()), INVALID_TRANSITION);
+            fails(() -> store.complete(taken.id()), INVALID_TRANSITION);
             var replacement = new Assignment<>(selection(), sources, destination("A", "new selection"));
             store.record(replacement);
             assertThat(store.take("A", Duration.ZERO).orElseThrow().selection()).isEqualTo(replacement.selection());
@@ -194,30 +158,6 @@ class MemoryRoutedWorkStoreTest {
             assertThat(store.take("A", Duration.ZERO)).isEmpty();
             var work = store.record(assignment);
             assertThat(store.take("A", Duration.ZERO).orElseThrow().id()).isEqualTo(work.id());
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(ints = {1, 2})
-    void failedTransferSnapshotsLeaveThePreviousWorkOwned(int failAt) throws Exception {
-        AtomicInteger calls = new AtomicInteger();
-        AtomicBoolean enabled = new AtomicBoolean(false);
-        try (var store = new MemoryRoutedWorkStore<Payload>(1, msg -> {
-            if (enabled.get() && calls.incrementAndGet() == failAt) {
-                throw new IllegalStateException("snapshot failure");
-            }
-            return msg.copy();
-        })) {
-            store.open();
-            store.record(assignment("A", "original"));
-            var taken = store.take("A", Duration.ZERO).orElseThrow();
-            enabled.set(true);
-            fails(() -> store.transfer(taken.id(), destination("B", "next")), UNAVAILABLE);
-            assertThat(store.take("B", Duration.ZERO)).isEmpty();
-            store.release(taken);
-            assertThat(store.take("A", Duration.ZERO).orElseThrow().id()).isEqualTo(taken.id());
-            var next = store.transfer(taken.id(), destination("B", "next"));
-            assertThat(store.take("B", Duration.ZERO).orElseThrow().id()).isEqualTo(next.id());
         }
     }
 
@@ -275,29 +215,39 @@ class MemoryRoutedWorkStoreTest {
     }
 
     @Test
-    void racingTransferAndCompletionCannotBothSucceedForTheSameWork() throws Exception {
+    void racingReturnAndCompletionCannotBothSucceedForTheSameTake() throws Exception {
         try (var store = store(1); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < 20; i++) {
                 var assignment = assignment("A", "one");
                 store.record(assignment);
                 var taken = store.take("A", Duration.ZERO).orElseThrow();
-                var completion = executor.submit(() -> store.complete(taken.id()));
-                var transfer = executor.submit(() -> {
+                var completion = executor.submit(() -> {
                     try {
-                        return Optional.of(store.transfer(taken.id(), destination("B", "next")));
+                        store.complete(taken.id());
+                        return true;
                     } catch (OutboundStorageException failure) {
                         assertThat(failure.reason()).isEqualTo(INVALID_TRANSITION);
-                        return Optional.<Routed<Payload>>empty();
+                        return false;
+                    }
+                });
+                var retry = executor.submit(() -> {
+                    try {
+                        store.release(taken);
+                        return true;
+                    } catch (OutboundStorageException failure) {
+                        assertThat(failure.reason()).isEqualTo(INVALID_TRANSITION);
+                        return false;
                     }
                 });
                 var completed = completion.get(2, TimeUnit.SECONDS);
-                var forwarded = transfer.get(2, TimeUnit.SECONDS);
-                assertThat(completed.isPresent()).isNotEqualTo(forwarded.isPresent());
-                if (forwarded.isPresent()) {
-                    var successor = store.take("B", Duration.ZERO).orElseThrow();
-                    store.complete(successor.id());
+                var returned = retry.get(2, TimeUnit.SECONDS);
+                assertThat(completed).isNotEqualTo(returned);
+                if (returned) {
+                    var nextTake = store.take("A", Duration.ZERO).orElseThrow();
+                    assertThat(nextTake.id()).isEqualTo(taken.id());
+                    store.complete(nextTake.id());
                 } else {
-                    assertThat(store.take("B", Duration.ZERO)).isEmpty();
+                    assertThat(store.take("A", Duration.ZERO)).isEmpty();
                 }
                 store.forget(assignment.selection());
             }
