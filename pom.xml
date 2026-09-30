@@ -30,7 +30,7 @@
         <quarkus.platform.version>3.39.5</quarkus.platform.version>
 
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
-        <checkstyle-tools.version>14.1.0</checkstyle-tools.version>
+        <checkstyle-tools.version>14.3.0</checkstyle-tools.version>
         <surefire-plugin.version>3.6.0</surefire-plugin.version>
         <jacoco-plugin.version>0.8.15</jacoco-plugin.version>
 
