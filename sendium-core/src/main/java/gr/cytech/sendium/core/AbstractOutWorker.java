@@ -1150,13 +1150,24 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
     /** Applies the production failure policy while replacing its runtime queue scheduling boundary. */
     protected CompletionStage<Void> coordinateFailure(M message, boolean workerRetry,
                                                        BiFunction<M, Boolean, CompletionStage<Void>> retry) {
+        return captureRetryScheduling(() -> onMessageFailed(message, workerRetry), retry);
+    }
+
+    /** Preserves the worker loop's before-processing filter rejection policy. */
+    protected CompletionStage<Void> coordinatePreparationFailure(M message, boolean enqueueInstead,
+                                                                  BiFunction<M, Boolean, CompletionStage<Void>> retry) {
+        return captureRetryScheduling(() -> handleMessageFailInWorker("coordinated", message, enqueueInstead), retry);
+    }
+
+    private CompletionStage<Void> captureRetryScheduling(Runnable failurePolicy,
+                                                          BiFunction<M, Boolean, CompletionStage<Void>> retry) {
         if (coordinatedRetryScheduling.get() != null) {
             throw new IllegalStateException("Nested failure policy capture is not supported");
         }
         var scheduling = new RetryScheduling<M>(retry);
         coordinatedRetryScheduling.set(scheduling);
         try {
-            onMessageFailed(message, workerRetry);
+            failurePolicy.run();
         } finally {
             coordinatedRetryScheduling.remove();
         }
@@ -1211,7 +1222,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                 if (enqueueInstead) {
                     if (routerQueue == null) {
                         logger.warn("Worker {} does not have a reference to router", getFullName());
-                        msgQ.enqueue(m);
+                        enqueueFallback(m);
                     } else {
                         enqueueToRouter(m);
                     }
@@ -1230,6 +1241,12 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                 handleException(ie);
             }
             failedMsgCounter.remove(m.msgId);
+        }
+    }
+
+    private void enqueueFallback(M message) throws InterruptedException {
+        if (!scheduleCoordinatedRetry(message, false, 0)) {
+            msgQ.enqueue(message);
         }
     }
 
@@ -1293,7 +1310,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                     //Default action is to enqueue to router, otherwise it will be just dropped
                     if (routerQueue == null) {
                         logger.warn("Worker {} does not have a reference to router", getFullName());
-                        msgQ.enqueue(m);
+                        enqueueFallback(m);
                     } else {
                         enqueueToRouter(m);
                     }
@@ -1309,7 +1326,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
             case RE_ENQUEUE_ROUTER:
                 if (routerQueue == null) {
                     logger.warn("Worker {} does not have a reference to router", getFullName());
-                    msgQ.enqueue(m);
+                    enqueueFallback(m);
                 } else {
                     enqueueToRouter(m);
                 }
