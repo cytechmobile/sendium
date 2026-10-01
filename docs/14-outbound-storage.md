@@ -54,14 +54,55 @@ consumer team's responsibility and require separate approval for Sendium support
 ## Copied routing boundary
 
 The existing `+vendor`/`copied` routing feature and its public API remain available on the existing
-routing path. The new storage abstraction does not support copied routing. Its routing integration
-must reject a copied-route request as `UNSUPPORTED` before assignment or dispatch, even if the
-lookup happens to produce only one destination. It must not silently choose one result, strip the
+routing path. The new storage abstraction does not support copied routing. The opt-in lifecycle
+lookup rejects a matching copied-route rule as `UNSUPPORTED` before assignment or dispatch, even
+if lookup would produce only one destination. It does not silently choose one result, strip the
 copy flag, or emulate fan-out using several assignments for the same source.
 
-This guard belongs to the upcoming routing integration task; this profile-selection step does not change
-existing routing behavior. The single-destination scope is the owner's revision to the copied-route
+This guard does not change existing routing behavior. The single-destination scope is the owner's revision to the copied-route
 requirements previously described in #337/#338. Those issue bodies have not been edited here.
+
+`StandardOutboundDispatch`, constructed explicitly with a coordinator and Sendium's routing manager,
+can route one already selected item to one recorded destination and take that work for provider
+processing. The caller retains the selected handle if recording the destination needs a retry.
+A routing miss returns the selection to the router; a matched copied rule fails before
+assignment and likewise returns the selection. `finishProviderParts` is called only after the provider
+has reported an outcome for every part. It waits for each part's required DLR/tracking handoff before
+invoking coordinated completion. While a part handoff is outstanding, its sources remain retained;
+failure leaves them owned for completion-only retry with successful handoff stages. Duplicate terminal
+callbacks do not release another source. A successful stage represents a part requiring no handoff.
+
+### Coordinated SMPP provider processing
+
+`submitToProvider` connects an explicitly taken work item to `SmppClientWorker.submitCoordinated`.
+It registers every request before sending and uses typed request references for provider callbacks.
+The session handler recognizes these references for submit responses, request expiry and recoverable
+PDU errors before applying its legacy message casts. Ordinary message references retain their existing behavior.
+
+Each request is claimed once, so duplicate callbacks cannot start another retry or tracking handoff.
+Provider acceptance and rejection use the tracker's completion-stage handoff boundary; asynchronous
+trackers can return a stage for the actual handoff. The standard rejection handoff propagates an
+interrupted DLR router enqueue instead of classifying it as success. A failed handoff stays pending
+and is retried through `ProviderExecution.retryPendingHandoffs`, without resending an accepted SMS.
+Terminal store cleanup can be retried through `retryTerminalCleanup` without repeating provider processing.
+
+The production multipart retry payload choices are retained: the first request references the full
+original message and later requests reference individual cloned parts. A first-send exception aborts
+the remaining sends and retries the full payload; a later send exception retries that part. Negative
+message IDs on cloned later parts retain the existing no-tracking behavior. All request outcomes and
+replacement attempts remain under the parent work, without new pending admissions or copied-route branches.
+
+For retry responses, the worker executes its existing failure-filter/retry-counter/delay-policy logic
+inside a scoped scheduling capture. Worker, router and delayed queue actions are redirected to tracked
+replacement attempts. Router retries perform lifecycle routing lookup, including copied-route rejection;
+same-worker retries reuse that worker. The scope is removed before replacement work begins and does
+not change scheduling for ordinary legacy messages. Parent sources complete only once the original
+outstanding requests, their replacement attempts, and required tracking handoffs all finish.
+
+This provider boundary is explicitly assembled and is not automatically wired into the standalone
+router/worker loops. Worker-loop preparation, application lifecycle activation and coordinated shutdown
+remain subsequent integration work. The new runtime attempt bookkeeping is non-durable; it does not
+provide provider-outcome checkpoints or restart recovery.
 
 ## Components
 
