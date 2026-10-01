@@ -74,8 +74,10 @@ callbacks do not release another source. A successful stage represents a part re
 
 ### Coordinated SMPP provider processing
 
-`submitToProvider` connects an explicitly taken work item to `SmppClientWorker.submitCoordinated`.
-It registers every request before sending and uses typed request references for provider callbacks.
+`submitToProvider` schedules an explicitly taken work item through
+`SmppClientWorker.submitPreparedCoordinated`, which applies rate limiting, character mapping and
+before-processing filters before `submitCoordinated` generates provider requests. It registers every
+request before sending and uses typed request references for provider callbacks.
 The session handler recognizes these references for submit responses, request expiry and recoverable
 PDU errors before applying its legacy message casts. Ordinary message references retain their existing behavior.
 
@@ -99,9 +101,29 @@ same-worker retries reuse that worker. The scope is removed before replacement w
 not change scheduling for ordinary legacy messages. Parent sources complete only once the original
 outstanding requests, their replacement attempts, and required tracking handoffs all finish.
 
+The parent's recorded destination is its **initial assignment**, not an assertion that every later
+attempt uses that provider. `ProviderExecution.attempts()` exposes ordered runtime attempt snapshots
+with their resolved destination, state and preparation/routing failure. Each attempt is scheduled
+explicitly, including same-worker replacements. Router retries resolve their own destination without
+overwriting the parent record or re-admitting its sources. This lets a replacement finish at provider B
+while an original multipart request remains outstanding at provider A.
+
+Paused or disconnected workers leave attempts queued; stopped workers and failed routing/preparation
+leave attempts failed but unfinished. `retryPendingHandoffs()` also reschedules those failed attempts,
+without re-running successfully submitted attempts. Provider tracking failures remain inside the
+submission's part-handoff bookkeeping. Concurrent preparation/submission is limited by the worker's
+configured thread count when its scheduling slots are first established; required tracking completion
+does not hold a sending slot. Before-processing filter drops finish without sending; retry/re-enqueue
+outcomes use the existing end-retry policy, including the same-worker fallback when no router exists.
+
+The default dispatcher owns a two-thread scheduled executor. Assembly may instead supply a
+`ScheduledExecutorService`; the dispatcher does not close that application-owned executor.
+Close an owned dispatcher only after its provider executions drain. This executor lifecycle boundary
+does not itself quiesce ingress, return stage ownership, or drain outstanding provider requests.
+
 This provider boundary is explicitly assembled and is not automatically wired into the standalone
-router/worker loops. Worker-loop preparation, application lifecycle activation and coordinated shutdown
-remain subsequent integration work. The new runtime attempt bookkeeping is non-durable; it does not
+router/worker loops. Application lifecycle activation and coordinated shutdown remain subsequent
+integration work. Runtime attempt bookkeeping is non-durable; it does not
 provide provider-outcome checkpoints or restart recovery.
 
 ## Components

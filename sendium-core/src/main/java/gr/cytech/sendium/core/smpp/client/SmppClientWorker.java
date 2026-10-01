@@ -39,6 +39,8 @@ import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.core.worker.WorkerType;
 import gr.cytech.sendium.external.HealthCheckReport;
 import gr.cytech.sendium.external.WorkerResourceProvider;
+import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.external.filter.FilterStatusCodes;
 import gr.cytech.sendium.util.MessageFlexValue;
 import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SecurityUtils;
@@ -541,6 +543,50 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         return null;
+    }
+
+    /** Applies worker preparation before an initial or replacement provider attempt. */
+    public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry)
+            throws Exception {
+        if (!keepOnRunning || isPause()) {
+            throw new IllegalStateException("Worker is stopped or paused: " + getFullName());
+        }
+        applyRateLimit();
+        if (!keepOnRunning || isPause()) {
+            throw new IllegalStateException("Worker stopped or paused while awaiting rate limit: " + getFullName());
+        }
+        String stat = stats.checkGetStats();
+        if (stat != null) {
+            logger.info("{}", stat);
+        }
+        message.outgateway = getFullName();
+        String originalBody = doCharMap(message);
+        try {
+            if (printMsgs) {
+                logger.info("{}", message);
+            }
+            checkBeforeDoMessageFilters(message);
+            return submitCoordinated(message, retry);
+        } catch (FilterException failure) {
+            message.body = originalBody;
+            var submission = new CoordinatedSmppSubmission<M>();
+            var part = submission.add(message);
+            submission.seal();
+            part.claimResponse();
+            if (failure.getStatusCode() == FilterStatusCodes.DROP) {
+                part.finish(() -> CompletableFuture.completedStage(null));
+            } else {
+                M replacement = (M) Objects.requireNonNull(failure.getMessageObj(), "filter replacement");
+                replacement.body = originalBody;
+                boolean enqueueInstead = failure.getStatusCode() != FilterStatusCodes.RETRY;
+                part.finish(() -> coordinatePreparationFailure(replacement, enqueueInstead, (payload, router) ->
+                        retry.retry(payload, router ? NackHandlePolicy.RETRY_ROUTER : NackHandlePolicy.RETRY_WORKER)));
+            }
+            return submission;
+        } catch (Exception failure) {
+            message.body = originalBody;
+            throw failure;
+        }
     }
 
     /**
