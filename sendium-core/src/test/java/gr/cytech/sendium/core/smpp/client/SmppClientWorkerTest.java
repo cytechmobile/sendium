@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.smpp.client;
 
 import com.cloudhopper.commons.charset.CharsetUtil;
 import com.cloudhopper.smpp.SmppConstants;
+import com.cloudhopper.smpp.PduAsyncResponse;
 import com.cloudhopper.smpp.pdu.DeliverSm;
 import com.cloudhopper.smpp.pdu.PduResponse;
 import com.cloudhopper.smpp.pdu.SubmitSm;
@@ -11,20 +12,232 @@ import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
+import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.external.WorkerResourceProvider;
+import gr.cytech.sendium.routing.StandardOutboundDispatch;
+import gr.cytech.sendium.routing.StandardRoutingManager;
+import gr.cytech.sendium.routing.RoutingLookupResult;
 import org.junit.jupiter.api.Test;
+import utils.OutboundIngressFixture;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.time.Duration;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class SmppClientWorkerTest {
+
+    @Test
+    void firstSendFailureAbortsRemainingSubmitsAndRetriesOriginalPayload() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.failSendNumber = 1;
+        var message = messageWithNetwork();
+        message.body = "a".repeat(200);
+        var replacement = new CompletableFuture<Void>();
+        var retries = new java.util.ArrayList<StandardMessage>();
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            retries.add(payload);
+            return replacement;
+        });
+        assertThat(worker.coordinatedRequests).hasSize(1);
+        assertThat(retries).containsExactly(message);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void coordinatedAcceptanceWaitsForAsynchronousTrackerHandoff() throws Exception {
+        var accepted = new CompletableFuture<Void>();
+        var tracker = new CapturingTracker() {
+            @Override
+            public CompletionStage<Void> handoffProviderAccepted(String hash, StandardMessage message, String providerId) {
+                return accepted;
+            }
+        };
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), tracker);
+        worker.realCoordinatedHandoff = true;
+        var message = messageWithNetwork();
+        message.body = "hello";
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No retry expected");
+        });
+        respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        accepted.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void coordinatedExpiryGoesThroughFailurePolicyWithoutLegacyQueueInsertion() throws Exception {
+        var routerQueue = new Queue<StandardMessage>();
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), routerQueue, new CapturingTracker());
+        var message = messageWithNetwork();
+        message.body = "hello";
+        var retried = new java.util.ArrayList<StandardMessage>();
+        var replacement = new CompletableFuture<Void>();
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            retried.add(payload);
+            return replacement;
+        });
+        handler(worker).firePduRequestExpired(worker.coordinatedRequests.getFirst());
+        assertThat(retried).containsExactly(message);
+        assertThat(routerQueue.isEmpty()).isTrue();
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void firstPartRouterRetryKeepsParentSourcesThroughOriginalAndReplacementParts() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                    "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            var message = messageWithNetwork();
+            message.body = "a".repeat(200);
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.admit(source, message);
+            fixture.coordinator.selectAndStage(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
+            var routing = mock(StandardRoutingManager.class);
+            when(routing.lookupForLifecycle(org.mockito.ArgumentMatchers.any())).thenReturn(
+                    new RoutingLookupResult(java.util.List.of(worker), true));
+            var execution = new StandardOutboundDispatch(fixture.coordinator, routing).submitToProvider(work, worker);
+            var session = handler(worker);
+            worker.expectedRequests = 4;
+            respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
+            assertThat(worker.requestsReady.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(worker.coordinatedRequests).hasSize(4);
+            respond(session, worker.coordinatedRequests.get(2), SmppConstants.STATUS_OK);
+            respond(session, worker.coordinatedRequests.get(3), SmppConstants.STATUS_OK);
+            assertThat(fixture.pending.find(source)).isPresent();
+            assertThat(execution.completion().toCompletableFuture()).isNotDone();
+            respond(session, worker.coordinatedRequests.get(1), SmppConstants.STATUS_OK);
+            execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertThat(fixture.pending.find(source)).isEmpty();
+            assertThat(worker.getRouterQueue().isEmpty()).isTrue();
+        }
+    }
+
+    @Test
+    void coordinatedSessionCallbacksCompleteRealLifecycleOnlyAfterEveryPart() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+            var message = messageWithNetwork();
+            message.body = "a".repeat(200);
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.admit(source, message);
+            fixture.coordinator.selectAndStage(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class));
+            var execution = dispatch.submitToProvider(work, worker);
+            var session = handler(worker);
+            respond(session, worker.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
+            assertThat(fixture.pending.find(source)).isPresent();
+            assertThat(execution.completion().toCompletableFuture()).isNotDone();
+            respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            execution.completion().toCompletableFuture().join();
+            assertThat(fixture.pending.find(source)).isEmpty();
+            respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+        }
+    }
+
+    private static void respond(SmppClientSessionHandler handler, SubmitSm request, int status) {
+        var response = request.createResponse();
+        response.setCommandStatus(status);
+        response.setMessageId("provider-id");
+        var async = mock(PduAsyncResponse.class);
+        when(async.getRequest()).thenReturn(request);
+        when(async.getResponse()).thenReturn(response);
+        handler.fireExpectedPduResponseReceived(async);
+    }
+
+    @Test
+    void coordinatedMultipartWaitsForAllResponsesAndIgnoresDuplicateCallbacks() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        var message = messageWithNetwork();
+        message.body = "a".repeat(200);
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No retry expected");
+        });
+        assertThat(worker.coordinatedRequests).hasSize(2);
+        Object first = worker.coordinatedRequests.getFirst().getReferenceObject();
+        Object last = worker.coordinatedRequests.getLast().getReferenceObject();
+        worker.handleCoordinatedResponse(last, SmppConstants.STATUS_OK, "second");
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        worker.handleCoordinatedResponse(last, SmppConstants.STATUS_OK, "duplicate");
+        worker.handleCoordinatedResponse(first, SmppConstants.STATUS_OK, "first");
+        submission.completion().toCompletableFuture().join();
+        assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+        assertThat(worker.success).isEmpty();
+        assertThat(worker.failures).isEmpty();
+    }
+
+    @Test
+    void coordinatedRouterRetryPreservesFirstWholeMessageAndLaterPartPayloads() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+        var message = messageWithNetwork();
+        message.body = "a".repeat(200);
+        var retries = new java.util.ArrayList<StandardMessage>();
+        var replacement = new CompletableFuture<Void>();
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            assertThat(policy).isEqualTo(SmppClientWorker.NackHandlePolicy.RETRY_ROUTER);
+            retries.add(payload);
+            return replacement;
+        });
+        worker.coordinatedRequests.forEach(request -> worker.handleCoordinatedResponse(
+                request.getReferenceObject(), SmppConstants.STATUS_INVDSTADR, null));
+        assertThat(retries).hasSize(2);
+        assertThat(retries.getFirst()).isSameAs(message);
+        assertThat(retries.getFirst().body).hasSize(200);
+        assertThat(retries.getLast()).isNotSameAs(message);
+        assertThat(retries.getLast().binheader).isNotBlank();
+        assertThat(retries.getLast().body.length()).isLessThan(200);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        assertThat(worker.failures).isEmpty();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void coordinatedTrackingFailureRetriesOnlyHandoffWithoutResubmittingProvider() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.failCoordinatedHandoff = true;
+        var message = messageWithNetwork();
+        message.body = "hello";
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No provider retry expected");
+        });
+        worker.handleCoordinatedResponse(worker.coordinatedRequests.getFirst().getReferenceObject(),
+                SmppConstants.STATUS_OK, "accepted");
+        assertThat(submission.handoffFailures()).hasSize(1);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        worker.failCoordinatedHandoff = false;
+        submission.retryPendingHandoffs();
+        submission.completion().toCompletableFuture().join();
+        assertThat(worker.coordinatedRequests).hasSize(1);
+        assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+    }
 
     @Test
     void defaultsSensitiveDiagnosticLoggingOff() {
@@ -313,6 +526,34 @@ class SmppClientWorkerTest {
     }
 
     private static class TestSmppClientWorker extends SmppClientWorker<StandardMessage> {
+        private final java.util.List<SubmitSm> coordinatedRequests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private final CountDownLatch requestsReady = new CountDownLatch(1);
+        private volatile int expectedRequests = Integer.MAX_VALUE;
+        private int coordinatedHandoffs;
+        private boolean failCoordinatedHandoff;
+        private boolean realCoordinatedHandoff;
+        private int failSendNumber;
+
+        @Override
+        protected void sendCoordinatedRequest(SubmitSm request) throws java.io.IOException {
+            coordinatedRequests.add(request);
+            if (coordinatedRequests.size() == failSendNumber) {
+                throw new java.io.IOException("submit unavailable");
+            }
+            if (coordinatedRequests.size() >= expectedRequests) {
+                requestsReady.countDown();
+            }
+        }
+
+        @Override
+        protected CompletionStage<Void> coordinatedProviderHandoff(StandardMessage message, int status, String providerId) {
+            if (realCoordinatedHandoff) {
+                return super.coordinatedProviderHandoff(message, status, providerId);
+            }
+            coordinatedHandoffs++;
+            return failCoordinatedHandoff ? CompletableFuture.failedStage(new DlrStorageException("unavailable")) :
+                    CompletableFuture.completedStage(null);
+        }
         private final java.util.List<StandardMessage> success = new java.util.ArrayList<>();
         private final java.util.List<StandardMessage> temporaryFailures = new java.util.ArrayList<>();
         private final java.util.List<StandardMessage> failures = new java.util.ArrayList<>();

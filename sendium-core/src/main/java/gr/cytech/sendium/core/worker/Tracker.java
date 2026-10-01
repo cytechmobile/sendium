@@ -3,6 +3,8 @@ package gr.cytech.sendium.core.worker;
 import gr.cytech.sendium.core.message.StandardMessage;
 
 import java.util.HashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 public interface Tracker<M extends StandardMessage> {
 
@@ -38,4 +40,20 @@ public interface Tracker<M extends StandardMessage> {
     }
 
     int getConfiguredMccMnc();
+
+    /** Asynchronous trackers can override this boundary to wait for the actual acceptance handoff. */
+    default CompletionStage<Void> handoffProviderAccepted(String hashedProviderMessageId, M message,
+                                                          String providerMessageId) {
+        updateSendStatusAndExtID(hashedProviderMessageId, message, providerMessageId);
+        return CompletableFuture.completedStage(null);
+    }
+
+    /** Lifecycle handoff must report failures rather than treating a failed enqueue as success. */
+    default CompletionStage<Void> handoffSubmissionFailure(M message, String providerMessageId,
+                                                           String hashedProviderMessageId, String body,
+                                                           int state, String errorCode) {
+        createAndEnqueueSubmissionFailure(message, providerMessageId, hashedProviderMessageId,
+                body, state, errorCode, null);
+        return CompletableFuture.completedStage(null);
+    }
 }
