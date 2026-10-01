@@ -23,6 +23,9 @@ final class SmsStorageStartupSupport {
                 .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
                 .overrideConfigKey("sendium.dlr.persistence.enabled", "false")
                 .overrideConfigKey("quarkus.http.test-port", "0")
+                // These assertions must remain valid when CI sets the root log level to ERROR.
+                .overrideConfigKey("quarkus.log.category.\"gr.cytech.sendium.app.storage.StandaloneSmsStorage\".level", "INFO")
+                .overrideConfigKey("quarkus.log.category.\"gr.cytech.sendium.app.storage.SmsAdmissionProbe\".level", "INFO")
                 .setLogRecordPredicate(record -> StandaloneSmsStorage.class.getName().equals(record.getLoggerName()) ||
                         SmsAdmissionProbe.class.getName().equals(record.getLoggerName()));
     }
