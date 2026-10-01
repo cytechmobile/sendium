@@ -150,6 +150,25 @@ class StandardMessageTrackerTest {
     }
 
     @Test
+    void coordinatedSubmissionFailureDoesNotTreatInterruptedDlrHandoffAsSuccess() throws InterruptedException {
+        var message = new StandardMessage();
+        message.serial = "gw-123";
+        message.dlrReturnMetadata = DlrReturnMetadata.smpp("account", "system", "from", "to");
+        var rejected = new MessageState("gw-123", "account", "system", "from", "to", null);
+        rejected.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        when(dlrService.recordProviderRejected(any(), any(), any(), anyInt(), any()))
+                .thenReturn(java.util.Optional.of(rejected));
+        doThrow(new InterruptedException("interrupted")).when(outWorker).enqueueToRouter(any());
+        try {
+            assertThrows(DlrStorageException.class, () -> tracker.handoffSubmissionFailure(
+                    message, "provider", "hash", "5", StandardMessage.DLR_STAT_FAILED, "22"));
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
     void submissionFailure_PersistsHttpDlrWithoutRouterEnqueue() throws InterruptedException {
         StandardMessage message = new StandardMessage();
         message.serial = "gw-http";

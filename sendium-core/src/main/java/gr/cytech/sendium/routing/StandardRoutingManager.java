@@ -5,6 +5,8 @@ import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.TimeUtils;
@@ -195,8 +197,22 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
         }
     }
 
+    /** Resolves a lifecycle destination without interpreting copied routing as a single assignment. */
+    public RoutingLookupResult lookupForLifecycle(StandardMessage message) throws IOException {
+        if (targets == null) {
+            throw new OutboundStorageException(OutboundStage.Role.ROUTER_QUEUE,
+                    OutboundStorageException.Reason.UNAVAILABLE, "Routing targets are not initialized");
+        }
+        return lookupRoutingForMessage(message, targets.defaultTable, true);
+    }
+
     @Override
     protected RoutingLookupResult lookupRoutingForMessage(StandardMessage pMsg, RoutingTable table) throws IOException {
+        return lookupRoutingForMessage(pMsg, table, false);
+    }
+
+    private RoutingLookupResult lookupRoutingForMessage(StandardMessage pMsg, RoutingTable table,
+                                                       boolean rejectCopied) throws IOException {
         if (pMsg == null || table == null || table.rules == null || table.rules.isEmpty()) {
             return RoutingLookupResult.EMPTY_RESULT;
         }
@@ -210,10 +226,15 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
                 }
                 continue;
             }
+            if (rejectCopied && route.isCopied()) {
+                throw new OutboundStorageException(OutboundStage.Role.ROUTER_QUEUE,
+                        OutboundStorageException.Reason.UNSUPPORTED, "Copied routes are not supported by lifecycle dispatch");
+            }
             if (debugRouting) {
                 logger.info("Message: ({})   matches route: ({})", pMsg, route);
             }
-            result.mergeRoutingLookupResult(getRoutingLookupResultFromRouteForNormal(route, pMsg));
+            result.mergeRoutingLookupResult(rejectCopied ? getRoutingLookupResultFromRouteForNormal(route, pMsg, true) :
+                    getRoutingLookupResultFromRouteForNormal(route, pMsg));
 
             if (result.hasReachedLast()) {
                 if (pMsg.rtxCnt == 0 && !Strings.isNullOrEmpty(pMsg.nextTarget) && pMsg.nextTarget.equals(Strings.nullToEmpty(originalNextTarget))) {
@@ -233,6 +254,11 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
 
     public RoutingLookupResult getRoutingLookupResultFromRouteForNormal(
             RoutingRule route, StandardMessage pMsg) throws IOException {
+        return getRoutingLookupResultFromRouteForNormal(route, pMsg, false);
+    }
+
+    private RoutingLookupResult getRoutingLookupResultFromRouteForNormal(
+            RoutingRule route, StandardMessage pMsg, boolean rejectCopied) throws IOException {
         final String targetName = route.getTarget();
         final var targetTable = getTargets().getTable(targetName);
         final var targetWorker = targetTable != null ? null : getTargets().getWorker(targetName);
@@ -258,7 +284,7 @@ public class StandardRoutingManager extends AbstractRoutingManager<StandardMessa
 
             return new RoutingLookupResult(Collections.singletonList(targetWorker), !route.isCopied());
         }
-        return lookupRoutingForMessage(pMsg, targetTable);
+        return rejectCopied ? lookupRoutingForMessage(pMsg, targetTable, true) : lookupRoutingForMessage(pMsg, targetTable);
     }
 
     private void applyFilterToMessage(AbstractOutWorker filter, StandardMessage pMsg) throws IOException {
