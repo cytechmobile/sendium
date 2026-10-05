@@ -118,11 +118,30 @@ outcomes use the existing end-retry policy, including the same-worker fallback w
 
 The default dispatcher owns a two-thread scheduled executor. Assembly may instead supply a
 `ScheduledExecutorService`; the dispatcher does not close that application-owned executor.
-Close an owned dispatcher only after its provider executions drain. This executor lifecycle boundary
-does not itself quiesce ingress, return stage ownership, or drain outstanding provider requests.
+Graceful shutdown uses the following application-owned ordering:
+
+1. Call dispatcher `quiesce()`. It quiesces the coordinator, stopping admission, selection and takes,
+   and prevents new provider submissions. An already-taken unassigned selection presented to the
+   dispatcher is returned to routing without recording a destination.
+2. Keep destination workers, provider callbacks and the execution scheduler running. Call
+   `awaitProviderDrain(timeout)` to await active provider executions, including replacement attempts,
+   required handoffs and terminal cleanup. A timeout returns `false`; a failed completion throws an
+   actionable exception. Neither result releases ownership or stops the scheduler. Retry pending
+   handoffs/attempts or terminal cleanup through the existing execution handles and await again.
+3. After a successful drain, stop/join application routing and destination execution loops and workers.
+   Application-wide worker stop retains chosen worker queues; runtime worker removal still uses its
+   existing return-to-router policy.
+4. Close the dispatcher, then the coordinator. Dispatcher close refuses outstanding/failed executions
+   and never shuts down an application-owned scheduler. Coordinator close returns unsubmitted taken
+   work to its recorded destination and taken unassigned work to routing before closing stages.
+
+Stopping provider workers before drain can prevent callbacks or replacement attempts from finishing.
+Unresolved shutdown must retain the live ownership and report failure rather than requeue a parent
+while multipart callbacks are active. Memory closure remains non-durable and clears memory state;
+returning ownership during shutdown does not promise restart recovery.
 
 This provider boundary is explicitly assembled and is not automatically wired into the standalone
-router/worker loops. Application lifecycle activation and coordinated shutdown remain subsequent
+router/worker loops. Standalone activation of this shutdown ordering remains subsequent
 integration work. Runtime attempt bookkeeping is non-durable; it does not
 provide provider-outcome checkpoints or restart recovery.
 
