@@ -36,6 +36,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
@@ -105,6 +106,9 @@ class SmppClientWorkerTest {
                 var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
                 var execution = dispatch.submitToProvider(work, worker);
                 worker.awaitRequests(1);
+                dispatch.quiesce();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                assertThatThrownBy(() -> dispatch.submitToProvider(work, worker)).isInstanceOf(IllegalStateException.class);
                 respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
                 assertThat(lookupTried.await(5, TimeUnit.SECONDS)).isTrue();
                 scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
@@ -118,6 +122,7 @@ class SmppClientWorkerTest {
                 worker.awaitRequests(2);
                 respond(handler(worker), worker.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
                 execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(1))).isTrue();
                 assertThat(worker.coordinatedRequests).hasSize(2);
                 assertThat(fixture.pending.find(source)).isEmpty();
             }

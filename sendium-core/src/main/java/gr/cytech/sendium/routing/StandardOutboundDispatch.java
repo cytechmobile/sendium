@@ -5,6 +5,7 @@ import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.smpp.client.CoordinatedSmppSubmission;
 import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStage;
@@ -33,6 +34,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
     private final ConcurrentMap<SmppClientWorker<StandardMessage>, Semaphore> workerSlots = new ConcurrentHashMap<>();
+    private final ConcurrentMap<WorkId, CompletionStage<Void>> activeExecutions = new ConcurrentHashMap<>();
+    private boolean quiescing;
 
     public StandardOutboundDispatch(OutboundCoordinator<StandardMessage> coordinator, StandardRoutingManager routing) {
         this(coordinator, routing, Executors.newScheduledThreadPool(2, task -> {
@@ -60,8 +63,12 @@ public final class StandardOutboundDispatch implements AutoCloseable {
      * Routes one owned selection. A miss or lookup failure returns it to routing. If recording the
      * destination fails, the caller retains the selection handle to retry the same routing intent.
      */
-    public Optional<Routed<StandardMessage>> routeSelected(Selected<StandardMessage> selected) throws IOException {
+    public synchronized Optional<Routed<StandardMessage>> routeSelected(Selected<StandardMessage> selected) throws IOException {
         Objects.requireNonNull(selected, "selected");
+        if (quiescing) {
+            coordinator.returnToRouter(selected);
+            return Optional.empty();
+        }
         RoutingLookupResult result;
         try {
             result = routing.lookupForLifecycle(selected.message());
@@ -88,16 +95,17 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     }
 
     /** Runs an explicitly taken SMPP work item and carries its ownership through replacement attempts. */
-    public ProviderExecution submitToProvider(Routed<StandardMessage> work, SmppClientWorker<StandardMessage> worker)
+    public synchronized ProviderExecution submitToProvider(Routed<StandardMessage> work, SmppClientWorker<StandardMessage> worker)
             throws Exception {
+        requireDispatching();
         if (!work.destination().equals(worker.getFullName())) {
             throw new IllegalArgumentException("Provider does not match the recorded destination");
         }
         var execution = new ProviderExecution();
-        execution.retryCompletion = () -> coordinator.complete(work.id(), execution.attempts);
+        execution.retryCompletion = () -> track(work.id(), coordinator.complete(work.id(), execution.attempts));
         CompletionStage<Void> attempts = scheduleAttempt(work.message(), () -> worker, execution);
         execution.attempts = attempts;
-        execution.completion = coordinator.complete(work.id(), attempts);
+        execution.completion = track(work.id(), coordinator.complete(work.id(), attempts));
         return execution;
     }
 
@@ -124,16 +132,75 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
     }
 
-    /** Call after provider executions have drained; this does not complete or close parent stores. */
+    /** Stops new admission/takes and dispatch; existing provider retries and callbacks remain enabled. */
+    public synchronized void quiesce() {
+        coordinator.quiesce();
+        quiescing = true;
+    }
+
+    /** Waits for terminal handoffs and cleanup. A timeout or failed handoff leaves ownership intact. */
+    public boolean awaitProviderDrain(Duration timeout) throws InterruptedException {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative()) {
+            throw new IllegalArgumentException("Negative drain timeout");
+        }
+        CompletableFuture<?>[] completions;
+        synchronized (this) {
+            if (!quiescing) {
+                throw new IllegalStateException("Quiesce dispatch before awaiting provider drain");
+            }
+            completions = activeExecutions.values().stream().map(CompletionStage::toCompletableFuture)
+                    .toArray(CompletableFuture[]::new);
+        }
+        try {
+            CompletableFuture.allOf(completions).get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            removeSuccessfulExecutions();
+            return true;
+        } catch (java.util.concurrent.TimeoutException timeoutFailure) {
+            return false;
+        } catch (java.util.concurrent.ExecutionException failure) {
+            throw new IllegalStateException("Resolve failed provider handoffs or terminal cleanup before shutdown", failure.getCause());
+        }
+    }
+
+    private CompletionStage<Void> track(WorkId id, CompletionStage<Void> completion) {
+        activeExecutions.put(id, completion);
+        completion.whenComplete((ignored, failure) -> {
+            if (failure == null) {
+                activeExecutions.remove(id, completion);
+            }
+        });
+        return completion;
+    }
+
+    private void requireDispatching() {
+        if (quiescing) {
+            throw new IllegalStateException("Outbound dispatch is quiescing");
+        }
+    }
+
+    private void removeSuccessfulExecutions() {
+        activeExecutions.entrySet().removeIf(entry -> {
+            var completion = entry.getValue().toCompletableFuture();
+            return completion.isDone() && !completion.isCompletedExceptionally();
+        });
+    }
+
+    /** Call after drain and execution-loop stop/join; parent stores remain application-owned. */
     @Override
-    public void close() {
+    public synchronized void close() {
+        quiesce();
+        removeSuccessfulExecutions();
+        if (!activeExecutions.isEmpty()) {
+            throw new IllegalStateException("Drain provider executions before closing outbound dispatch");
+        }
         if (ownsScheduler) {
             scheduler.shutdown();
         }
     }
 
     /** Completes explicitly supplied provider outcomes once all required part handoffs succeed. */
-    public CompletionStage<Void> finishProviderParts(Routed<StandardMessage> work,
+    public synchronized CompletionStage<Void> finishProviderParts(Routed<StandardMessage> work,
                                                        List<? extends CompletionStage<Void>> requiredHandoffs) {
         Objects.requireNonNull(work, "work");
         List<? extends CompletionStage<Void>> handoffs = List.copyOf(requiredHandoffs);
@@ -142,7 +209,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
         CompletableFuture<?>[] parts = handoffs.stream().map(CompletionStage::toCompletableFuture)
                 .toArray(CompletableFuture[]::new);
-        return coordinator.complete(work.id(), CompletableFuture.allOf(parts));
+        return track(work.id(), coordinator.complete(work.id(), CompletableFuture.allOf(parts)));
     }
 
     public enum AttemptState {

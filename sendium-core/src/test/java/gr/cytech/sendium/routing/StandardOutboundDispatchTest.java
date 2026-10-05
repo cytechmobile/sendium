@@ -22,6 +22,55 @@ import static org.mockito.Mockito.when;
 
 class StandardOutboundDispatchTest {
     @Test
+    void shutdownDrainsAllHandoffsAndRetainsOwnershipOnTimeoutOrFailure() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator,
+                    routing(List.of(worker("smpp.provider", "provider")), "provider::default:"));
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.admit(source, message("hello"));
+            routeNext(dispatch, fixture);
+            var taken = dispatch.takeForProvider("smpp.provider", Duration.ZERO).orElseThrow();
+            var first = new CompletableFuture<Void>();
+            var second = new CompletableFuture<Void>();
+            dispatch.finishProviderParts(taken, List.of(first, second));
+            dispatch.quiesce();
+            first.complete(null);
+            assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+            assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
+            assertThat(fixture.pending.find(source)).isPresent();
+            second.completeExceptionally(new IllegalStateException("handoff unavailable"));
+            assertThatThrownBy(() -> dispatch.awaitProviderDrain(Duration.ZERO))
+                    .isInstanceOf(IllegalStateException.class).hasCauseInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
+            dispatch.finishProviderParts(taken, List.of(CompletableFuture.completedStage(null)));
+            assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isTrue();
+            assertThat(fixture.pending.find(source)).isEmpty();
+            dispatch.close();
+        }
+    }
+
+    @Test
+    void shutdownReturnsUnassignedWorkAndLeavesUnsubmittedWorkAtItsRecordedDestination() throws Exception {
+        try (var fixture = new OutboundIngressFixture(2)) {
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator,
+                    routing(List.of(worker("smpp.provider", "provider")), "provider::default:"));
+            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("assigned"));
+            routeNext(dispatch, fixture);
+            var assigned = dispatch.takeForProvider("smpp.provider", Duration.ZERO).orElseThrow();
+            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("unassigned"));
+            fixture.coordinator.selectAndStage(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            dispatch.quiesce();
+            assertThat(dispatch.routeSelected(selected)).isEmpty();
+            assertThat(fixture.router.take(Duration.ZERO).orElseThrow().id()).isEqualTo(selected.id());
+            fixture.coordinator.returnToDestination(assigned);
+            assertThat(fixture.routed.take("smpp.provider", Duration.ZERO).orElseThrow().id()).isEqualTo(assigned.id());
+            assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isTrue();
+            dispatch.close();
+        }
+    }
+
+    @Test
     void routesToOneRecordedDestinationAndRetainsSourcesThroughAllProviderPartHandoffs() throws Exception {
         try (var fixture = new OutboundIngressFixture(2)) {
             var worker = worker("smpp.provider", "provider");
