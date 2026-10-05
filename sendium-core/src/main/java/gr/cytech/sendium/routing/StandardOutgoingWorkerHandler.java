@@ -243,7 +243,7 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             List<String> stopWorkers = new ArrayList<>(outSmsWorkers.size());
             for (AbstractOutWorker worker : outSmsWorkers.values()) {
                 stopWorkers.add(worker.getFullName());
-                stopFutures.add(ex.submit(() -> stopWorker(worker)));
+                stopFutures.add(ex.submit(() -> stopWorker(worker, false)));
             }
 
             for (int i = 0; i < stopFutures.size(); i++) {
@@ -274,6 +274,10 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
     }
 
     private void stopWorker(AbstractOutWorker worker) {
+        stopWorker(worker, true);
+    }
+
+    private void stopWorker(AbstractOutWorker worker, boolean runtimeRemoval) {
         final long start = System.currentTimeMillis();
         logger.debug("stopping worker {} in thread {}", worker.getFullName(), Thread.currentThread().getName());
         notifyBeforeWorkerStop(worker);
@@ -284,7 +288,9 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             logger.warn("exception stopping worker: {}", worker.getFullName(), e);
         }
         outSmsWorkers.remove(worker.getInstanceName());
-        worker.dequeueAllToRouter();
+        if (runtimeRemoval) {
+            worker.dequeueAllToRouter();
+        }
         logger.debug("stopping worker {} in thread {} took: {}ms",
                 worker.getFullName(), Thread.currentThread().getName(), System.currentTimeMillis() - start);
     }
