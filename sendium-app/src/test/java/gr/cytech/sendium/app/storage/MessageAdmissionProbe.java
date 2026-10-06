@@ -9,18 +9,18 @@ import jakarta.interceptor.Interceptor;
 import org.slf4j.LoggerFactory;
 
 @ApplicationScoped
-public class SmsAdmissionProbe {
+public class MessageAdmissionProbe {
     @Inject
-    SmsStorageProfile profile;
+    MessageStorageProfile profile;
 
-    private SmsStorageProfile profileAtStartup;
+    private MessageStorageProfile profileAtStartup;
 
     void start(@Observes @Priority(Interceptor.Priority.APPLICATION) StartupEvent event) {
         profileAtStartup = profile;
-        LoggerFactory.getLogger(SmsAdmissionProbe.class).info("test admission startup reached");
+        LoggerFactory.getLogger(MessageAdmissionProbe.class).info("test admission startup reached");
     }
 
-    public SmsStorageProfile profileAtStartup() {
+    public MessageStorageProfile profileAtStartup() {
         return profileAtStartup;
     }
 }
