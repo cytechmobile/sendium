@@ -33,11 +33,11 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class SmsLifecycleHttpTest {
+class MessageLifecycleHttpTest {
     @RegisterExtension
     static final QuarkusExtensionTest APP = new QuarkusExtensionTest()
             .withApplicationRoot(archive -> archive.addClasses(KannelResource.class, Beans.class, Credentials.class,
-                    StandaloneSmsStorage.class, SmsStorageProfile.class))
+                    StandaloneMessageStorage.class, MessageStorageProfile.class))
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
             .overrideConfigKey("sendium.dlr.persistence.enabled", "false")

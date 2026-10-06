@@ -4,8 +4,14 @@ This describes the initial contracts for [#338](https://github.com/cytechmobile/
 under [#337](https://github.com/cytechmobile/sendium/issues/337). The stage contracts are library APIs,
 and standalone profile selection, early validation, and startup logging are implemented. All three
 memory stage stores and the default coordinator are available as explicitly constructed library components.
-HTTP/SMPP admission can bind to an explicitly supplied coordinator. Standalone activation remains deferred
-until dispatch, completion, retry/rerouting, and shutdown are connected. The default runtime remains non-durable.
+The standalone application binds HTTP/SMPP admission to one shared memory coordinator and runs selection,
+routing, SMPP-client provider execution, retries and terminal handoffs end to end. The default runtime
+remains explicitly non-durable. Importing the core library alone does not activate this assembly.
+
+Shared storage configuration uses the channel-neutral `sendium.message.*` namespace, with
+`MessageStorageProfile` and `StandaloneMessageStorage` as the standalone profile classes. The same
+ownership boundaries can serve future OTT provider integrations; the current activated provider
+execution boundary remains SMPP-client submission.
 
 ## Ownership model
 
@@ -46,8 +52,8 @@ retrying taken work at the same destination through `returnToDestination(Routed)
 be used after destination assignment and is not a worker-to-router transition.
 
 Sendium's existing `AbstractOutWorker` failure policies can call `enqueueToRouter` to let routing choose
-again. That production behavior remains intact. Its source-retaining lifecycle integration is planned
-separately; it must be implemented before the new pipeline replaces that path. No direct worker-to-worker
+again. Legacy queue behavior remains intact; lifecycle provider retries perform a new lookup under the
+original parent work identity, retaining every required provider-part handoff. No direct worker-to-worker
 API is substituted for it. Consumer-specific dispatchers, including mCore's queue worker, remain the
 consumer team's responsibility and require separate approval for Sendium support.
 
@@ -64,7 +70,8 @@ requirements previously described in #337/#338. Those issue bodies have not been
 
 `StandardOutboundDispatch`, constructed explicitly with a coordinator and Sendium's routing manager,
 can route one already selected item to one recorded destination and take that work for provider
-processing. The caller retains the selected handle if recording the destination needs a retry.
+processing. The dispatcher retains the selected handle and original destination intent if recording
+needs a retry. `retryRoutingTransitions()` resumes that transition without repeating lookup or filters.
 A routing miss returns the selection to the router; a matched copied rule fails before
 assignment and likewise returns the selection. `finishProviderParts` is called only after the provider
 has reported an outcome for every part. It waits for each part's required DLR/tracking handoff before
@@ -140,9 +147,10 @@ Unresolved shutdown must retain the live ownership and report failure rather tha
 while multipart callbacks are active. Memory closure remains non-durable and clears memory state;
 returning ownership during shutdown does not promise restart recovery.
 
-This provider boundary is explicitly assembled and is not automatically wired into the standalone
-router/worker loops. Standalone activation of this shutdown ordering remains subsequent
-integration work. Runtime attempt bookkeeping is non-durable; it does not
+The standalone application owns separate lifecycle processors alongside retained legacy entry points.
+Its early shutdown observer applies this ordering before normal worker/connection shutdown observers.
+Drain-first shutdown has no forced cutoff: unresolved callbacks or required handoffs keep shutdown
+waiting, with actionable failures and periodic waiting logs. Runtime attempt bookkeeping is non-durable; it does not
 provide provider-outcome checkpoints or restart recovery.
 
 ## Components
@@ -169,9 +177,9 @@ storage/
 Memory implementations live under `storage.memory`. Standalone configuration
 assembly lives separately in `sendium-app`, under `gr.cytech.sendium.app.storage`:
 
-- `SmsStorageProfile` is an immutable validated configuration value. Its constructor is the single
+- `MessageStorageProfile` is an immutable validated configuration value. Its constructor is the single
   supported-profile validator; it accepts only `memory/memory/memory`.
-- `StandaloneSmsStorage` produces that profile as a CDI singleton from runtime configuration and
+- `StandaloneMessageStorage` produces that profile as a CDI singleton from runtime configuration and
   requires it in an early startup observer. The observer logs the effective profile and non-durable warning.
 
 These classes are absent from the `sendium-core` artifact; they do not activate inside an embedding application.
@@ -355,11 +363,24 @@ is instance-local and disappears on close/restart; no new durability guarantee i
 Other explicitly assembled SMPP workers can use `setIngressCoordinator` with their own message type.
 The SMPP binding cannot be changed after startup or any submission has begun.
 
-No production coordinator producer is added at this intermediate step. With no coordinator binding,
+`StandaloneOutboundPipeline` supplies a default-qualified, started singleton coordinator in `sendium-app`.
+Its static default producer validates the profile and positive memory bounds before construction.
+With no coordinator binding in an embedded application,
 the existing memory-queue admission path remains available. When a binding exists, resolution or
 admission failure does not fall back to that queue. Applications must supply a long-lived, started
 coordinator and connect selection, dispatch, completion, and retry policies before enabling the new
-pipeline. The standard message snapshot mapper and standalone activation are subsequent integration work.
+pipeline. Standalone assembly uses `StandaloneMessageSnapshot` to detach mutable protocol collections,
+byte arrays and nested map/list attribute values. Unknown mutable extension objects and custom message
+subtypes require application-owned assembly and a suitable snapshot policy rather than shallow copying.
+
+The standalone processors poll every 100 milliseconds, honor the global routing pause, select a bounded
+batch, route selected work, and take bounded work for each available SMPP-client destination. Misses
+and lookup failures return selections; routing filter drops complete their source without provider
+dispatch. Recorded transition failures retain their original intent for retry; other destination work
+can continue. Provider execution handles are retained for handoff, attempt and terminal-cleanup retries.
+The activated provider boundary is SMPP-client submission: copied routes and other legacy worker types
+are rejected before assignment with an explicit unsupported error and retained routing ownership.
+Legacy queues remain available for callers explicitly using those entry points, not as admission fallback.
 
 ### HTTP
 
@@ -410,8 +431,8 @@ old timer cannot consume a newer group that reused the same reference. Expiry on
 parts already in that group, not accepted parts still waiting in the ingress queue. Group-key rules,
 body assembly, relative timeout settings, and first-part-wins policy otherwise remain unchanged.
 
-These changes do not activate provider dispatch or implement worker-to-router retry. No mCore-specific
-workflow or storage adapter is added.
+Standalone dispatch and source-retaining provider retries are connected through the shared coordinator.
+No mCore-specific workflow or storage adapter is added.
 
 ## Memory routed-work implementation
 
@@ -538,7 +559,7 @@ resolved/retried before close can finish. A refused close leaves the coordinator
 stores open. A return failure also leaves ownership available for a subsequent close retry. Once
 draining succeeds, close attempts every store and preserves close failures; closure is idempotent and
 restart is forbidden. This library lifecycle does not stop application executors or provide a forced
-shutdown policy. Actual ingress/worker activation and application shutdown ordering remain integration work.
+shutdown policy. The standalone assembly owns its processors and applies the drain-first ordering above.
 
 ## Completion and retry boundaries
 
@@ -600,9 +621,9 @@ cannot mark unfinished work terminal, and does not imply that memory survives a 
 The standalone application reads these selectors once during startup:
 
 ```properties
-sendium.sms.pending.backend=memory
-sendium.sms.router-queue.backend=memory
-sendium.sms.routed-work.backend=memory
+sendium.message.pending.backend=memory
+sendium.message.router-queue.backend=memory
+sendium.message.routed-work.backend=memory
 ```
 
 | Pending / router / routed | Availability | Restart behavior |
@@ -622,8 +643,8 @@ Future durable guarantees require surviving storage and remain at least once.
 Missing selectors default to `memory`. Explicit blanks, unknown values, and every unimplemented
 combination fail startup with the requested profile and supported choice. The values are case-sensitive
 and are read from Quarkus runtime configuration, not hot-reloaded `smsg.properties` worker settings.
-Use the corresponding environment variables `SENDIUM_SMS_PENDING_BACKEND`,
-`SENDIUM_SMS_ROUTER_QUEUE_BACKEND`, and `SENDIUM_SMS_ROUTED_WORK_BACKEND`, or JVM `-D`
+Use the corresponding environment variables `SENDIUM_MESSAGE_PENDING_BACKEND`,
+`SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND`, and `SENDIUM_MESSAGE_ROUTED_WORK_BACKEND`, or JVM `-D`
 properties. Changes require a restart; they do not require rebuilding the application.
 
 The startup observer uses `Interceptor.Priority.PLATFORM_BEFORE`, ahead of the existing file watchers

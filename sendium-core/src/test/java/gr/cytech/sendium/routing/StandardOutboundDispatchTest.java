@@ -5,6 +5,8 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.external.filter.FilterStatusCodes;
 import org.junit.jupiter.api.Test;
 import utils.OutboundIngressFixture;
 
@@ -17,10 +19,52 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class StandardOutboundDispatchTest {
+    @Test
+    void interruptedDestinationRecordingRetriesTheOriginalIntentWithoutRepeatingLookup() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var provider = worker("smpp.provider", "provider");
+            var routing = mock(StandardRoutingManager.class);
+            when(routing.lookupForLifecycle(any())).thenReturn(new RoutingLookupResult(List.of(provider), true));
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
+            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("hello"));
+            fixture.coordinator.selectAndStage(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            doThrow(new IllegalStateException("recording interrupted")).doCallRealMethod()
+                    .when(fixture.coordinator).route(any(), any());
+            assertThatThrownBy(() -> dispatch.routeSelected(selected)).isInstanceOf(IllegalStateException.class);
+            dispatch.retryRoutingTransitions();
+            verify(routing, times(1)).lookupForLifecycle(any());
+            assertThat(dispatch.takeForProvider("smpp.provider", Duration.ZERO)).isPresent();
+            dispatch.close();
+        }
+    }
+
+    @Test
+    void routingFilterDropCompletesTheSourceWithoutProviderDispatch() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var routing = mock(StandardRoutingManager.class);
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.admit(source, message("hello"));
+            fixture.coordinator.selectAndStage(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            when(routing.lookupForLifecycle(any())).thenThrow(new FilterException(null,
+                    FilterStatusCodes.DROP, selected.message(), "dropped"));
+            assertThat(dispatch.routeSelected(selected)).isEmpty();
+            assertThat(fixture.pending.find(source)).isEmpty();
+            assertThat(dispatch.takeForProvider("smpp.provider", Duration.ZERO)).isEmpty();
+            dispatch.close();
+        }
+    }
+
     @Test
     void shutdownDrainsAllHandoffsAndRetainsOwnershipOnTimeoutOrFailure() throws Exception {
         try (var fixture = new OutboundIngressFixture(1)) {

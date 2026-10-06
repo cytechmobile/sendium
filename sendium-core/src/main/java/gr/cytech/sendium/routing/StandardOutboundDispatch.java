@@ -5,11 +5,14 @@ import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.smpp.client.CoordinatedSmppSubmission;
 import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.external.filter.FilterStatusCodes;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -36,6 +39,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     private final ConcurrentMap<SmppClientWorker<StandardMessage>, Semaphore> workerSlots = new ConcurrentHashMap<>();
     private final ConcurrentMap<WorkId, CompletionStage<Void>> activeExecutions = new ConcurrentHashMap<>();
     private boolean quiescing;
+    private final ConcurrentMap<SelectionId, PendingRouting> routingTransitions = new ConcurrentHashMap<>();
 
     public StandardOutboundDispatch(OutboundCoordinator<StandardMessage> coordinator, StandardRoutingManager routing) {
         this(coordinator, routing, Executors.newScheduledThreadPool(2, task -> {
@@ -65,6 +69,13 @@ public final class StandardOutboundDispatch implements AutoCloseable {
      */
     public synchronized Optional<Routed<StandardMessage>> routeSelected(Selected<StandardMessage> selected) throws IOException {
         Objects.requireNonNull(selected, "selected");
+        var pending = routingTransitions.get(selected.id());
+        if (pending != null) {
+            if (pending.selected() != selected) {
+                throw new IllegalArgumentException("Routing retry requires its original selection handle");
+            }
+            return Optional.of(recordRouting(pending));
+        }
         if (quiescing) {
             coordinator.returnToRouter(selected);
             return Optional.empty();
@@ -72,6 +83,16 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         RoutingLookupResult result;
         try {
             result = routing.lookupForLifecycle(selected.message());
+        } catch (FilterException failure) {
+            if (failure.getStatusCode() == FilterStatusCodes.DROP) {
+                coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
+                return Optional.empty();
+            }
+            if (failure.getStatusCode() == FilterStatusCodes.RETRY) {
+                selected.message().rtxCnt++;
+            }
+            coordinator.returnToRouter(selected);
+            throw failure;
         } catch (IOException | RuntimeException failure) {
             coordinator.returnToRouter(selected);
             throw failure;
@@ -86,7 +107,35 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                     OutboundStorageException.Reason.UNSUPPORTED, "Lifecycle routing requires one destination");
         }
         String destination = result.getDestinations().getFirst().getFullName();
-        return Optional.of(coordinator.route(selected, new Destination<>(destination, selected.message())));
+        var transition = new PendingRouting(selected, new Destination<>(destination, selected.message()));
+        routingTransitions.putIfAbsent(selected.id(), transition);
+        var recorded = recordRouting(routingTransitions.get(selected.id()));
+        return Optional.of(recorded);
+    }
+
+    /** Retries recording the original routing intent without rerunning lookup or filters. */
+    public synchronized void retryRoutingTransitions() {
+        RuntimeException failure = null;
+        for (var transition : List.copyOf(routingTransitions.values())) {
+            try {
+                recordRouting(transition);
+            } catch (RuntimeException error) {
+                if (failure == null) {
+                    failure = error;
+                } else if (failure != error) {
+                    failure.addSuppressed(error);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private Routed<StandardMessage> recordRouting(PendingRouting transition) {
+        var recorded = coordinator.route(transition.selected(), transition.destination());
+        routingTransitions.remove(transition.selected().id(), transition);
+        return recorded;
     }
 
     /** Takes recorded work for provider processing; taking or enqueuing it is not terminal completion. */
@@ -194,6 +243,9 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         if (!activeExecutions.isEmpty()) {
             throw new IllegalStateException("Drain provider executions before closing outbound dispatch");
         }
+        if (!routingTransitions.isEmpty()) {
+            throw new IllegalStateException("Resolve unfinished routing transitions before closing outbound dispatch");
+        }
         if (ownsScheduler) {
             scheduler.shutdown();
         }
@@ -214,6 +266,9 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
     public enum AttemptState {
         QUEUED, PREPARING, AWAITING_COMPLETION, COMPLETED, FAILED
+    }
+
+    private record PendingRouting(Selected<StandardMessage> selected, Destination<StandardMessage> destination) {
     }
 
     public record AttemptSnapshot(String destination, AttemptState state, Throwable failure) {

@@ -6,9 +6,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.junit.jupiter.api.Assertions.fail;
 
-class SmsStoragePostgresqlStartupTest {
+class MessageStoragePostgresqlStartupTest {
     @RegisterExtension
-    static final QuarkusExtensionTest APP = SmsStorageStartupSupport.rejected("postgresql", "postgresql", "postgresql");
+    static final QuarkusExtensionTest APP = MessageStorageStartupSupport.rejected("postgresql", "postgresql", "postgresql");
 
     @Test
     void startupMustFailBeforeAdmission() {

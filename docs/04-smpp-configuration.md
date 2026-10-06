@@ -64,15 +64,14 @@ All properties below should be prefixed with your instance path. For example, if
 
 ### Admission and acknowledgement
 
-The default server accepts an ingress event into its local queue before sending `submit_sm_resp STATUS_OK`.
-An application explicitly binding an outbound coordinator instead admits a complete message, or retains
+The standalone server uses the shared memory outbound coordinator. It admits a complete message, or retains
 each concatenated part as held work, before success. Parts are acknowledged individually rather than
 waiting for the whole message. Completed/expired reassembly work retains those original source IDs.
 
 In that coordinated path, capacity rejection returns `STATUS_THROTTLED`, unsupported input returns
 `STATUS_SUBMITFAIL`, and other lifecycle/storage failures return `STATUS_SYSERR`. A failure after
-acknowledgement during ready publication is retried without another client response. Standalone lifecycle
-activation remains deferred until dispatch and completion are connected; see [Outbound Storage Contracts](14-outbound-storage.md).
+acknowledgement during ready publication is retried without another client response. Embedded workers
+without a coordinator binding retain local ingress-queue admission before success. See [Outbound Storage Contracts](14-outbound-storage.md).
 
 ## 🧵 Thread Pool Configuration
 
