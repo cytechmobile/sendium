@@ -654,3 +654,21 @@ and a `NON-DURABLE` warning. The library memory stores are not yet constructed b
 
 This milestone includes actionable errors and startup profile/non-durable logging. Metrics,
 readiness endpoints, and broader observability are deferred. Contract-level status is not a health endpoint.
+
+## Behavioral verification
+
+The memory slice is verified at the following connected boundaries:
+
+| Boundary | Coverage |
+|---|---|
+| HTTP admission through standalone processing and capacity recovery | `MessageLifecycleHttpTest` and `StandaloneOutboundPipelineTest` exercise real HTTP/CDI admission and memory stores; the latter runs the production processors against a controlled provider handoff. |
+| SMPP ownership before acknowledgement and multipart publication | `SmppLifecycleAdmissionTest` exercises submit/response objects, held sources, reassembly and publication retry without another acknowledgement. |
+| Combined multipart lifecycle and shutdown drain | `SmppClientWorkerTest` carries two held sources through copied-route rejection, real routing lookup, request generation, rerouting to another provider during quiescence, failed handoffs and handoff-only retry. Original sources remain owned until completion; handoff retries and duplicate callbacks create no additional provider requests. |
+| Standalone shutdown ordering and worker-stop failure | `StandaloneOutboundShutdownTest` proves workers remain available during handoff drain and stage closure waits for successful worker-manager stop. |
+| Application-owned generic assembly | `OutboundEmbeddedLifecycleTest`, outside the implementation package, supplies a selection-store implementation with its own bound/backend identity and a custom mutable message subtype. Real stores/coordinator preserve subtype fields through selection, returns, failed asynchronous handoff, completion retry and explicit start/quiesce/close. |
+| Routing transitions and copied-route guards | `StandardOutboundDispatchTest` verifies recording retries preserve the original intent without lookup replay, routing drops complete sources and copied rules fail before assignment. |
+| Startup profiles and memory bounds | `MessageStorageProfileTest`, `MessageStorage*StartupTest` and `StandaloneOutboundConfigurationTest` cover supported defaults, unsupported requests, early rejection and positive bounds. |
+
+Provider tests exercise real SMPP request generation and session callbacks with controlled transport/handoff
+fixtures rather than an external provider socket. Embedded fixtures verify the shared contracts within
+Sendium; deployment or adoption in another application remains that application's responsibility.
