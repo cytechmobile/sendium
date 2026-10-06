@@ -10,10 +10,12 @@ import com.cloudhopper.smpp.tlv.Tlv;
 import com.cloudhopper.smpp.type.Address;
 import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
+import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import gr.cytech.sendium.core.worker.Tracker;
@@ -21,6 +23,7 @@ import gr.cytech.sendium.external.WorkerResourceProvider;
 import gr.cytech.sendium.routing.StandardOutboundDispatch;
 import gr.cytech.sendium.routing.StandardRoutingManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
+import gr.cytech.sendium.routing.RoutingFileParser;
 import org.junit.jupiter.api.Test;
 import utils.OutboundIngressFixture;
 
@@ -42,6 +45,82 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class SmppClientWorkerTest {
+
+    @Test
+    void heldSourcesCopiedRouteRejectionMultipartReroutingAndHandoffRetryRemainOwnedThroughShutdown() throws Exception {
+        try (var fixture = new OutboundIngressFixture(2)) {
+            var first = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                    "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            var second = spy(new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker()));
+            when(second.getFullName()).thenReturn("smppclient.second");
+            var routing = new LifecycleRouting(java.util.List.of(first, second));
+            routing.use("+" + first.getFullName() + "::default:");
+            try (var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing)) {
+                var firstSource = new SourceId(UUID.randomUUID());
+                var secondSource = new SourceId(UUID.randomUUID());
+                var firstPart = messageWithNetwork();
+                firstPart.serial = firstSource.value().toString();
+                firstPart.body = "a".repeat(100);
+                var secondPart = messageWithNetwork();
+                secondPart.serial = secondSource.value().toString();
+                secondPart.body = "a".repeat(100);
+                fixture.coordinator.admitHeld(firstSource, firstPart);
+                fixture.coordinator.admitHeld(secondSource, secondPart);
+                assertThat(fixture.coordinator.selectAndStage(2)).isZero();
+                var prepared = messageWithNetwork();
+                prepared.serial = firstPart.serial;
+                prepared.body = firstPart.body + secondPart.body;
+                prepared.reassembledParts = new java.util.ArrayList<>(java.util.List.of(firstPart.serial, secondPart.serial));
+                fixture.coordinator.publishReady(Set.of(firstSource, secondSource), prepared);
+                assertThat(fixture.coordinator.selectAndStage(2)).isEqualTo(1);
+                var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                assertThatThrownBy(() -> dispatch.routeSelected(selected))
+                        .isInstanceOfSatisfying(OutboundStorageException.class, failure ->
+                                assertThat(failure.reason()).isEqualTo(OutboundStorageException.Reason.UNSUPPORTED));
+                assertThat(first.coordinatedRequests).isEmpty();
+                assertThat(dispatch.takeForProvider(first.getFullName(), Duration.ZERO)).isEmpty();
+
+                routing.use(first.getFullName() + "::default:");
+                var returned = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                assertThat(returned.id()).isEqualTo(selected.id());
+                dispatch.routeSelected(returned);
+                var parent = dispatch.takeForProvider(first.getFullName(), Duration.ZERO).orElseThrow();
+                var execution = dispatch.submitToProvider(parent, first);
+                first.awaitRequests(2);
+                routing.use(second.getFullName() + "::default:");
+                dispatch.quiesce();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                respond(handler(first), first.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
+                second.awaitRequests(2);
+                assertThat(parent.destination()).isEqualTo(first.getFullName());
+                assertThat(execution.attempts()).extracting(StandardOutboundDispatch.AttemptSnapshot::destination)
+                        .containsExactly(first.getFullName(), second.getFullName());
+
+                second.failCoordinatedHandoff = true;
+                second.coordinatedRequests.forEach(request -> respond(handler(second), request, SmppConstants.STATUS_OK));
+                respond(handler(first), first.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
+                assertThat(execution.completion().toCompletableFuture()).isNotDone();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                assertThat(fixture.pending.find(firstSource).orElseThrow().body).isEqualTo(firstPart.body);
+                assertThat(fixture.pending.find(secondSource)).isPresent();
+                assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
+
+                second.failCoordinatedHandoff = false;
+                execution.retryPendingHandoffs();
+                execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(1))).isTrue();
+                assertThat(fixture.pending.find(firstSource)).isEmpty();
+                assertThat(fixture.pending.find(secondSource)).isEmpty();
+                assertThat(first.coordinatedRequests).hasSize(2);
+                assertThat(second.coordinatedRequests).hasSize(2);
+                int handoffs = second.coordinatedHandoffs;
+                respond(handler(second), second.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+                assertThat(second.coordinatedHandoffs).isEqualTo(handoffs);
+                assertThat(first.getRouterQueue().isEmpty()).isTrue();
+                assertThat(second.getRouterQueue().isEmpty()).isTrue();
+            }
+        }
+    }
 
     @Test
     void workerSlotAndRateGatePreventConcurrentPreparationAndEarlySending() throws Exception {
@@ -731,6 +810,18 @@ class SmppClientWorkerTest {
         msg.cnetwork = 20201;
         msg.outgateway = "hlr-route";
         return msg;
+    }
+
+    private static final class LifecycleRouting extends StandardRoutingManager {
+        private final java.util.List<AbstractOutWorker> providers;
+
+        private LifecycleRouting(java.util.List<AbstractOutWorker> providers) {
+            this.providers = providers;
+        }
+
+        private void use(String rule) {
+            parseNewRoutingTable(RoutingFileParser.parseRoutingTable(java.util.List.of(rule)), providers);
+        }
     }
 
     private static class TestSmppClientWorker extends SmppClientWorker<StandardMessage> {
