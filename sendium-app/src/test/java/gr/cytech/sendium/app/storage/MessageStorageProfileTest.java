@@ -16,7 +16,7 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class SmsStorageProfileTest {
+class MessageStorageProfileTest {
     @Test
     void missingSelectorsUseMemoryDefaults() {
         assertThat(profile(Map.of()).toString()).isEqualTo("memory/memory/memory");
@@ -25,35 +25,35 @@ class SmsStorageProfileTest {
     @Test
     void explicitMemoryIsAccepted() {
         assertThat(profile(Map.of(
-                SmsStorageProfile.PENDING_BACKEND, "memory",
-                SmsStorageProfile.ROUTER_BACKEND, "memory",
-                SmsStorageProfile.ROUTED_BACKEND, "memory")))
-                .isEqualTo(new SmsStorageProfile("memory", "memory", "memory"));
+                MessageStorageProfile.PENDING_BACKEND, "memory",
+                MessageStorageProfile.ROUTER_BACKEND, "memory",
+                MessageStorageProfile.ROUTED_BACKEND, "memory")))
+                .isEqualTo(new MessageStorageProfile("memory", "memory", "memory"));
     }
 
     @ParameterizedTest
     @MethodSource("unsupportedProfiles")
     void rejectsEveryUnimplementedCombination(String pending, String router, String routed) {
         assertThatThrownBy(() -> profile(Map.of(
-                SmsStorageProfile.PENDING_BACKEND, pending,
-                SmsStorageProfile.ROUTER_BACKEND, router,
-                SmsStorageProfile.ROUTED_BACKEND, routed)))
+                MessageStorageProfile.PENDING_BACKEND, pending,
+                MessageStorageProfile.ROUTER_BACKEND, router,
+                MessageStorageProfile.ROUTED_BACKEND, routed)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("'" + pending + "/" + router + "/" + routed + "'")
                 .hasMessageContaining("Supported profiles: memory/memory/memory")
-                .hasMessageContaining(SmsStorageProfile.PENDING_BACKEND)
-                .hasMessageContaining(SmsStorageProfile.ROUTER_BACKEND)
-                .hasMessageContaining(SmsStorageProfile.ROUTED_BACKEND);
+                .hasMessageContaining(MessageStorageProfile.PENDING_BACKEND)
+                .hasMessageContaining(MessageStorageProfile.ROUTER_BACKEND)
+                .hasMessageContaining(MessageStorageProfile.ROUTED_BACKEND);
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"", " ", "disk", "MEMORY"})
     void explicitInvalidValuesNeverUseTheDefault(String value) {
-        for (String key : List.of(SmsStorageProfile.PENDING_BACKEND,
-                SmsStorageProfile.ROUTER_BACKEND, SmsStorageProfile.ROUTED_BACKEND)) {
+        for (String key : List.of(MessageStorageProfile.PENDING_BACKEND,
+                MessageStorageProfile.ROUTER_BACKEND, MessageStorageProfile.ROUTED_BACKEND)) {
             assertThatThrownBy(() -> profile(Map.of(key, value)))
                     .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("Unsupported outbound SMS storage profile");
+                    .hasMessageContaining("Unsupported outbound message storage profile");
         }
     }
 
@@ -64,7 +64,7 @@ class SmsStorageProfileTest {
                 .map(routed -> Arguments.of(pending, router, routed))));
     }
 
-    private static SmsStorageProfile profile(Map<String, String> settings) {
+    private static MessageStorageProfile profile(Map<String, String> settings) {
         var config = new SmallRyeConfigBuilder().withSources(new ConfigSource() {
             @Override
             public Map<String, String> getProperties() {
@@ -86,6 +86,6 @@ class SmsStorageProfileTest {
                 return "profile-test";
             }
         }).build();
-        return new StandaloneSmsStorage().profile(config);
+        return new StandaloneMessageStorage().profile(config);
     }
 }

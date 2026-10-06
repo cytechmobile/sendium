@@ -43,7 +43,7 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `QUARKUS_HTTP_ACCESS_LOG_ENABLE` | `true` | Enables HTTP access logging. |
 | `QUARKUS_HTTP_ACCESS_LOG_DIRECTORY` | `/work/logs` | HTTP access log directory. |
 
-## Outbound SMS Storage Profile
+## Outbound Message Storage Profile
 
 The standalone application reads these global, startup-only settings from Quarkus configuration
 (`application.properties`, JVM `-D` properties, or the environment). They are not hot-reloaded worker
@@ -51,9 +51,12 @@ settings in `smsg.properties`.
 
 | Property | Environment variable | Default |
 | :--- | :--- | :--- |
-| `sendium.sms.pending.backend` | `SENDIUM_SMS_PENDING_BACKEND` | `memory` |
-| `sendium.sms.router-queue.backend` | `SENDIUM_SMS_ROUTER_QUEUE_BACKEND` | `memory` |
-| `sendium.sms.routed-work.backend` | `SENDIUM_SMS_ROUTED_WORK_BACKEND` | `memory` |
+| `sendium.message.pending.backend` | `SENDIUM_MESSAGE_PENDING_BACKEND` | `memory` |
+| `sendium.message.router-queue.backend` | `SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND` | `memory` |
+| `sendium.message.routed-work.backend` | `SENDIUM_MESSAGE_ROUTED_WORK_BACKEND` | `memory` |
+| `sendium.message.pending.capacity` | `SENDIUM_MESSAGE_PENDING_CAPACITY` | `10000` |
+| `sendium.message.router-queue.capacity` | `SENDIUM_MESSAGE_ROUTER_QUEUE_CAPACITY` | `1000` |
+| `sendium.message.selection-batch-size` | `SENDIUM_MESSAGE_SELECTION_BATCH_SIZE` | `100` |
 
 Only **`memory/memory/memory`** is currently selectable. Missing settings default to `memory`;
 explicitly empty, unknown, or unsupported values fail startup. Values are case-sensitive. Requests
@@ -64,15 +67,17 @@ fallback to a less durable backend.
 Validation runs before Sendium's file-watcher and router/worker startup observers. The validated
 profile is retained for the process lifetime. Startup logs the effective profile and a prominent
 `NON-DURABLE` warning: accepted messages and in-flight work can be lost on restart. The current
-runtime pipeline is still memory-backed. All three memory stage stores and the default lifecycle
-coordinator exist as library components. HTTP/SMPP can bind to an explicitly supplied coordinator;
-standalone activation still awaits connected dispatch, completion, and retry/rerouting work in #338. Their
-capacity bounds are constructor arguments at this stage, not additional operator settings.
+standalone pipeline binds HTTP/SMPP to one shared coordinator and executes bounded selection, routing,
+SMPP-client submission, retries and terminal handoffs. All capacity/batch settings must be positive.
+Pending capacity counts retained accepted sources (including held multipart parts); router capacity
+counts queued plus taken unassigned selections. Routed capacity equals pending source capacity, so a
+recorded selection cannot exhaust destination-record slots while its sources fit in pending storage.
+Selection and each destination take loop process at most the configured batch size per poll.
 See [Outbound Storage Contracts](14-outbound-storage.md).
 
 The producer and startup observer live only in `sendium-app`. Embedding `sendium-core` does not
 activate this validation, configure an outbound coordinator, or enforce the standalone profile list.
-Embedding applications own their assembly. Outbound SMS selectors do not change the independently
+Embedding applications own their assembly. Outbound message selectors do not change the independently
 configured DLR subsystem below.
 
 ## DLR Storage Environment Variables

@@ -6,9 +6,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.junit.jupiter.api.Assertions.fail;
 
-class SmsStorageFileStartupTest {
+class MessageStorageFileStartupTest {
     @RegisterExtension
-    static final QuarkusExtensionTest APP = SmsStorageStartupSupport.rejected("file", "file", "memory");
+    static final QuarkusExtensionTest APP = MessageStorageStartupSupport.rejected("file", "file", "memory");
 
     @Test
     void startupMustFailBeforeAdmission() {
