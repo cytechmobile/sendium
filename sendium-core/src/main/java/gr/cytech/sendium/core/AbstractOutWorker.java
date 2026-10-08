@@ -1478,7 +1478,6 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                         sleeper.sleep(configurationProvider.getLongPrpt(_pauseSleepMs), TimeUnit.MILLISECONDS);
                         continue;
                     }
-                    applyRateLimit();
                     if (msg == null) {
                         // wait up to 200ms for the next Message
                         msg = msgQ.dequeue(200);
@@ -1486,6 +1485,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                     // if no Message returned retry
                     if (msg == null) {
                         continue;
+                    }
+                    if (keepOnRunning) {
+                        applyRateLimit();
                     }
                     if (!keepOnRunning) {
                         logger.info("enqueued message msg:{} back to queue since worker stopping, and keepOnRunning:{}", msg.msgId, keepOnRunning);

@@ -13,6 +13,7 @@ import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
+import gr.cytech.sendium.core.queue.QueueProvider;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
@@ -25,6 +26,9 @@ import gr.cytech.sendium.routing.StandardRoutingManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.RoutingFileParser;
 import jakarta.enterprise.inject.Vetoed;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ArcContainer;
+import io.quarkus.arc.ManagedContext;
 import org.junit.jupiter.api.Test;
 import utils.OutboundIngressFixture;
 
@@ -42,10 +46,102 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class SmppClientWorkerTest {
+
+    @Test
+    void idleLegacyPollingDoesNotAcquireSendPermits() {
+        var worker = new LegacyRateWorker();
+        int[] polls = {0};
+        var queue = new Queue<StandardMessage>() {
+            @Override
+            public StandardMessage dequeue(long timeout) {
+                if (++polls[0] == 3) {
+                    worker.keepOnRunning = false;
+                }
+                return null;
+            }
+        };
+        worker.useQueue(queue);
+
+        worker.new Worker(0).run();
+
+        assertThat(polls[0]).isEqualTo(3);
+        assertThat(worker.permits).isZero();
+        assertThat(worker.legacySends).isZero();
+    }
+
+    @Test
+    void shutdownDuringRateAcquisitionReturnsTheTakenLegacyMessage() throws Exception {
+        var worker = new LegacyRateWorker();
+        var queue = new Queue<StandardMessage>();
+        var message = messageWithNetwork();
+        queue.enqueue(message);
+        worker.useQueue(queue);
+        worker.afterPermit = () -> worker.keepOnRunning = false;
+
+        worker.new Worker(0).run();
+
+        assertThat(worker.permits).isEqualTo(1);
+        assertThat(worker.legacySends).isZero();
+        assertThat(queue.dequeue(0)).isSameAs(message);
+        assertThat(queue.isEmpty()).isTrue();
+    }
+
+    @Test
+    void shutdownDuringDequeueReturnsTheMessageWithoutAcquiringAPermit() throws Exception {
+        var worker = new LegacyRateWorker();
+        var queue = new Queue<StandardMessage>() {
+            @Override
+            public StandardMessage dequeue(long timeout) throws InterruptedException {
+                var message = super.dequeue(timeout);
+                worker.keepOnRunning = false;
+                return message;
+            }
+        };
+        var message = messageWithNetwork();
+        queue.enqueue(message);
+        worker.useQueue(queue);
+
+        worker.new Worker(0).run();
+
+        assertThat(worker.permits).isZero();
+        assertThat(worker.legacySends).isZero();
+        assertThat(queue.dequeue(0)).isSameAs(message);
+        assertThat(queue.isEmpty()).isTrue();
+    }
+
+    @Test
+    void legacyAndCoordinatedMessagesShareTheConfiguredWorkerRateLimit() throws Exception {
+        var worker = new LegacyRateWorker();
+        worker.configureRate(2);
+        var queue = new Queue<StandardMessage>();
+        queue.enqueue(messageWithNetwork());
+        worker.useQueue(queue);
+        var container = mock(ArcContainer.class);
+        when(container.requestContext()).thenReturn(mock(ManagedContext.class));
+        try (var arc = mockStatic(Arc.class)) {
+            arc.when(Arc::container).thenReturn(container);
+            worker.new Worker(0).run();
+        }
+        assertThat(worker.legacySends).isEqualTo(1);
+        assertThat(worker.permits).isEqualTo(1);
+        worker.keepOnRunning = true;
+
+        for (int i = 0; i < 2; i++) {
+            worker.submitPreparedCoordinated(messageWithNetwork(), (payload, policy) -> {
+                throw new AssertionError("Successful submission must not schedule a retry");
+            });
+        }
+
+        assertThat(worker.permits).isEqualTo(3);
+        assertThat(worker.coordinatedSendTime - worker.legacySendTime)
+                .isGreaterThanOrEqualTo(Duration.ofMillis(800).toNanos());
+        assertThat(worker.getTransactionsPerSecond()).isEqualTo(2);
+    }
 
     @Test
     void heldSourcesCopiedRouteRejectionMultipartReroutingAndHandoffRetryRemainOwnedThroughShutdown() throws Exception {
@@ -811,6 +907,53 @@ class SmppClientWorkerTest {
         msg.cnetwork = 20201;
         msg.outgateway = "hlr-route";
         return msg;
+    }
+
+    @Vetoed
+    private static final class LegacyRateWorker extends TestSmppClientWorker {
+        private int permits;
+        private int legacySends;
+        private long legacySendTime;
+        private long coordinatedSendTime;
+        private Runnable afterPermit = () -> { };
+
+        private LegacyRateWorker() {
+            super(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        }
+
+        private void useQueue(Queue<StandardMessage> queue) {
+            var resources = mock(WorkerResourceProvider.class);
+            var queues = mock(QueueProvider.class);
+            when(resources.geQueueProvider()).thenReturn(queues);
+            when(queues.subscribe(getFullName(), getQueueName(), false)).thenReturn(queue);
+            workerResources = resources;
+            checkSubscribeMessageQueue();
+        }
+
+        private void configureRate(double rate) {
+            configurationProvider.setProperty("tps", Double.toString(rate));
+            configRateLimiter();
+        }
+
+        @Override
+        protected void applyRateLimit() {
+            permits++;
+            super.applyRateLimit();
+            afterPermit.run();
+        }
+
+        @Override
+        public StandardMessage doMessage(int threadIndex, StandardMessage message) {
+            legacySends++;
+            legacySendTime = System.nanoTime();
+            keepOnRunning = false;
+            return null;
+        }
+
+        @Override
+        protected void sendCoordinatedRequest(SubmitSm request) {
+            coordinatedSendTime = System.nanoTime();
+        }
     }
 
     @Vetoed
