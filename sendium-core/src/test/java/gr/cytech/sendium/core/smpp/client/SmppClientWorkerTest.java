@@ -24,6 +24,7 @@ import gr.cytech.sendium.routing.StandardOutboundDispatch;
 import gr.cytech.sendium.routing.StandardRoutingManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.RoutingFileParser;
+import jakarta.enterprise.inject.Vetoed;
 import org.junit.jupiter.api.Test;
 import utils.OutboundIngressFixture;
 
@@ -838,6 +839,7 @@ class SmppClientWorkerTest {
         return msg;
     }
 
+    @Vetoed
     private static final class LifecycleRouting extends StandardRoutingManager {
         private final java.util.List<AbstractOutWorker> providers;
 
