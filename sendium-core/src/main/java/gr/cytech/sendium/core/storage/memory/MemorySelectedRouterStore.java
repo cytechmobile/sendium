@@ -192,7 +192,9 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
                 throw invalid("Complete pending sources before removing selected ownership");
             }
             records.remove(selection);
-            ready.remove(entry);
+            if (entry.phase == Phase.QUEUED) {
+                ready.remove(entry);
+            }
             if (entry.phase != Phase.ROUTED) {
                 routingSlots--;
             }

@@ -211,6 +211,38 @@ class MemoryStorageTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"queued", "taken", "routed"})
+    void cleanupPreservesUnrelatedReadyWorkAndRoutingCapacity(String phase) throws Exception {
+        try (var stores = new Stores(3, 3)) {
+            SourceId source = source();
+            stores.pending.admit(source, message("completed", 2));
+            stores.pending.admit(source(), message("first", 2));
+            stores.pending.admit(source(), message("second", 2));
+            assertThat(stores.router.selectToRouter(3)).isEqualTo(3);
+            var selected = stores.router.take(Duration.ZERO).orElseThrow();
+            if (phase.equals("queued")) {
+                stores.router.release(selected);
+            } else if (phase.equals("routed")) {
+                stores.router.markRouted(selected.id());
+            }
+
+            stores.pending.complete(Set.of(source));
+            stores.router.complete(selected.id());
+            stores.router.complete(selected.id());
+            stores.pending.admit(source(), message("replacement", 2));
+            assertThat(stores.router.selectToRouter(3)).isEqualTo(1);
+
+            List<String> bodies = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                bodies.add(stores.router.take(Duration.ZERO).orElseThrow().message().body);
+            }
+            assertThat(bodies).containsExactly("first", "second", "replacement");
+            assertThat(stores.router.take(Duration.ZERO)).isEmpty();
+            assertThat(stores.pending.find(source)).isEmpty();
+        }
+    }
+
     @Test
     void failedAdmissionDoesNotReserveCapacityAndIdentitySnapshotsAreRejected() {
         AtomicBoolean fail = new AtomicBoolean(true);
