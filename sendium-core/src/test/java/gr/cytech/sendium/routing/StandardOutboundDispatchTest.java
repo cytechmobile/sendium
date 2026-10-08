@@ -34,11 +34,11 @@ class StandardOutboundDispatchTest {
             var routing = mock(StandardRoutingManager.class);
             when(routing.lookupForLifecycle(any())).thenReturn(new RoutingLookupResult(List.of(provider), true));
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
-            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("hello"));
-            fixture.coordinator.selectAndStage(1);
+            fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message("hello"));
+            fixture.coordinator.selectToRouter(1);
             var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             doThrow(new IllegalStateException("recording interrupted")).doCallRealMethod()
-                    .when(fixture.coordinator).route(any(), any());
+                    .when(fixture.coordinator).recordToRouted(any(), any());
             assertThatThrownBy(() -> dispatch.routeSelected(selected)).isInstanceOf(IllegalStateException.class);
             dispatch.retryRoutingTransitions();
             verify(routing, times(1)).lookupForLifecycle(any());
@@ -53,8 +53,8 @@ class StandardOutboundDispatchTest {
             var routing = mock(StandardRoutingManager.class);
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message("hello"));
-            fixture.coordinator.selectAndStage(1);
+            fixture.coordinator.accept(source, message("hello"));
+            fixture.coordinator.selectToRouter(1);
             var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             when(routing.lookupForLifecycle(any())).thenThrow(new FilterException(null,
                     FilterStatusCodes.DROP, selected.message(), "dropped"));
@@ -71,13 +71,13 @@ class StandardOutboundDispatchTest {
             var dispatch = new StandardOutboundDispatch(fixture.coordinator,
                     routing(List.of(worker("smpp.provider", "provider")), "provider::default:"));
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message("hello"));
+            fixture.coordinator.accept(source, message("hello"));
             routeNext(dispatch, fixture);
             var taken = dispatch.takeForProvider("smpp.provider", Duration.ZERO).orElseThrow();
             var first = new CompletableFuture<Void>();
             var second = new CompletableFuture<Void>();
             dispatch.finishProviderParts(taken, List.of(first, second));
-            dispatch.quiesce();
+            dispatch.beginShutdown();
             first.complete(null);
             assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
             assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
@@ -98,16 +98,16 @@ class StandardOutboundDispatchTest {
         try (var fixture = new OutboundIngressFixture(2)) {
             var dispatch = new StandardOutboundDispatch(fixture.coordinator,
                     routing(List.of(worker("smpp.provider", "provider")), "provider::default:"));
-            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("assigned"));
+            fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message("assigned"));
             routeNext(dispatch, fixture);
             var assigned = dispatch.takeForProvider("smpp.provider", Duration.ZERO).orElseThrow();
-            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("unassigned"));
-            fixture.coordinator.selectAndStage(1);
+            fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message("unassigned"));
+            fixture.coordinator.selectToRouter(1);
             var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            dispatch.quiesce();
+            dispatch.beginShutdown();
             assertThat(dispatch.routeSelected(selected)).isEmpty();
             assertThat(fixture.router.take(Duration.ZERO).orElseThrow().id()).isEqualTo(selected.id());
-            fixture.coordinator.returnToDestination(assigned);
+            fixture.coordinator.returnToRouted(assigned);
             assertThat(fixture.routed.take("smpp.provider", Duration.ZERO).orElseThrow().id()).isEqualTo(assigned.id());
             assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isTrue();
             dispatch.close();
@@ -121,7 +121,7 @@ class StandardOutboundDispatchTest {
             var routing = routing(List.of(worker), "provider::default:");
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message("hello"));
+            fixture.coordinator.accept(source, message("hello"));
 
             var routed = routeNext(dispatch, fixture).orElseThrow();
             assertThat(routed.destination()).isEqualTo(worker.getFullName());
@@ -151,7 +151,7 @@ class StandardOutboundDispatchTest {
             var dispatch = new StandardOutboundDispatch(fixture.coordinator,
                     routing(List.of(worker("smpp.provider", "provider")), "provider::default:"));
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message("hello"));
+            fixture.coordinator.accept(source, message("hello"));
             routeNext(dispatch, fixture).orElseThrow();
             var taken = dispatch.takeForProvider("smpp.provider", Duration.ZERO).orElseThrow();
             var handoff = new CompletableFuture<Void>();
@@ -174,7 +174,7 @@ class StandardOutboundDispatchTest {
             var routing = routing(List.of(provider), "+provider::default:");
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message("hello"));
+            fixture.coordinator.accept(source, message("hello"));
 
             assertThat(routing.lookupRoutingForMessage(message("legacy"), routing.getTargets().defaultTable)
                     .getDestinations()).containsExactly(provider);
@@ -196,7 +196,7 @@ class StandardOutboundDispatchTest {
             var provider = worker("smpp.provider", "provider");
             var routing = routing(List.of(provider), "second::default:", "[second]", "+provider::default:");
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
-            fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message("hello"));
+            fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message("hello"));
             assertThatThrownBy(() -> routeNext(dispatch, fixture))
                     .isInstanceOfSatisfying(OutboundStorageException.class, failure ->
                             assertThat(failure.reason()).isEqualTo(OutboundStorageException.Reason.UNSUPPORTED));
@@ -211,7 +211,7 @@ class StandardOutboundDispatchTest {
             var routing = routing(List.of(provider), "unknown::default:");
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing);
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message("hello"));
+            fixture.coordinator.accept(source, message("hello"));
             assertThat(routeNext(dispatch, fixture)).isEmpty();
             assertThat(fixture.pending.find(source)).isPresent();
             routing.parseNewRoutingTable(RoutingFileParser.parseRoutingTable(List.of("provider::default:")), List.of(provider));
@@ -227,7 +227,7 @@ class StandardOutboundDispatchTest {
 
     private static Optional<Routed<StandardMessage>> routeNext(StandardOutboundDispatch dispatch,
                                                                 OutboundIngressFixture fixture) throws Exception {
-        fixture.coordinator.selectAndStage(1);
+        fixture.coordinator.selectToRouter(1);
         return dispatch.routeSelected(fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow());
     }
 

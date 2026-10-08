@@ -36,12 +36,12 @@ class StandaloneOutboundShutdownTest {
         var config = mock(Config.class);
         when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
         var coordinator = spy(StandaloneOutboundPipeline.coordinator(new MessageStorageProfile("memory", "memory", "memory"), config));
-        var quiesced = new CountDownLatch(1);
+        var shutdownStarted = new CountDownLatch(1);
         doAnswer(invocation -> {
             invocation.callRealMethod();
-            quiesced.countDown();
+            shutdownStarted.countDown();
             return null;
-        }).when(coordinator).quiesce();
+        }).when(coordinator).beginShutdown();
         var provider = new StandaloneOutboundPipelineTest.Providers();
         var routing = mock(StandardRoutingManager.class);
         when(routing.lookupForLifecycle(any())).thenReturn(new RoutingLookupResult(List.of(provider.worker), true));
@@ -58,7 +58,7 @@ class StandaloneOutboundShutdownTest {
 
         var message = new StandardMessage();
         message.body = "hello";
-        coordinator.admit(new SourceId(UUID.randomUUID()), message);
+        coordinator.accept(new SourceId(UUID.randomUUID()), message);
         try (var stopping = Executors.newSingleThreadExecutor()) {
             try {
                 assertThat(provider.submitted.await(5, TimeUnit.SECONDS)).isTrue();
@@ -66,18 +66,18 @@ class StandaloneOutboundShutdownTest {
                     pipeline.stop(null);
                     return null;
                 });
-                assertThat(quiesced.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThat(shutdownStarted.await(5, TimeUnit.SECONDS)).isTrue();
                 assertThat(stopped.isDone()).isFalse();
                 verify(workers, never()).stop();
                 verify(coordinator, never()).close();
-                assertThatThrownBy(() -> coordinator.admit(new SourceId(UUID.randomUUID()), message))
+                assertThatThrownBy(() -> coordinator.accept(new SourceId(UUID.randomUUID()), message))
                         .isInstanceOf(OutboundStorageException.class);
                 provider.handoff.complete(null);
                 assertThatThrownBy(() -> stopped.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(IllegalStateException.class);
                 verify(coordinator, never()).close();
                 pipeline.stop(null);
                 var order = inOrder(coordinator, routing, workers);
-                order.verify(coordinator).quiesce();
+                order.verify(coordinator).beginShutdown();
                 order.verify(routing).stop();
                 order.verify(workers).stop();
                 order.verify(coordinator).close();

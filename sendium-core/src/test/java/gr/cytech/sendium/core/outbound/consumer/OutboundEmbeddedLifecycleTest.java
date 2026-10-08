@@ -41,21 +41,21 @@ class OutboundEmbeddedLifecycleTest {
             var firstSource = source();
             var secondSource = source();
             var first = message("custom-1");
-            coordinator.admit(firstSource, first);
-            coordinator.admit(secondSource, message("custom-2"));
+            coordinator.accept(firstSource, first);
+            coordinator.accept(secondSource, message("custom-2"));
             first.labels.add("caller mutation");
 
             // The application-owned port narrows the requested batch without a core configuration or CDI container.
-            assertThat(coordinator.selectAndStage(10)).isEqualTo(1);
+            assertThat(coordinator.selectToRouter(10)).isEqualTo(1);
             assertThat(selected.requestedLimit).isEqualTo(10);
             var selection = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selection.message().externalId).isEqualTo("custom-1");
             assertThat(selection.message().labels).containsExactly("accepted");
-            coordinator.route(selection, new Destination<>("application-provider", selection.message()));
-            var work = coordinator.takeForDestination("application-provider", Duration.ZERO).orElseThrow();
+            coordinator.recordToRouted(selection, new Destination<>("application-provider", selection.message()));
+            var work = coordinator.takeFromRouted("application-provider", Duration.ZERO).orElseThrow();
             work.message().labels.add("worker mutation");
-            coordinator.returnToDestination(work);
-            var returned = coordinator.takeForDestination("application-provider", Duration.ZERO).orElseThrow();
+            coordinator.returnToRouted(work);
+            var returned = coordinator.takeFromRouted("application-provider", Duration.ZERO).orElseThrow();
             assertThat(returned.id()).isEqualTo(work.id());
             assertThat(returned.message().externalId).isEqualTo("custom-1");
             assertThat(returned.message().labels).containsExactly("accepted", "worker mutation");
@@ -67,7 +67,7 @@ class OutboundEmbeddedLifecycleTest {
             handoff.completeExceptionally(new IllegalStateException("application handoff failed"));
             assertThatThrownBy(() -> completion.toCompletableFuture().join()).hasCauseInstanceOf(IllegalStateException.class);
             assertThat(pending.find(firstSource)).isPresent();
-            assertThat(coordinator.takeForDestination("application-provider", Duration.ZERO)).isEmpty();
+            assertThat(coordinator.takeFromRouted("application-provider", Duration.ZERO)).isEmpty();
             coordinator.complete(returned.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             assertThat(pending.find(firstSource)).isEmpty();
             assertThat(pending.find(secondSource).orElseThrow().externalId).isEqualTo("custom-2");
@@ -75,7 +75,7 @@ class OutboundEmbeddedLifecycleTest {
             // A late terminal callback cannot remove the other accepted source.
             coordinator.complete(returned.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             assertThat(pending.find(secondSource)).isPresent();
-            assertThat(coordinator.selectAndStage(10)).isEqualTo(1);
+            assertThat(coordinator.selectToRouter(10)).isEqualTo(1);
             var second = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(second.message().externalId).isEqualTo("custom-2");
             coordinator.discard(second.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
@@ -90,20 +90,20 @@ class OutboundEmbeddedLifecycleTest {
         var selected = new ApplicationSelectedStore(router);
         var routed = spy(new MemoryRoutedWorkStore<CustomMessage>(2, OutboundEmbeddedLifecycleTest::snapshot));
         try (var coordinator = new DefaultOutboundCoordinator<>(pending, selected, routed)) {
-            assertThatThrownBy(() -> coordinator.admit(source(), message("before-start")))
+            assertThatThrownBy(() -> coordinator.accept(source(), message("before-start")))
                     .isInstanceOf(OutboundStorageException.class);
             coordinator.start();
-            coordinator.admit(source(), message("routed"));
-            coordinator.selectAndStage(1);
+            coordinator.accept(source(), message("routed"));
+            coordinator.selectToRouter(1);
             var initial = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            coordinator.route(initial, new Destination<>("custom-provider", initial.message()));
-            var destinationTake = coordinator.takeForDestination("custom-provider", Duration.ZERO).orElseThrow();
-            coordinator.admit(source(), message("unassigned"));
-            coordinator.selectAndStage(1);
+            coordinator.recordToRouted(initial, new Destination<>("custom-provider", initial.message()));
+            var destinationTake = coordinator.takeFromRouted("custom-provider", Duration.ZERO).orElseThrow();
+            coordinator.accept(source(), message("unassigned"));
+            coordinator.selectToRouter(1);
             var routerTake = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
 
-            coordinator.quiesce();
-            assertThatThrownBy(() -> coordinator.admit(source(), message("after-quiesce")))
+            coordinator.beginShutdown();
+            assertThatThrownBy(() -> coordinator.accept(source(), message("after-shutdown-start")))
                     .isInstanceOf(OutboundStorageException.class);
             coordinator.close();
             verify(router).release(routerTake);
@@ -150,9 +150,9 @@ class OutboundEmbeddedLifecycleTest {
         }
 
         @Override
-        public int selectAndStage(int limit) {
+        public int selectToRouter(int limit) {
             requestedLimit = limit;
-            return delegate.selectAndStage(Math.min(limit, 1));
+            return delegate.selectToRouter(Math.min(limit, 1));
         }
 
         @Override

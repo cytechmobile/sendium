@@ -90,7 +90,7 @@ For a manual installation, replace the environment variables with the HTTP `syst
 123e4567-e89b-12d3-a456-426614174000
 ```
 
-In the standalone runtime, `202 Accepted` means admission into the memory-backed pending store. The source remains retained through routing, provider processing, and required DLR handoffs. Capacity rejection returns `503`; a failing coordinator is never replaced by legacy queue admission. Embedded callers without a coordinator retain the legacy in-memory queue path. The memory profile is non-durable across restart. See [Outbound Storage Contracts](14-outbound-storage.md).
+In the standalone runtime, `202 Accepted` means admission into the memory-backed pending store. The source remains retained through routing, provider processing, and required DLR handoffs. Capacity rejection returns `503`; a failing coordinator is never replaced by legacy queue admission. Embedded callers without a coordinator retain the legacy in-memory queue path. The memory profile is non-durable across restart. See [Outbound Message Storage](14-outbound-storage.md).
 
 Neither memory admission path writes an outbound message or DLR row to PostgreSQL. Acceptance does not prove that a viable route exists, that an upstream SMSC accepted the message, or that a handset received it. Durable DLR state is created only after an upstream provider outcome. Local-only Quick Start installations have no outbound route. Check routing configuration, the SMPP client connection, message lifecycle logs, submit response, and delivery receipt for those later stages.
 

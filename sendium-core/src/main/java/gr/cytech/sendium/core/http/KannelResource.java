@@ -220,7 +220,7 @@ public class KannelResource {
             if (outboundCoordinators.isUnsatisfied()) {
                 queueProvider.getRouterQueue().enqueue(msg);
             } else {
-                outboundCoordinators.get().admit(new SourceId(gatewayMessageId), msg);
+                outboundCoordinators.get().accept(new SourceId(gatewayMessageId), msg);
             }
             if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
                 logger.info("message.accepted ingress=http {}", MessageTrace.identifiers(msg));

@@ -45,7 +45,7 @@ class SmppLifecycleAdmissionTest {
             var event = submission(null, "hello", 42);
             worker.onResponse = response -> {
                 var source = ArgumentCaptor.forClass(SourceId.class);
-                verify(lifecycle.coordinator).admit(source.capture(), eq(event.pMsg));
+                verify(lifecycle.coordinator).accept(source.capture(), eq(event.pMsg));
                 assertThat(source.getValue().value()).isEqualTo(UUID.fromString(response.getMessageId()));
                 assertThat(lifecycle.pending.find(source.getValue()).orElseThrow().serial).isEqualTo(response.getMessageId());
             };
@@ -58,7 +58,7 @@ class SmppLifecycleAdmissionTest {
             assertThat(event.waitingForResponse).isFalse();
             assertThat(worker.getInEventQueue()).isEmpty();
             assertThat(worker.legacyQueue.isEmpty()).isTrue();
-            assertThat(lifecycle.coordinator.selectAndStage(1)).isEqualTo(1);
+            assertThat(lifecycle.coordinator.selectToRouter(1)).isEqualTo(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.message().dlrReturnMetadata).isEqualTo(event.pMsg.dlrReturnMetadata);
             assertThat(selected.message().ctstamp).isEqualTo(event.localTimestamp.getTime());
@@ -76,14 +76,14 @@ class SmppLifecycleAdmissionTest {
                 assertThat(accepted.sourceIds.iterator().next().value()).isEqualTo(
                         UUID.fromString(response.getMessageId()));
                 accepted.sourceIds.forEach(source -> assertThat(lifecycle.pending.find(source)).isPresent());
-                assertThat(lifecycle.coordinator.selectAndStage(2)).isZero();
+                assertThat(lifecycle.coordinator.selectToRouter(2)).isZero();
             };
             var first = submission("0500037F0201", "Hello ", 1);
             worker.enqueueIn(first);
             var firstAccepted = worker.getInEventQueue().remove();
             worker.handleIngressMessages(List.of(firstAccepted));
             assertThat(worker.responses).hasSize(1);
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isZero();
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isZero();
             var second = submission("0500037F0202", "world", 2);
             worker.enqueueIn(second);
             var secondAccepted = worker.getInEventQueue().remove();
@@ -100,12 +100,12 @@ class SmppLifecycleAdmissionTest {
             assertThat(ready.pMsg.reassembledParts).containsExactly(first.pMsg.serial, second.pMsg.serial);
             assertThat(lifecycle.pending.find(firstAccepted.sourceIds.iterator().next()).orElseThrow().body).isEqualTo("Hello ");
             worker.handleIngressMessages(List.of(ready));
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isEqualTo(1);
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.sources()).isEqualTo(sources);
             assertThat(selected.message().body).isEqualTo("Hello world");
-            lifecycle.coordinator.route(selected, new Destination<>("provider", selected.message()));
-            var work = lifecycle.coordinator.takeForDestination("provider", Duration.ZERO).orElseThrow();
+            lifecycle.coordinator.recordToRouted(selected, new Destination<>("provider", selected.message()));
+            var work = lifecycle.coordinator.takeFromRouted("provider", Duration.ZERO).orElseThrow();
             lifecycle.coordinator.complete(work.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             sources.forEach(source -> assertThat(lifecycle.pending.find(source)).isEmpty());
             assertThat(worker.responses).hasSize(2).allSatisfy(response ->
@@ -124,14 +124,14 @@ class SmppLifecycleAdmissionTest {
             var ready = worker.getInEventQueue().remove();
             doThrow(new OutboundStorageException(OutboundStage.Role.PENDING,
                     OutboundStorageException.Reason.UNAVAILABLE, "publication unavailable"))
-                    .when(lifecycle.coordinator).publishReady(any(), any());
+                    .when(lifecycle.coordinator).makeHeldReady(any(), any());
             worker.handleIngressMessages(List.of(ready));
             assertThat(worker.getInEventQueue()).containsExactly(ready);
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isZero();
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isZero();
             ready.sourceIds.forEach(source -> assertThat(lifecycle.pending.find(source)).isPresent());
-            doCallRealMethod().when(lifecycle.coordinator).publishReady(any(), any());
+            doCallRealMethod().when(lifecycle.coordinator).makeHeldReady(any(), any());
             worker.processQueued();
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isEqualTo(1);
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
             assertThat(lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow().message().body).isEqualTo("onetwo");
             assertThat(worker.responses).hasSize(2);
         }
@@ -153,7 +153,7 @@ class SmppLifecycleAdmissionTest {
                 assertThat(event.submitSm).isNull();
             });
             worker.handleIngressMessages(events);
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isEqualTo(2);
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(2);
             var one = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             var three = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(one.message().body).isEqualTo("one");
@@ -176,7 +176,7 @@ class SmppLifecycleAdmissionTest {
             assertThat(ready.pMsg.body).isEqualTo("firstsecond");
             assertThat(ready.pMsg.reassembledParts).hasSize(2);
             worker.handleIngressMessages(List.of(ready));
-            lifecycle.coordinator.selectAndStage(1);
+            lifecycle.coordinator.selectToRouter(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.sources()).hasSize(3);
             lifecycle.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
@@ -196,7 +196,7 @@ class SmppLifecycleAdmissionTest {
             worker.handleIngressMessages(raw);
             assertThat(worker.getInEventQueue()).hasSize(1);
             worker.processQueued();
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isEqualTo(1);
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.message().body).isEqualTo("onetwo");
             assertThat(selected.sources()).hasSize(2);
@@ -219,25 +219,25 @@ class SmppLifecycleAdmissionTest {
             var expired = events.stream().filter(event -> event.submitSm == null).findFirst().orElseThrow();
             assertThat(expired.sourceIds).doesNotContainAnyElementsOf(unprocessed.sourceIds);
             worker.handleIngressMessages(List.of(expired));
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isEqualTo(1);
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
             assertThat(lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow().message().body).isEqualTo("first");
             worker.handleIngressMessages(List.of(unprocessed));
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isZero();
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isZero();
             worker.expire(second.pMsg);
             worker.processQueued();
-            assertThat(lifecycle.coordinator.selectAndStage(2)).isEqualTo(1);
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
             assertThat(lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow().message().body).isEqualTo("second");
             assertThat(worker.responses).hasSize(2);
         }
     }
 
     @Test
-    void capacityAndQuiescenceRejectBeforeSuccessAndNeverFallBackToLegacyQueue() {
+    void capacityAndShutdownStartRejectBeforeSuccessAndNeverFallBackToLegacyQueue() {
         try (var lifecycle = new OutboundIngressFixture(1); var worker = new TestWorker()) {
             worker.setIngressCoordinator(lifecycle.coordinator);
             worker.enqueueIn(submission("0500037F0201", "held", 1));
             worker.enqueueIn(submission("0500037F0202", "full", 2));
-            lifecycle.coordinator.quiesce();
+            lifecycle.coordinator.beginShutdown();
             worker.enqueueIn(submission(null, "unavailable", 3));
             assertThat(worker.responses).extracting(SubmitSmResp::getCommandStatus)
                     .containsExactly(SmppConstants.STATUS_OK, SmppConstants.STATUS_THROTTLED, SmppConstants.STATUS_SYSERR);
@@ -254,7 +254,7 @@ class SmppLifecycleAdmissionTest {
             assertThat(worker.responses).singleElement().satisfies(response ->
                     assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_SUBMITFAIL));
             assertThat(worker.getInEventQueue()).isEmpty();
-            assertThat(lifecycle.coordinator.selectAndStage(1)).isZero();
+            assertThat(lifecycle.coordinator.selectToRouter(1)).isZero();
         }
     }
 

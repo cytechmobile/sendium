@@ -63,7 +63,7 @@ class MessageLifecycleHttpTest {
             var full = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertThat(full.statusCode()).isEqualTo(503);
             assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
-            assertThat(coordinator.selectAndStage(1)).isEqualTo(1);
+            assertThat(coordinator.selectToRouter(1)).isEqualTo(1);
             var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.message().serial).isEqualTo(accepted.body());
             assertThat(selected.sources()).singleElement().satisfies(source ->
