@@ -118,7 +118,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
     }
 
     @Override
-    public void publishReady(Set<SourceId> sources, M message) {
+    public void makeHeldReady(Set<SourceId> sources, M message) {
         Set<SourceId> checked = Set.copyOf(sources);
         Objects.requireNonNull(message, "message");
         if (checked.isEmpty()) {

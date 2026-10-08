@@ -13,13 +13,13 @@ import java.util.Optional;
  */
 public interface SelectedRouterStore<M extends StandardMessage> extends OutboundStage {
     /**
-     * Selects and stages at most limit eligible, priority-aware items, returning the newly staged count.
+     * Selects at most limit eligible, priority-aware items into the router backlog, returning the newly staged count.
      * Limit must be positive. Selected, taken, and routed sources are ineligible for another selection.
      * Source ownership is retained, including after partial publication failure. Stable selection IDs
      * allow retry/reconciliation without repeating already-committed preparation. No cross-store
      * transaction is implied. The implementation must not load the entire pending backlog.
      */
-    int selectAndStage(int limit);
+    int selectToRouter(int limit);
 
     /**
      * Takes an execution projection without completing selected or pending ownership.

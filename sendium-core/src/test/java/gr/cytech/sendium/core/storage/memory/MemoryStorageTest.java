@@ -101,13 +101,13 @@ class MemoryStorageTest {
             stores.pending.admit(source(), message("high-first", 3));
             stores.pending.admit(source(), message("normal", 2));
             stores.pending.admit(source(), message("high-second", 3));
-            assertThat(stores.router.selectAndStage(5)).isEqualTo(4);
+            assertThat(stores.router.selectToRouter(5)).isEqualTo(4);
             List<String> bodies = new ArrayList<>();
             for (int i = 0; i < 4; i++) {
                 bodies.add(stores.router.take(Duration.ZERO).orElseThrow().message().body);
             }
             assertThat(bodies).containsExactly("high-first", "high-second", "normal", "low");
-            assertThat(stores.router.selectAndStage(5)).isZero();
+            assertThat(stores.router.selectToRouter(5)).isZero();
         }
     }
 
@@ -126,9 +126,9 @@ class MemoryStorageTest {
             TestMessage delayed = new TestMessage("delayed", 2, NOW.plusSeconds(1));
             pending.admit(source(), delayed);
             delayed.available = NOW;
-            assertThat(router.selectAndStage(1)).isZero();
+            assertThat(router.selectToRouter(1)).isZero();
             time.set(NOW.plusSeconds(1));
-            assertThat(router.selectAndStage(1)).isEqualTo(1);
+            assertThat(router.selectToRouter(1)).isEqualTo(1);
             assertThat(router.take(Duration.ZERO).orElseThrow().message().body).isEqualTo("delayed");
         }
     }
@@ -144,20 +144,20 @@ class MemoryStorageTest {
                 stores.pending.admit(source(), message("item-" + i, 2));
             }
             copies.set(0);
-            assertThat(stores.router.selectAndStage(1)).isEqualTo(1);
+            assertThat(stores.router.selectToRouter(1)).isEqualTo(1);
             assertThat(copies).hasValue(1);
-            assertThat(stores.router.selectAndStage(50)).isEqualTo(1);
+            assertThat(stores.router.selectToRouter(50)).isEqualTo(1);
             assertThat(copies).hasValue(2);
             Selected<TestMessage> first = stores.router.take(Duration.ZERO).orElseThrow();
             Selected<TestMessage> second = stores.router.take(Duration.ZERO).orElseThrow();
-            assertThat(stores.router.selectAndStage(50)).isZero();
+            assertThat(stores.router.selectToRouter(50)).isZero();
             assertThat(copies).hasValue(4);
             stores.router.release(first);
             stores.router.release(first);
             assertThat(stores.router.take(Duration.ZERO).orElseThrow().id()).isEqualTo(first.id());
             assertThat(stores.router.take(Duration.ZERO)).isEmpty();
             stores.router.markRouted(second.id());
-            assertThat(stores.router.selectAndStage(50)).isEqualTo(1);
+            assertThat(stores.router.selectToRouter(50)).isEqualTo(1);
         }
     }
 
@@ -166,7 +166,7 @@ class MemoryStorageTest {
         try (var stores = new Stores(1, 1)) {
             SourceId source = source();
             stores.pending.admit(source, message("accepted", 2));
-            stores.router.selectAndStage(1);
+            stores.router.selectToRouter(1);
             Selected<TestMessage> first = stores.router.take(Duration.ZERO).orElseThrow();
             first.message().body = "filtered";
             first.message().tags.add("filter-tag");
@@ -193,12 +193,12 @@ class MemoryStorageTest {
         try (var stores = new Stores(1, 1)) {
             SourceId source = source();
             stores.pending.admit(source, message("one", 2));
-            stores.router.selectAndStage(1);
+            stores.router.selectToRouter(1);
             Selected<TestMessage> selected = stores.router.take(Duration.ZERO).orElseThrow();
             fails(() -> stores.router.complete(selected.id()), ROUTER_QUEUE, INVALID_TRANSITION);
             stores.router.markRouted(selected.id());
             stores.router.markRouted(selected.id());
-            assertThat(stores.router.selectAndStage(1)).isZero();
+            assertThat(stores.router.selectToRouter(1)).isZero();
             assertThat(stores.pending.find(source)).isPresent();
             fails(() -> stores.pending.admit(source(), message("two", 2)), PENDING, CAPACITY_EXCEEDED);
             stores.pending.complete(Set.of(source, source()));
@@ -207,7 +207,7 @@ class MemoryStorageTest {
             stores.router.complete(selected.id());
             assertThat(stores.pending.find(source)).isEmpty();
             stores.pending.admit(source(), message("two", 2));
-            assertThat(stores.router.selectAndStage(1)).isEqualTo(1);
+            assertThat(stores.router.selectToRouter(1)).isEqualTo(1);
         }
     }
 
@@ -257,12 +257,12 @@ class MemoryStorageTest {
             stores.pending.admit(first, message("first", 2));
             stores.pending.admit(second, message("second", 2));
             fail.set(true);
-            fails(() -> stores.router.selectAndStage(2), ROUTER_QUEUE, UNAVAILABLE);
+            fails(() -> stores.router.selectToRouter(2), ROUTER_QUEUE, UNAVAILABLE);
             assertThat(stores.router.take(Duration.ZERO).orElseThrow().sources()).containsExactly(first);
             fail.set(false);
             assertThat(stores.pending.find(first)).isPresent();
             assertThat(stores.pending.find(second)).isPresent();
-            assertThat(stores.router.selectAndStage(2)).isEqualTo(1);
+            assertThat(stores.router.selectToRouter(2)).isEqualTo(1);
             assertThat(stores.router.take(Duration.ZERO).orElseThrow().sources()).containsExactly(second);
             assertThat(stores.router.take(Duration.ZERO)).isEmpty();
         }
@@ -278,7 +278,7 @@ class MemoryStorageTest {
             return msg.copy();
         })) {
             stores.pending.admit(source(), message("one", 2));
-            stores.router.selectAndStage(1);
+            stores.router.selectToRouter(1);
             fail.set(true);
             fails(() -> stores.router.take(Duration.ZERO), ROUTER_QUEUE, UNAVAILABLE);
             fail.set(false);
@@ -307,7 +307,7 @@ class MemoryStorageTest {
                 jobs.add(executor.submit(() -> {
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                     while (seen.size() < count && System.nanoTime() < deadline) {
-                        stores.router.selectAndStage(3);
+                        stores.router.selectToRouter(3);
                         var selected = stores.router.take(Duration.ZERO);
                         if (selected.isPresent()) {
                             var work = selected.orElseThrow();
@@ -323,7 +323,7 @@ class MemoryStorageTest {
                 job.get(6, TimeUnit.SECONDS);
             }
             assertThat(seen).hasSize(count);
-            assertThat(stores.router.selectAndStage(count)).isZero();
+            assertThat(stores.router.selectToRouter(count)).isZero();
             for (SourceId source : seen) {
                 assertThat(stores.pending.find(source)).isPresent();
             }
@@ -342,7 +342,7 @@ class MemoryStorageTest {
             });
             awaitWaiting(waiter);
             stores.pending.admit(source(), message("one", 2));
-            stores.router.selectAndStage(1);
+            stores.router.selectToRouter(1);
             assertThat(result.get(1, TimeUnit.SECONDS).orElseThrow().message().body).isEqualTo("one");
         }
     }
@@ -388,11 +388,11 @@ class MemoryStorageTest {
             assertThat(taker.isAlive()).isFalse();
             assertThat(failure.get()).isInstanceOf(InterruptedException.class);
             stores.pending.admit(source, message("will be lost", 2));
-            stores.router.selectAndStage(1);
+            stores.router.selectToRouter(1);
         }
         try (var fresh = new Stores(1, 1)) {
             assertThat(fresh.pending.find(source)).isEmpty();
-            assertThat(fresh.router.selectAndStage(1)).isZero();
+            assertThat(fresh.router.selectToRouter(1)).isZero();
             assertThat(fresh.router.take(Duration.ZERO)).isEmpty();
         }
     }
@@ -401,9 +401,9 @@ class MemoryStorageTest {
     void invalidLimitsAndTimeoutsDoNotConsumeWork() throws Exception {
         try (var stores = new Stores(1, 1)) {
             stores.pending.admit(source(), message("one", 2));
-            assertThatThrownBy(() -> stores.router.selectAndStage(0)).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> stores.router.selectToRouter(0)).isInstanceOf(IllegalArgumentException.class);
             assertThatThrownBy(() -> stores.router.take(Duration.ofNanos(-1))).isInstanceOf(IllegalArgumentException.class);
-            assertThat(stores.router.selectAndStage(1)).isEqualTo(1);
+            assertThat(stores.router.selectToRouter(1)).isEqualTo(1);
             assertThat(stores.router.take(Duration.ofSeconds(Long.MAX_VALUE))).isPresent();
             assertThat(stores.router.take(Duration.ofMillis(1))).isEmpty();
         }

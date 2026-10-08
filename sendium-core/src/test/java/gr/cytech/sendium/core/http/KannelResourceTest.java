@@ -119,7 +119,7 @@ class KannelResourceTest {
             Response response = submit("https://callback.test/dlr");
             var source = ArgumentCaptor.forClass(SourceId.class);
             var message = ArgumentCaptor.forClass(StandardMessage.class);
-            verify(lifecycle.coordinator).admit(source.capture(), message.capture());
+            verify(lifecycle.coordinator).accept(source.capture(), message.capture());
             assertThat(response.getStatus()).isEqualTo(202);
             assertThat(source.getValue().value()).isEqualTo(UUID.fromString((String) response.getEntity()));
             var retained = lifecycle.pending.find(source.getValue()).orElseThrow();
@@ -132,13 +132,13 @@ class KannelResourceTest {
     }
 
     @Test
-    void fullOrQuiescingCoordinatorRejectsWithoutFallingBackToTheQueue() {
+    void fullOrShuttingDownCoordinatorRejectsWithoutFallingBackToTheQueue() {
         try (var lifecycle = new OutboundIngressFixture(1)) {
             when(resource.outboundCoordinators.isUnsatisfied()).thenReturn(false);
             when(resource.outboundCoordinators.get()).thenReturn(lifecycle.coordinator);
             assertThat(submit(null).getStatus()).isEqualTo(202);
             assertThat(submit(null).getStatus()).isEqualTo(503);
-            lifecycle.coordinator.quiesce();
+            lifecycle.coordinator.beginShutdown();
             assertThat(submit(null).getStatus()).isEqualTo(503);
             verifyNoInteractions(routerQueue);
         }
@@ -152,7 +152,7 @@ class KannelResourceTest {
         when(resource.outboundCoordinators.isUnsatisfied()).thenReturn(false);
         when(resource.outboundCoordinators.get()).thenReturn(coordinator);
         doThrow(new OutboundStorageException(OutboundStage.Role.PENDING, reason, "private storage details"))
-                .when(coordinator).admit(any(), any());
+                .when(coordinator).accept(any(), any());
         Response response = submit(null);
         int expected = switch (reason) {
             case UNSUPPORTED -> 400;

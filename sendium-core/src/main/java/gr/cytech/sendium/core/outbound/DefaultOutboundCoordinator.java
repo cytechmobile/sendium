@@ -107,11 +107,11 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public void quiesce() {
+    public void beginShutdown() {
         lock.lock();
         try {
             if (lifecycle == Lifecycle.RUNNING) {
-                lifecycle = Lifecycle.QUIESCING;
+                lifecycle = Lifecycle.SHUTTING_DOWN;
                 changed.signalAll();
             } else if (lifecycle == Lifecycle.NEW) {
                 throw unavailable(Role.PENDING, "Coordinator has not started");
@@ -122,11 +122,11 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public void admit(SourceId source, M message) {
-        admit(source, message, false);
+    public void accept(SourceId source, M message) {
+        accept(source, message, false);
     }
 
-    private void admit(SourceId source, M message, boolean held) {
+    private void accept(SourceId source, M message, boolean held) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(message, "message");
         lock.lock();
@@ -146,27 +146,27 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public void admitHeld(SourceId source, M message) {
-        admit(source, message, true);
+    public void acceptHeld(SourceId source, M message) {
+        accept(source, message, true);
     }
 
     @Override
-    public void publishReady(Set<SourceId> sources, M message) {
+    public void makeHeldReady(Set<SourceId> sources, M message) {
         lock.lock();
         try {
             requireActive(Role.PENDING);
-            pending.publishReady(sources, message);
+            pending.makeHeldReady(sources, message);
         } finally {
             lock.unlock();
         }
     }
 
     @Override
-    public int selectAndStage(int limit) {
+    public int selectToRouter(int limit) {
         lock.lock();
         try {
             requireRunning(Role.ROUTER_QUEUE);
-            return router.selectAndStage(limit);
+            return router.selectToRouter(limit);
         } finally {
             changed.signalAll();
             lock.unlock();
@@ -215,7 +215,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public void returnToRouter(Selected<M> selected) {
+    public void requeueForRouting(Selected<M> selected) {
         Objects.requireNonNull(selected, "selected");
         lock.lock();
         try {
@@ -240,7 +240,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public Routed<M> route(Selected<M> selected, Destination<M> destination) {
+    public Routed<M> recordToRouted(Selected<M> selected, Destination<M> destination) {
         Objects.requireNonNull(selected, "selected");
         Objects.requireNonNull(destination, "destination");
         lock.lock();
@@ -271,7 +271,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public Optional<Routed<M>> takeForDestination(String destination, Duration timeout) throws InterruptedException {
+    public Optional<Routed<M>> takeFromRouted(String destination, Duration timeout) throws InterruptedException {
         Objects.requireNonNull(destination, "destination");
         if (destination.isBlank()) {
             throw new IllegalArgumentException("Destination must not be blank");
@@ -326,7 +326,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public void returnToDestination(Routed<M> taken) {
+    public void returnToRouted(Routed<M> taken) {
         Objects.requireNonNull(taken, "taken");
         lock.lock();
         try {
@@ -484,7 +484,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 lifecycle = Lifecycle.CLOSED;
                 return;
             }
-            lifecycle = Lifecycle.QUIESCING;
+            lifecycle = Lifecycle.SHUTTING_DOWN;
             changed.signalAll();
             for (Context<M> context : selections.values()) {
                 if (context.attempt != null || (context.finishing && context.handoffAccepted)) {
@@ -591,7 +591,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     private void requireActive(Role role) {
-        if (lifecycle != Lifecycle.RUNNING && lifecycle != Lifecycle.QUIESCING) {
+        if (lifecycle != Lifecycle.RUNNING && lifecycle != Lifecycle.SHUTTING_DOWN) {
             throw unavailable(role, "Coordinator is not active");
         }
     }
@@ -617,7 +617,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     private enum Lifecycle {
-        NEW, RUNNING, QUIESCING, CLOSED
+        NEW, RUNNING, SHUTTING_DOWN, CLOSED
     }
 
     private static final class Attempt {

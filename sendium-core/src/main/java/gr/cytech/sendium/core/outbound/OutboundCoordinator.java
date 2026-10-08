@@ -29,41 +29,55 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
     void start();
 
     /**
-     * Stops new admission, selection, and takes. Existing routing, handoff, completion, and return
-     * operations remain valid while the application stops and joins execution. Idempotent.
+     * Begins shutdown by stopping new acceptance, selection, and takes. Existing routing, handoff,
+     * completion, and return operations remain valid while the application drains and stops execution.
+     * This does not drain providers, stop workers, or close stores. Idempotent.
      */
-    void quiesce();
+    void beginShutdown();
 
-    void admit(SourceId source, M message);
+    /** Accepts source ownership and makes the message ready for selection according to the store policy. */
+    void accept(SourceId source, M message);
 
     /** Accepts source ownership without making this source routable yet. */
-    void admitHeld(SourceId source, M message);
+    void acceptHeld(SourceId source, M message);
 
     /**
-     * Makes one execution message available to bounded selection using the original held source IDs.
+     * Makes already-accepted held sources available to bounded selection using one prepared execution message.
      * The caller decides which sources form an assembled message or an individual expired part.
-     * This is an existing-work transition and remains available during quiescence; new admissions do not.
+     * This is an existing-work transition and remains available while shutting down; new admissions do not.
      */
-    void publishReady(Set<SourceId> sources, M message);
+    void makeHeldReady(Set<SourceId> sources, M message);
 
-    int selectAndStage(int limit);
+    /** Selects at most limit eligible pending items into the router backlog, returning the newly staged count. */
+    int selectToRouter(int limit);
 
     Optional<Selected<M>> takeForRouting(Duration timeout) throws InterruptedException;
 
-    /** Returns unfinished routing work; this is not a transition from a worker back to routing. */
-    void returnToRouter(Selected<M> selected);
+    /**
+     * Requeues the current taken, unassigned selection for another routing attempt using its updated payload.
+     * Use the original take handle. This does not repeat pending selection, choose a destination, or accept
+     * new input; work with a retained destination intent cannot be requeued through this operation.
+     */
+    void requeueForRouting(Selected<M> selected);
 
     /**
-     * Records one destination before marking selected work routed; dispatch uses takeForDestination.
+     * Records one already-chosen destination before marking selected work routed. This operation does
+     * not perform routing lookup, run routing filters, or send to the provider; dispatch uses takeFromRouted.
      * The selection and its source set must match work owned by this coordinator. Routing integration
      * must reject copied-route requests as UNSUPPORTED before assignment or dispatch, even if lookup
      * yields only one destination. It must not drop copies or submit several assignments for one selection.
      */
-    Routed<M> route(Selected<M> selected, Destination<M> destination);
+    Routed<M> recordToRouted(Selected<M> selected, Destination<M> destination);
 
-    Optional<Routed<M>> takeForDestination(String destination, Duration timeout) throws InterruptedException;
+    /** Takes already-routed work for the named destination without completing its stored ownership or sending it. */
+    Optional<Routed<M>> takeFromRouted(String destination, Duration timeout) throws InterruptedException;
 
-    void returnToDestination(Routed<M> work);
+    /**
+     * Returns the current unfinished take to routed scheduling at the same recorded destination.
+     * Use the original take handle with its updated payload. Once terminal completion begins, retry
+     * handoff/cleanup instead of returning the work for provider redispatch.
+     */
+    void returnToRouted(Routed<M> work);
 
     /**
      * Reports terminal processing of all provider parts for this work, conditional on successful required
@@ -83,7 +97,7 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
     CompletionStage<Void> discard(SelectionId selection, CompletionStage<Void> requiredHandoff);
 
     /**
-     * After quiesce and application-owned stop/join, returns unfinished work to its owning stage and
+     * After beginShutdown and application-owned drain/stop/join, returns unfinished work to its owning stage and
      * closes stores. In-flight provider operations must first be resolved or drained by the application;
      * closing may not classify them as terminal. Closure is idempotent. Memory closure promises no
      * restart recovery, and a closed coordinator cannot be restarted.

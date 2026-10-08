@@ -54,14 +54,14 @@ class DefaultOutboundCoordinatorTest {
     void constructionIsPassiveAndStartupOwnsStageOrdering() {
         try (var h = new Harness()) {
             verifyNoInteractions(h.pending, h.router, h.routed);
-            fails(() -> h.coordinator.admit(source(), new Payload("one")), UNAVAILABLE);
+            fails(() -> h.coordinator.accept(source(), new Payload("one")), UNAVAILABLE);
             h.start();
             h.coordinator.start();
             var order = inOrder(h.pending, h.router, h.routed);
             order.verify(h.pending).open();
             order.verify(h.router).open();
             order.verify(h.routed).open();
-            h.coordinator.quiesce();
+            h.coordinator.beginShutdown();
             fails(h.coordinator::start, INVALID_TRANSITION);
         }
     }
@@ -114,7 +114,7 @@ class DefaultOutboundCoordinatorTest {
             assertThat(result.toCompletableFuture()).isNotDone();
             assertThat(h.pending.find(delivery.source())).isPresent();
             assertThat((Object) h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null))).isSameAs(result);
-            fails(() -> h.coordinator.returnToDestination(delivery.work), INVALID_TRANSITION);
+            fails(() -> h.coordinator.returnToRouted(delivery.work), INVALID_TRANSITION);
             handoff.complete(null);
             result.toCompletableFuture().join();
             var order = inOrder(h.routed, h.pending, h.router);
@@ -125,8 +125,8 @@ class DefaultOutboundCoordinatorTest {
             assertThat(h.pending.find(delivery.source())).isEmpty();
             h.coordinator.complete(delivery.work.id(), new CompletableFuture<>()).toCompletableFuture().join();
             verify(h.routed, times(1)).complete(delivery.work.id());
-            fails(() -> h.coordinator.route(delivery.selected, destination("A", "stale")), INVALID_TRANSITION);
-            fails(() -> h.coordinator.returnToDestination(delivery.work), INVALID_TRANSITION);
+            fails(() -> h.coordinator.recordToRouted(delivery.selected, destination("A", "stale")), INVALID_TRANSITION);
+            fails(() -> h.coordinator.returnToRouted(delivery.work), INVALID_TRANSITION);
         }
     }
 
@@ -145,8 +145,8 @@ class DefaultOutboundCoordinatorTest {
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
             assertThat(h.pending.find(delivery.source())).isPresent();
             verify(h.routed, never()).complete(any());
-            assertThat(h.coordinator.takeForDestination("A", Duration.ZERO)).isEmpty();
-            fails(() -> h.coordinator.returnToDestination(delivery.work), INVALID_TRANSITION);
+            assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
+            fails(() -> h.coordinator.returnToRouted(delivery.work), INVALID_TRANSITION);
             h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             assertThat(h.pending.find(delivery.source())).isEmpty();
         }
@@ -196,7 +196,7 @@ class DefaultOutboundCoordinatorTest {
         try (var h = new Harness().start()) {
             var delivery = h.delivery();
             var unrelated = source();
-            h.coordinator.admit(unrelated, new Payload("unrelated"));
+            h.coordinator.accept(unrelated, new Payload("unrelated"));
             doReturn(new Completed(delivery.selected.id(), Set.of(unrelated)))
                     .when(h.routed).complete(delivery.work.id());
             var completion = h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null));
@@ -220,7 +220,7 @@ class DefaultOutboundCoordinatorTest {
             var nextSource = source();
             var callback = completion.thenRun(() -> {
                 try {
-                    executor.submit(() -> h.coordinator.admit(nextSource, new Payload("next"))).get(1, TimeUnit.SECONDS);
+                    executor.submit(() -> h.coordinator.accept(nextSource, new Payload("next"))).get(1, TimeUnit.SECONDS);
                 } catch (Exception failure) {
                     throw new IllegalStateException(failure);
                 }
@@ -249,14 +249,14 @@ class DefaultOutboundCoordinatorTest {
             } else {
                 doThrow(new IllegalStateException("mark failed")).when(h.router).markRouted(selected.id());
             }
-            assertThatThrownBy(() -> h.coordinator.route(selected, destination("A", "chosen")))
+            assertThatThrownBy(() -> h.coordinator.recordToRouted(selected, destination("A", "chosen")))
                     .isInstanceOf(IllegalStateException.class);
-            fails(() -> h.coordinator.returnToRouter(selected), INVALID_TRANSITION);
-            fails(() -> h.coordinator.route(selected, destination("B", "different")), INVALID_TRANSITION);
-            fails(() -> h.coordinator.takeForDestination("A", Duration.ZERO), UNAVAILABLE);
+            fails(() -> h.coordinator.requeueForRouting(selected), INVALID_TRANSITION);
+            fails(() -> h.coordinator.recordToRouted(selected, destination("B", "different")), INVALID_TRANSITION);
+            fails(() -> h.coordinator.takeFromRouted("A", Duration.ZERO), UNAVAILABLE);
             doCallRealMethod().when(h.router).markRouted(selected.id());
-            var receipt = h.coordinator.route(selected, destination("A", "retry payload"));
-            var taken = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            var receipt = h.coordinator.recordToRouted(selected, destination("A", "retry payload"));
+            var taken = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             assertThat(taken.id()).isEqualTo(receipt.id());
             assertThat(taken.message().body).isEqualTo("chosen");
             h.coordinator.complete(taken.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
@@ -267,14 +267,14 @@ class DefaultOutboundCoordinatorTest {
     void destinationCapacityBackpressureDoesNotPreventExistingWorkFromCompleting() throws Exception {
         try (var h = new Harness(1).start()) {
             var first = h.select("first");
-            h.coordinator.route(first, destination("A", "first"));
+            h.coordinator.recordToRouted(first, destination("A", "first"));
             var second = h.select("second");
-            fails(() -> h.coordinator.route(second, destination("A", "second")), CAPACITY_EXCEEDED);
-            var taken = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            fails(() -> h.coordinator.recordToRouted(second, destination("A", "second")), CAPACITY_EXCEEDED);
+            var taken = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             assertThat(taken.selection()).isEqualTo(first.id());
             h.coordinator.complete(taken.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
-            h.coordinator.route(second, destination("A", "retry"));
-            taken = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            h.coordinator.recordToRouted(second, destination("A", "retry"));
+            taken = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             assertThat(taken.message().body).isEqualTo("second");
             h.coordinator.complete(taken.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
@@ -284,9 +284,9 @@ class DefaultOutboundCoordinatorTest {
     void queuedReceiptsCannotCompleteBeforeTheyAreTaken() throws Exception {
         try (var h = new Harness().start()) {
             var selected = h.select("one");
-            var receipt = h.coordinator.route(selected, destination("A", "one"));
+            var receipt = h.coordinator.recordToRouted(selected, destination("A", "one"));
             fails(() -> h.coordinator.complete(receipt.id(), CompletableFuture.completedStage(null)), INVALID_TRANSITION);
-            var taken = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            var taken = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             h.coordinator.complete(taken.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
     }
@@ -296,37 +296,37 @@ class DefaultOutboundCoordinatorTest {
         try (var h = new Harness().start()) {
             var selected = h.select("one");
             doThrow(new IllegalStateException("mark failed")).when(h.router).markRouted(selected.id());
-            assertThatThrownBy(() -> h.coordinator.route(selected, destination("A", "one"))).isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> h.coordinator.recordToRouted(selected, destination("A", "one"))).isInstanceOf(IllegalStateException.class);
             doThrow(new IllegalStateException("return failed")).when(h.routed).release(any());
-            assertThatThrownBy(() -> h.coordinator.takeForDestination("A", Duration.ZERO)).isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> h.coordinator.takeFromRouted("A", Duration.ZERO)).isInstanceOf(IllegalStateException.class);
             doCallRealMethod().when(h.router).markRouted(selected.id());
             doCallRealMethod().when(h.routed).release(any());
-            h.coordinator.route(selected, destination("A", "one"));
-            var taken = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            h.coordinator.recordToRouted(selected, destination("A", "one"));
+            var taken = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             h.coordinator.complete(taken.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
     }
 
     @Test
-    void routerAndDestinationReturnsPreserveMutationsAndRejectForgedTakes() throws Exception {
+    void routingRequeueAndRoutedReturnPreserveMutationsAndRejectForgedTakes() throws Exception {
         try (var h = new Harness().start()) {
             var selected = h.select("original");
             selected.message().body = "filtered";
-            h.coordinator.returnToRouter(selected);
+            h.coordinator.requeueForRouting(selected);
             var next = h.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            h.coordinator.returnToRouter(selected);
+            h.coordinator.requeueForRouting(selected);
             assertThat(next.message().body).isEqualTo("filtered");
             assertThat(h.coordinator.takeForRouting(Duration.ZERO)).isEmpty();
-            fails(() -> h.coordinator.route(new Selected<>(next.id(), next.sources(), next.message()), destination("A", "fake")),
+            fails(() -> h.coordinator.recordToRouted(new Selected<>(next.id(), next.sources(), next.message()), destination("A", "fake")),
                     INVALID_TRANSITION);
-            h.coordinator.route(next, new Destination<>("A", next.message()));
-            var first = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            h.coordinator.recordToRouted(next, new Destination<>("A", next.message()));
+            var first = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             first.message().body = "retry";
-            h.coordinator.returnToDestination(first);
-            var second = h.coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
-            h.coordinator.returnToDestination(first);
+            h.coordinator.returnToRouted(first);
+            var second = h.coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
+            h.coordinator.returnToRouted(first);
             assertThat(second.message().body).isEqualTo("retry");
-            assertThat(h.coordinator.takeForDestination("A", Duration.ZERO)).isEmpty();
+            assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
             h.coordinator.complete(second.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
     }
@@ -338,7 +338,7 @@ class DefaultOutboundCoordinatorTest {
             var handoff = new CompletableFuture<Void>();
             var result = h.coordinator.discard(selected.id(), handoff);
             assertThat(h.pending.find(selected.sources().iterator().next())).isPresent();
-            fails(() -> h.coordinator.returnToRouter(selected), INVALID_TRANSITION);
+            fails(() -> h.coordinator.requeueForRouting(selected), INVALID_TRANSITION);
             handoff.completeExceptionally(new IllegalStateException("handoff failed"));
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
             h.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
@@ -358,13 +358,13 @@ class DefaultOutboundCoordinatorTest {
         var sources = Set.of(source(), source());
         try (var coordinator = new DefaultOutboundCoordinator<>(pending, router, routed)) {
             coordinator.start();
-            sources.forEach(source -> coordinator.admitHeld(source, new Payload("part")));
-            coordinator.publishReady(sources, new Payload("aggregate"));
-            coordinator.selectAndStage(1);
+            sources.forEach(source -> coordinator.acceptHeld(source, new Payload("part")));
+            coordinator.makeHeldReady(sources, new Payload("aggregate"));
+            coordinator.selectToRouter(1);
             var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.sources()).isEqualTo(sources);
-            coordinator.route(selected, destination("A", "aggregate"));
-            var taken = coordinator.takeForDestination("A", Duration.ZERO).orElseThrow();
+            coordinator.recordToRouted(selected, destination("A", "aggregate"));
+            var taken = coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow();
             AtomicBoolean first = new AtomicBoolean(true);
             doAnswer(call -> {
                 if (first.getAndSet(false)) {
@@ -376,10 +376,10 @@ class DefaultOutboundCoordinatorTest {
             var result = coordinator.complete(taken.id(), CompletableFuture.completedStage(null));
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
             assertThat(sources.stream().filter(source -> pending.find(source).isPresent()).count()).isEqualTo(1);
-            sources.forEach(source -> coordinator.admit(source, new Payload("duplicate during cleanup")));
-            sources.forEach(source -> coordinator.admitHeld(source, new Payload("held duplicate during cleanup")));
+            sources.forEach(source -> coordinator.accept(source, new Payload("duplicate during cleanup")));
+            sources.forEach(source -> coordinator.acceptHeld(source, new Payload("held duplicate during cleanup")));
             assertThat(sources.stream().filter(source -> pending.find(source).isPresent()).count()).isEqualTo(1);
-            fails(() -> coordinator.publishReady(sources, new Payload("late publication")), INVALID_TRANSITION);
+            fails(() -> coordinator.makeHeldReady(sources, new Payload("late publication")), INVALID_TRANSITION);
             coordinator.complete(taken.id(), new CompletableFuture<>()).toCompletableFuture().join();
             sources.forEach(source -> assertThat(pending.find(source)).isEmpty());
             verify(routed, times(1)).complete(taken.id());
@@ -389,20 +389,20 @@ class DefaultOutboundCoordinatorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void quiescenceWakesWaitingTakesAndKeepsCompletionAvailable(boolean destination) throws Exception {
+    void beginningShutdownWakesWaitingTakesAndKeepsCompletionAvailable(boolean destination) throws Exception {
         try (var h = new Harness().start(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var delivery = h.delivery();
             AtomicReference<Thread> thread = new AtomicReference<>();
             var waiting = executor.submit(() -> {
                 thread.set(Thread.currentThread());
-                return destination ? h.coordinator.takeForDestination("empty", Duration.ofSeconds(3)) :
+                return destination ? h.coordinator.takeFromRouted("empty", Duration.ofSeconds(3)) :
                         h.coordinator.takeForRouting(Duration.ofSeconds(3));
             });
             awaitWaiting(thread);
-            h.coordinator.quiesce();
+            h.coordinator.beginShutdown();
             assertThatThrownBy(() -> waiting.get(1, TimeUnit.SECONDS)).hasCauseInstanceOf(OutboundStorageException.class);
-            fails(() -> h.coordinator.admit(source(), new Payload("new")), UNAVAILABLE);
-            fails(() -> h.coordinator.selectAndStage(1), UNAVAILABLE);
+            fails(() -> h.coordinator.accept(source(), new Payload("new")), UNAVAILABLE);
+            fails(() -> h.coordinator.selectToRouter(1), UNAVAILABLE);
             h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
     }
@@ -416,16 +416,16 @@ class DefaultOutboundCoordinatorTest {
                 return h.coordinator.takeForRouting(Duration.ofSeconds(3));
             });
             awaitWaiting(thread);
-            h.coordinator.admit(source(), new Payload("one"));
-            h.coordinator.selectAndStage(1);
+            h.coordinator.accept(source(), new Payload("one"));
+            h.coordinator.selectToRouter(1);
             var selected = waiting.get(1, TimeUnit.SECONDS).orElseThrow();
             thread.set(null);
             var destination = executor.submit(() -> {
                 thread.set(Thread.currentThread());
-                return h.coordinator.takeForDestination("A", Duration.ofSeconds(3));
+                return h.coordinator.takeFromRouted("A", Duration.ofSeconds(3));
             });
             awaitWaiting(thread);
-            h.coordinator.route(selected, destination("A", "one"));
+            h.coordinator.recordToRouted(selected, destination("A", "one"));
             var taken = destination.get(1, TimeUnit.SECONDS).orElseThrow();
             h.coordinator.complete(taken.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
@@ -436,7 +436,7 @@ class DefaultOutboundCoordinatorTest {
         try (var h = new Harness().start()) {
             var delivery = h.delivery();
             var routing = h.select("not routed");
-            h.coordinator.quiesce();
+            h.coordinator.beginShutdown();
             h.coordinator.close();
             var order = inOrder(h.router, h.routed, h.pending);
             order.verify(h.router).release(routing);
@@ -570,15 +570,15 @@ class DefaultOutboundCoordinatorTest {
         }
 
         private Selected<Payload> select(String body) throws InterruptedException {
-            coordinator.admit(source(), new Payload(body));
-            coordinator.selectAndStage(1);
+            coordinator.accept(source(), new Payload(body));
+            coordinator.selectToRouter(1);
             return coordinator.takeForRouting(Duration.ZERO).orElseThrow();
         }
 
         private Delivery delivery() throws InterruptedException {
             var selected = select("original");
-            coordinator.route(selected, new Destination<>("A", selected.message()));
-            return new Delivery(selected, coordinator.takeForDestination("A", Duration.ZERO).orElseThrow());
+            coordinator.recordToRouted(selected, new Destination<>("A", selected.message()));
+            return new Delivery(selected, coordinator.takeFromRouted("A", Duration.ZERO).orElseThrow());
         }
 
         @Override

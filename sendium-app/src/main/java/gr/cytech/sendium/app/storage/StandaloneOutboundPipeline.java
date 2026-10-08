@@ -93,7 +93,7 @@ public class StandaloneOutboundPipeline {
             if (configuration.getBlnPrpt(AbstractRoutingManager._pause)) {
                 return;
             }
-            coordinator.selectAndStage(batchSize);
+            coordinator.selectToRouter(batchSize);
             for (int i = 0; i < batchSize; i++) {
                 var selected = coordinator.takeForRouting(Duration.ZERO);
                 if (selected.isEmpty()) {
@@ -129,7 +129,7 @@ public class StandaloneOutboundPipeline {
                         var execution = dispatch.submitToProvider(work.orElseThrow(), (SmppClientWorker<StandardMessage>) client);
                         executions.put(work.orElseThrow().id(), execution);
                     } catch (Exception failure) {
-                        coordinator.returnToDestination(work.orElseThrow());
+                        coordinator.returnToRouted(work.orElseThrow());
                         throw failure;
                     }
                 }
@@ -160,7 +160,7 @@ public class StandaloneOutboundPipeline {
         if (dispatch == null) {
             return;
         }
-        dispatch.quiesce();
+        dispatch.beginShutdown();
         processors.shutdown();
         while (!processors.awaitTermination(1, TimeUnit.SECONDS)) {
             logger.warn("Waiting for standalone outbound processors to stop before ownership restoration");
