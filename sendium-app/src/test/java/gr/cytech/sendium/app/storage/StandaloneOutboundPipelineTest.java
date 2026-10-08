@@ -67,7 +67,7 @@ class StandaloneOutboundPipelineTest {
             assertThat(providers.message.body).isEqualTo("Hello");
             assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
             assertThat(client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(503);
-            assertThat(coordinator.selectAndStage(1)).isZero();
+            assertThat(coordinator.selectToRouter(1)).isZero();
 
             providers.handoff.complete(null);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);

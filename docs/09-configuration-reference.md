@@ -70,10 +70,11 @@ profile is retained for the process lifetime. Startup logs the effective profile
 standalone pipeline binds HTTP/SMPP to one shared coordinator and executes bounded selection, routing,
 SMPP-client submission, retries and terminal handoffs. All capacity/batch settings must be positive.
 Pending capacity counts retained accepted sources (including held multipart parts); router capacity
-counts queued plus taken unassigned selections. Routed capacity equals pending source capacity, so a
-recorded selection cannot exhaust destination-record slots while its sources fit in pending storage.
+counts queued plus taken unassigned selections. Routed capacity equals pending source capacity, so
+normal source-retaining operation does not introduce a smaller destination-record bound. Partial terminal
+cleanup may still occupy routed slots after sources are removed; such cleanup failures require retry.
 Selection and each destination take loop process at most the configured batch size per poll.
-See [Outbound Storage Contracts](14-outbound-storage.md).
+See [Outbound Message Storage](14-outbound-storage.md).
 
 The producer and startup observer live only in `sendium-app`. Embedding `sendium-core` does not
 activate this validation, configure an outbound coordinator, or enforce the standalone profile list.
@@ -135,4 +136,4 @@ When the HTTP server is running, Sendium exposes:
 - [SMPP Configuration](04-smpp-configuration.md)
 - [Routing Engine](05-routing-engine.md)
 - [DLR Persistence](13-dlr-persistence.md)
-- [Outbound Storage Contracts](14-outbound-storage.md)
+- [Outbound Message Storage](14-outbound-storage.md)

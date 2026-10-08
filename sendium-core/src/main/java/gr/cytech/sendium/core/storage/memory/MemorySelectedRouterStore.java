@@ -74,7 +74,7 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
     }
 
     @Override
-    public int selectAndStage(int limit) {
+    public int selectToRouter(int limit) {
         if (limit <= 0) {
             throw new IllegalArgumentException("Selection limit must be positive");
         }

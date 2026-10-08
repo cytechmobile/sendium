@@ -38,7 +38,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     private final boolean ownsScheduler;
     private final ConcurrentMap<SmppClientWorker<StandardMessage>, Semaphore> workerSlots = new ConcurrentHashMap<>();
     private final ConcurrentMap<WorkId, CompletionStage<Void>> activeExecutions = new ConcurrentHashMap<>();
-    private boolean quiescing;
+    private boolean shuttingDown;
     private final ConcurrentMap<SelectionId, PendingRouting> routingTransitions = new ConcurrentHashMap<>();
 
     public StandardOutboundDispatch(OutboundCoordinator<StandardMessage> coordinator, StandardRoutingManager routing) {
@@ -76,8 +76,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
             }
             return Optional.of(recordRouting(pending));
         }
-        if (quiescing) {
-            coordinator.returnToRouter(selected);
+        if (shuttingDown) {
+            coordinator.requeueForRouting(selected);
             return Optional.empty();
         }
         RoutingLookupResult result;
@@ -91,18 +91,18 @@ public final class StandardOutboundDispatch implements AutoCloseable {
             if (failure.getStatusCode() == FilterStatusCodes.RETRY) {
                 selected.message().rtxCnt++;
             }
-            coordinator.returnToRouter(selected);
+            coordinator.requeueForRouting(selected);
             throw failure;
         } catch (IOException | RuntimeException failure) {
-            coordinator.returnToRouter(selected);
+            coordinator.requeueForRouting(selected);
             throw failure;
         }
         if (result.getDestinations().isEmpty()) {
-            coordinator.returnToRouter(selected);
+            coordinator.requeueForRouting(selected);
             return Optional.empty();
         }
         if (result.getDestinations().size() != 1) {
-            coordinator.returnToRouter(selected);
+            coordinator.requeueForRouting(selected);
             throw new OutboundStorageException(OutboundStage.Role.ROUTER_QUEUE,
                     OutboundStorageException.Reason.UNSUPPORTED, "Lifecycle routing requires one destination");
         }
@@ -133,14 +133,14 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     }
 
     private Routed<StandardMessage> recordRouting(PendingRouting transition) {
-        var recorded = coordinator.route(transition.selected(), transition.destination());
+        var recorded = coordinator.recordToRouted(transition.selected(), transition.destination());
         routingTransitions.remove(transition.selected().id(), transition);
         return recorded;
     }
 
     /** Takes recorded work for provider processing; taking or enqueuing it is not terminal completion. */
     public Optional<Routed<StandardMessage>> takeForProvider(String destination, Duration timeout) throws InterruptedException {
-        return coordinator.takeForDestination(destination, timeout);
+        return coordinator.takeFromRouted(destination, timeout);
     }
 
     /** Runs an explicitly taken SMPP work item and carries its ownership through replacement attempts. */
@@ -182,9 +182,9 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     }
 
     /** Stops new admission/takes and dispatch; existing provider retries and callbacks remain enabled. */
-    public synchronized void quiesce() {
-        coordinator.quiesce();
-        quiescing = true;
+    public synchronized void beginShutdown() {
+        coordinator.beginShutdown();
+        shuttingDown = true;
     }
 
     /** Waits for terminal handoffs and cleanup. A timeout or failed handoff leaves ownership intact. */
@@ -195,8 +195,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
         CompletableFuture<?>[] completions;
         synchronized (this) {
-            if (!quiescing) {
-                throw new IllegalStateException("Quiesce dispatch before awaiting provider drain");
+            if (!shuttingDown) {
+                throw new IllegalStateException("Begin dispatch shutdown before awaiting provider drain");
             }
             completions = activeExecutions.values().stream().map(CompletionStage::toCompletableFuture)
                     .toArray(CompletableFuture[]::new);
@@ -223,8 +223,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     }
 
     private void requireDispatching() {
-        if (quiescing) {
-            throw new IllegalStateException("Outbound dispatch is quiescing");
+        if (shuttingDown) {
+            throw new IllegalStateException("Outbound dispatch is shutting down");
         }
     }
 
@@ -238,7 +238,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     /** Call after drain and execution-loop stop/join; parent stores remain application-owned. */
     @Override
     public synchronized void close() {
-        quiesce();
+        beginShutdown();
         removeSuccessfulExecutions();
         if (!activeExecutions.isEmpty()) {
             throw new IllegalStateException("Drain provider executions before closing outbound dispatch");

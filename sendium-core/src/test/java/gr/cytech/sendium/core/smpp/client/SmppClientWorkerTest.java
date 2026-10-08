@@ -64,15 +64,15 @@ class SmppClientWorkerTest {
                 var secondPart = messageWithNetwork();
                 secondPart.serial = secondSource.value().toString();
                 secondPart.body = "a".repeat(100);
-                fixture.coordinator.admitHeld(firstSource, firstPart);
-                fixture.coordinator.admitHeld(secondSource, secondPart);
-                assertThat(fixture.coordinator.selectAndStage(2)).isZero();
+                fixture.coordinator.acceptHeld(firstSource, firstPart);
+                fixture.coordinator.acceptHeld(secondSource, secondPart);
+                assertThat(fixture.coordinator.selectToRouter(2)).isZero();
                 var prepared = messageWithNetwork();
                 prepared.serial = firstPart.serial;
                 prepared.body = firstPart.body + secondPart.body;
                 prepared.reassembledParts = new java.util.ArrayList<>(java.util.List.of(firstPart.serial, secondPart.serial));
-                fixture.coordinator.publishReady(Set.of(firstSource, secondSource), prepared);
-                assertThat(fixture.coordinator.selectAndStage(2)).isEqualTo(1);
+                fixture.coordinator.makeHeldReady(Set.of(firstSource, secondSource), prepared);
+                assertThat(fixture.coordinator.selectToRouter(2)).isEqualTo(1);
                 var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
                 assertThatThrownBy(() -> dispatch.routeSelected(selected))
                         .isInstanceOfSatisfying(OutboundStorageException.class, failure ->
@@ -88,7 +88,7 @@ class SmppClientWorkerTest {
                 var execution = dispatch.submitToProvider(parent, first);
                 first.awaitRequests(2);
                 routing.use(second.getFullName() + "::default:");
-                dispatch.quiesce();
+                dispatch.beginShutdown();
                 assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
                 respond(handler(first), first.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
                 second.awaitRequests(2);
@@ -134,14 +134,14 @@ class SmppClientWorkerTest {
             for (int index = 0; index < 2; index++) {
                 var message = messageWithNetwork();
                 message.body = "hello";
-                fixture.coordinator.admit(new SourceId(UUID.randomUUID()), message);
+                fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message);
             }
-            fixture.coordinator.selectAndStage(2);
+            fixture.coordinator.selectToRouter(2);
             for (int index = 0; index < 2; index++) {
                 var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-                fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
+                fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
                 executions.add(dispatch.submitToProvider(
-                        fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow(), worker));
+                        fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow(), worker));
             }
             assertThat(worker.rateEntered.await(5, TimeUnit.SECONDS)).isTrue();
             scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
@@ -178,14 +178,14 @@ class SmppClientWorkerTest {
                 var message = messageWithNetwork();
                 message.body = "hello";
                 SourceId source = new SourceId(UUID.randomUUID());
-                fixture.coordinator.admit(source, message);
-                fixture.coordinator.selectAndStage(1);
+                fixture.coordinator.accept(source, message);
+                fixture.coordinator.selectToRouter(1);
                 var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-                fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
-                var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
+                fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+                var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
                 var execution = dispatch.submitToProvider(work, worker);
                 worker.awaitRequests(1);
-                dispatch.quiesce();
+                dispatch.beginShutdown();
                 assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
                 assertThatThrownBy(() -> dispatch.submitToProvider(work, worker)).isInstanceOf(IllegalStateException.class);
                 respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
@@ -271,11 +271,11 @@ class SmppClientWorkerTest {
                 SourceId source = new SourceId(UUID.randomUUID());
                 var message = messageWithNetwork();
                 message.body = "a".repeat(200);
-                fixture.coordinator.admit(source, message);
-                fixture.coordinator.selectAndStage(1);
+                fixture.coordinator.accept(source, message);
+                fixture.coordinator.selectToRouter(1);
                 var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-                fixture.coordinator.route(selected, new Destination<>(first.getFullName(), selected.message()));
-                var parent = fixture.coordinator.takeForDestination(first.getFullName(), Duration.ZERO).orElseThrow();
+                fixture.coordinator.recordToRouted(selected, new Destination<>(first.getFullName(), selected.message()));
+                var parent = fixture.coordinator.takeFromRouted(first.getFullName(), Duration.ZERO).orElseThrow();
                 var execution = retryDispatch.submitToProvider(parent, first);
                 first.awaitRequests(2);
                 respond(handler(first), first.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
@@ -306,12 +306,12 @@ class SmppClientWorkerTest {
             var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
             worker.testPaused = true;
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, messageWithNetwork());
-            fixture.coordinator.selectAndStage(1);
+            fixture.coordinator.accept(source, messageWithNetwork());
+            fixture.coordinator.selectToRouter(1);
             var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             selected.message().body = "hello";
-            fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
-            var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
+            fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
             var execution = dispatch.submitToProvider(work, worker);
             assertThat(worker.pauseChecked.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(worker.coordinatedRequests).isEmpty();
@@ -395,11 +395,11 @@ class SmppClientWorkerTest {
             var message = messageWithNetwork();
             message.body = "a".repeat(200);
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message);
-            fixture.coordinator.selectAndStage(1);
+            fixture.coordinator.accept(source, message);
+            fixture.coordinator.selectToRouter(1);
             var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
-            var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
+            fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
             var routing = mock(StandardRoutingManager.class);
             when(routing.lookupForLifecycle(org.mockito.ArgumentMatchers.any())).thenReturn(
                     new RoutingLookupResult(java.util.List.of(worker), true));
@@ -428,11 +428,11 @@ class SmppClientWorkerTest {
             var message = messageWithNetwork();
             message.body = "a".repeat(200);
             SourceId source = new SourceId(UUID.randomUUID());
-            fixture.coordinator.admit(source, message);
-            fixture.coordinator.selectAndStage(1);
+            fixture.coordinator.accept(source, message);
+            fixture.coordinator.selectToRouter(1);
             var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            fixture.coordinator.route(selected, new Destination<>(worker.getFullName(), selected.message()));
-            var work = fixture.coordinator.takeForDestination(worker.getFullName(), Duration.ZERO).orElseThrow();
+            fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class));
             var execution = dispatch.submitToProvider(work, worker);
             worker.awaitRequests(2);
