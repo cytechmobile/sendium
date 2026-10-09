@@ -260,6 +260,109 @@ class SmppClientWorkerTest {
     }
 
     @Test
+    void blockedWorkerUsesItsConfiguredSlotsWithoutBlockingOtherDestinationsOrTimers() throws Exception {
+        var scheduler = new ScheduledThreadPoolExecutor(1);
+        var rateGate = new CompletableFuture<Void>();
+        var blocked = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        blocked.threadCount = 3;
+        blocked.rateGate = rateGate;
+        blocked.rateEntered = new CountDownLatch(3);
+        var healthy = spy(new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker()));
+        when(healthy.getFullName()).thenReturn("smppclient.healthy");
+        try (var fixture = new OutboundIngressFixture(5)) {
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class), scheduler);
+            var executions = new java.util.ArrayList<StandardOutboundDispatch.ProviderExecution>();
+            try {
+                for (int i = 0; i < 4; i++) {
+                    executions.add(submitOwned(dispatch, fixture, blocked));
+                }
+                assertThat(blocked.rateEntered.await(5, TimeUnit.SECONDS)).isTrue();
+                scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                assertThat(blocked.rateChecks).isEqualTo(3);
+                assertThat(blocked.rateThreads).hasSize(3);
+                assertThat(blocked.coordinatedRequests).isEmpty();
+
+                var healthyExecution = submitOwned(dispatch, fixture, healthy);
+                healthy.awaitRequests(1);
+                respond(handler(healthy), healthy.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+                healthyExecution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(blocked.rateChecks).isEqualTo(3);
+                executions.forEach(execution -> assertThat(execution.completion().toCompletableFuture()).isNotDone());
+
+                dispatch.beginShutdown();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
+                rateGate.complete(null);
+                blocked.awaitRequests(4);
+                blocked.coordinatedRequests.forEach(request -> respond(handler(blocked), request, SmppConstants.STATUS_OK));
+                for (var execution : executions) {
+                    execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                }
+                assertThat(blocked.rateChecks).isEqualTo(4);
+                assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(1))).isTrue();
+            } finally {
+                rateGate.complete(null);
+                dispatch.close();
+            }
+            for (Thread thread : blocked.rateThreads) {
+                thread.join(Duration.ofSeconds(5));
+                assertThat(thread.isAlive()).isFalse();
+            }
+            for (Thread thread : healthy.rateThreads) {
+                thread.join(Duration.ofSeconds(5));
+                assertThat(thread.isAlive()).isFalse();
+            }
+            assertThat(scheduler.isShutdown()).isFalse();
+        } finally {
+            rateGate.complete(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void transitionMaintenanceRetiresStoppedWorkerPoolAndReplacementUsesItsOwnPool() throws Exception {
+        var stopped = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        var replacement = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        try (var fixture = new OutboundIngressFixture(1);
+             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class))) {
+            var first = submitOwned(dispatch, fixture, stopped);
+            stopped.awaitRequests(1);
+            respond(handler(stopped), stopped.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            first.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+            stopped.keepOnRunning = false;
+            dispatch.retryRoutingTransitions();
+            for (Thread thread : stopped.rateThreads) {
+                thread.join(Duration.ofSeconds(5));
+                assertThat(thread.isAlive()).isFalse();
+            }
+
+            var second = submitOwned(dispatch, fixture, replacement);
+            replacement.awaitRequests(1);
+            respond(handler(replacement), replacement.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            second.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertThat(stopped.coordinatedRequests).hasSize(1);
+            assertThat(replacement.rateThreads).doesNotContainAnyElementsOf(stopped.rateThreads);
+        }
+        for (Thread thread : replacement.rateThreads) {
+            thread.join(Duration.ofSeconds(5));
+            assertThat(thread.isAlive()).isFalse();
+        }
+    }
+
+    private static StandardOutboundDispatch.ProviderExecution submitOwned(StandardOutboundDispatch dispatch,
+            OutboundIngressFixture fixture, TestSmppClientWorker worker) throws Exception {
+        var message = messageWithNetwork();
+        message.body = "hello";
+        fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message);
+        fixture.coordinator.selectToRouter(1);
+        var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+        fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+        return dispatch.submitToProvider(
+                fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow(), worker);
+    }
+
+    @Test
     void failedRetryLookupCanResumeWithoutLosingParentOrRepeatingOriginalSubmission() throws Exception {
         var scheduler = new ScheduledThreadPoolExecutor(1);
         try (var fixture = new OutboundIngressFixture(1)) {
@@ -974,7 +1077,8 @@ class SmppClientWorkerTest {
         private volatile int preparations;
         private volatile int rateChecks;
         private CompletableFuture<Void> rateGate;
-        private final CountDownLatch rateEntered = new CountDownLatch(1);
+        private CountDownLatch rateEntered = new CountDownLatch(1);
+        private final Set<Thread> rateThreads = java.util.concurrent.ConcurrentHashMap.newKeySet();
         private boolean mapCharacters;
         private gr.cytech.sendium.external.filter.FilterStatusCodes preparationStatus;
         private final CountDownLatch pauseChecked = new CountDownLatch(1);
@@ -987,7 +1091,10 @@ class SmppClientWorkerTest {
 
         @Override
         protected void applyRateLimit() {
-            rateChecks++;
+            synchronized (this) {
+                rateChecks++;
+            }
+            rateThreads.add(Thread.currentThread());
             if (rateGate != null) {
                 rateEntered.countDown();
                 rateGate.join();
