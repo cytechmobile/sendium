@@ -54,6 +54,8 @@ public class StandaloneOutboundPipeline {
     private StandardOutboundDispatch dispatch;
     private ScheduledExecutorService processors;
     private int batchSize;
+    private final Object schedulingLock = new Object();
+    private boolean stopping;
     private final Map<WorkId, StandardOutboundDispatch.ProviderExecution> executions = new ConcurrentHashMap<>();
 
     @Produces
@@ -83,15 +85,34 @@ public class StandaloneOutboundPipeline {
             thread.setDaemon(true);
             return thread;
         });
-        processors.scheduleWithFixedDelay(this::process, 0, 100, TimeUnit.MILLISECONDS);
+        scheduleNextCycle(0);
         logger.info("Standalone outbound memory pipeline activated");
     }
 
-    void process() {
+    private void scheduleNextCycle(long delay) {
+        synchronized (schedulingLock) {
+            if (!stopping) {
+                processors.schedule(this::runProcessingCycle, delay, TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    private void runProcessingCycle() {
+        synchronized (schedulingLock) {
+            if (stopping) {
+                return;
+            }
+        }
+        boolean progressed = process();
+        scheduleNextCycle(progressed ? 0 : 100);
+    }
+
+    boolean process() {
+        boolean progressed = false;
         try {
             retryExecutions();
             if (configuration.getBlnPrpt(AbstractRoutingManager._pause)) {
-                return;
+                return false;
             }
             coordinator.selectToRouter(batchSize);
             for (int i = 0; i < batchSize; i++) {
@@ -100,7 +121,9 @@ public class StandaloneOutboundPipeline {
                     break;
                 }
                 try {
-                    dispatch.routeSelected(selected.orElseThrow());
+                    if (dispatch.routeSelected(selected.orElseThrow()).isPresent()) {
+                        progressed = true;
+                    }
                 } catch (Exception failure) {
                     logFailure("routing", failure);
                 }
@@ -128,6 +151,7 @@ public class StandaloneOutboundPipeline {
                     try {
                         var execution = dispatch.submitToProvider(work.orElseThrow(), (SmppClientWorker<StandardMessage>) client);
                         executions.put(work.orElseThrow().id(), execution);
+                        progressed = true;
                     } catch (Exception failure) {
                         coordinator.returnToRouted(work.orElseThrow());
                         throw failure;
@@ -139,6 +163,7 @@ public class StandaloneOutboundPipeline {
         } catch (Exception failure) {
             logFailure("provider dispatch", failure);
         }
+        return progressed;
     }
 
     private void retryExecutions() {
@@ -161,7 +186,10 @@ public class StandaloneOutboundPipeline {
             return;
         }
         dispatch.beginShutdown();
-        processors.shutdown();
+        synchronized (schedulingLock) {
+            stopping = true;
+            processors.shutdown();
+        }
         while (!processors.awaitTermination(1, TimeUnit.SECONDS)) {
             logger.warn("Waiting for standalone outbound processors to stop before ownership restoration");
         }

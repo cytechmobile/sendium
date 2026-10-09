@@ -126,7 +126,10 @@ A group of N accepted multipart sources uses N pending slots but one selected sl
 Partial terminal cleanup can retain routed records after source removal, so equal capacities do not
 eliminate cleanup-related backpressure or provide cross-store transactions.
 
-The poller has a 100-millisecond fixed delay after each cycle. Batch size is not TPS or provider
+The processor schedules the next bounded cycle without a mandatory delay after successful routing
+or provider scheduling. Idle, paused, or unsuccessful cycles back off for 100 milliseconds;
+selection or returning an unroutable item alone does not count as progress. Shutdown prevents
+further cycle scheduling. Batch size is not TPS or provider
 concurrency: attempts use the worker's shared rate limiter and a dispatcher-owned execution pool
 sized by its `threadCount`. A sending slot is reserved before executor submission, bounding queued
 plus executing preparation tasks. The default shared two-thread scheduler handles destination
