@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,6 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -36,9 +38,10 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     private final StandardRoutingManager routing;
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
-    private final ConcurrentMap<SmppClientWorker<StandardMessage>, Semaphore> workerSlots = new ConcurrentHashMap<>();
+    private final ConcurrentMap<SmppClientWorker<StandardMessage>, WorkerExecution> workerExecutors = new ConcurrentHashMap<>();
     private final ConcurrentMap<WorkId, CompletionStage<Void>> activeExecutions = new ConcurrentHashMap<>();
     private boolean shuttingDown;
+    private boolean closed;
     private final ConcurrentMap<SelectionId, PendingRouting> routingTransitions = new ConcurrentHashMap<>();
 
     public StandardOutboundDispatch(OutboundCoordinator<StandardMessage> coordinator, StandardRoutingManager routing) {
@@ -115,6 +118,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
     /** Retries recording the original routing intent without rerunning lookup or filters. */
     public synchronized void retryRoutingTransitions() {
+        retireStoppedWorkers();
         RuntimeException failure = null;
         for (var transition : List.copyOf(routingTransitions.values())) {
             try {
@@ -246,9 +250,29 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         if (!routingTransitions.isEmpty()) {
             throw new IllegalStateException("Resolve unfinished routing transitions before closing outbound dispatch");
         }
+        closed = true;
+        workerExecutors.values().forEach(execution -> execution.executor.shutdown());
+        workerExecutors.clear();
         if (ownsScheduler) {
             scheduler.shutdown();
         }
+    }
+
+    private synchronized WorkerExecution executionFor(SmppClientWorker<StandardMessage> worker) {
+        if (closed) {
+            throw new IllegalStateException("Outbound dispatch is closed");
+        }
+        return workerExecutors.computeIfAbsent(worker, WorkerExecution::new);
+    }
+
+    private void retireStoppedWorkers() {
+        workerExecutors.entrySet().removeIf(entry -> {
+            if (entry.getKey().isKeepOnRunning()) {
+                return false;
+            }
+            entry.getValue().executor.shutdown();
+            return true;
+        });
     }
 
     /** Completes explicitly supplied provider outcomes once all required part handoffs succeed. */
@@ -262,6 +286,21 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         CompletableFuture<?>[] parts = handoffs.stream().map(CompletionStage::toCompletableFuture)
                 .toArray(CompletableFuture[]::new);
         return track(work.id(), coordinator.complete(work.id(), CompletableFuture.allOf(parts)));
+    }
+
+    /** Slots bound submitted preparation tasks, including any tasks waiting in the executor. */
+    private static final class WorkerExecution {
+        private final Semaphore slots;
+        private final ThreadPoolExecutor executor;
+
+        private WorkerExecution(SmppClientWorker<StandardMessage> worker) {
+            int threads = Math.max(1, worker.getThreadCount());
+            slots = new Semaphore(threads);
+            executor = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
+                    new ArrayBlockingQueue<>(threads),
+                    Thread.ofPlatform().name("outbound-provider-" + worker.getFullName() + "-", 1).daemon(true).factory());
+            executor.allowCoreThreadTimeOut(true);
+        }
     }
 
     public enum AttemptState {
@@ -319,7 +358,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                 }
                 state = AttemptState.PREPARING;
             }
-            Semaphore slot = null;
+            WorkerExecution destination = null;
+            boolean reserved = false;
             try {
                 if (worker == null) {
                     worker = Objects.requireNonNull(resolveDestination.get(), "retry destination");
@@ -334,16 +374,32 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                     }
                     return;
                 }
-                slot = workerSlots.computeIfAbsent(worker, destination ->
-                        new Semaphore(Math.max(1, destination.getThreadCount())));
-                if (!slot.tryAcquire()) {
-                    slot = null;
+                destination = executionFor(worker);
+                if (!destination.slots.tryAcquire()) {
                     synchronized (this) {
                         state = AttemptState.QUEUED;
                         schedule(100);
                     }
                     return;
                 }
+                reserved = true;
+                WorkerExecution reservedDestination = destination;
+                destination.executor.execute(() -> prepare(reservedDestination));
+                reserved = false;
+            } catch (Exception error) {
+                synchronized (this) {
+                    state = AttemptState.FAILED;
+                    failure = error;
+                }
+            } finally {
+                if (reserved) {
+                    destination.slots.release();
+                }
+            }
+        }
+
+        private void prepare(WorkerExecution destination) {
+            try {
                 var submission = worker.submitPreparedCoordinated(message, (payload, policy) ->
                         scheduleAttempt(payload, policy == SmppClientWorker.NackHandlePolicy.RETRY_ROUTER ?
                                 () -> retryDestination(payload) : () -> worker, execution));
@@ -366,9 +422,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                     failure = error;
                 }
             } finally {
-                if (slot != null) {
-                    slot.release();
-                }
+                destination.slots.release();
             }
         }
     }

@@ -127,7 +127,12 @@ Partial terminal cleanup can retain routed records after source removal, so equa
 eliminate cleanup-related backpressure or provide cross-store transactions.
 
 The poller has a 100-millisecond fixed delay after each cycle. Batch size is not TPS or provider
-concurrency: attempts use worker sending slots/rate limiting and a default shared two-thread scheduler.
+concurrency: attempts use the worker's shared rate limiter and a dispatcher-owned execution pool
+sized by its `threadCount`. A sending slot is reserved before executor submission, bounding queued
+plus executing preparation tasks. The default shared two-thread scheduler handles destination
+resolution and timed retries; rate waits, worker filters, and SMPP sends run on the worker's pool.
+Stopped-worker pools are retired during transition maintenance, and dispatcher close shuts down
+its worker pools after provider drain even when the timer scheduler is application-owned.
 Awaiting asynchronous outcomes does not hold a sending slot. Count limits do not bound message bytes.
 
 ## Retries and Failures
