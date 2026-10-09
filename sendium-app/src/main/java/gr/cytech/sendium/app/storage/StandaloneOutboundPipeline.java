@@ -58,6 +58,7 @@ public class StandaloneOutboundPipeline {
     private boolean stopping;
     private final Map<WorkId, StandardOutboundDispatch.ProviderExecution> executions = new ConcurrentHashMap<>();
 
+    // Resolving profile validates the configured backends before constructing or starting any stage.
     @Produces
     @Singleton
     @DefaultBean
@@ -74,6 +75,7 @@ public class StandaloneOutboundPipeline {
         return result;
     }
 
+    // The observed parameter registers pipeline startup after worker startup; its payload is not needed.
     void start(@Observes @Priority(Interceptor.Priority.APPLICATION + 100) StartupEvent event) {
         if (coordinator == null) {
             coordinator = coordinators.get();
@@ -181,6 +183,7 @@ public class StandaloneOutboundPipeline {
         });
     }
 
+    // The observed parameter registers draining before worker shutdown; its payload is not needed.
     void stop(@Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) ShutdownEvent event) throws InterruptedException {
         if (dispatch == null) {
             return;

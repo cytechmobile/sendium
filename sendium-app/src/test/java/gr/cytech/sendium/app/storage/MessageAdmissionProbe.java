@@ -15,6 +15,7 @@ public class MessageAdmissionProbe {
 
     private MessageStorageProfile profileAtStartup;
 
+    // The observed parameter registers the startup callback; the event payload is not needed.
     void start(@Observes @Priority(Interceptor.Priority.APPLICATION) StartupEvent event) {
         profileAtStartup = profile;
         LoggerFactory.getLogger(MessageAdmissionProbe.class).info("test admission startup reached");
