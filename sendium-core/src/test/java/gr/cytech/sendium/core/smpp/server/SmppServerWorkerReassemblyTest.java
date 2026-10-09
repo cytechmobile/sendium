@@ -448,7 +448,7 @@ class SmppServerWorkerReassemblyTest {
 
     }
 
-    private static class TestConfigurationProvider implements SendiumConfigurationProvider {
+    static class TestConfigurationProvider implements SendiumConfigurationProvider {
         private final Map<String, String> props = new HashMap<>();
 
         @Override

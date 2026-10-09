@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.smpp.client;
 
 import com.cloudhopper.commons.charset.CharsetUtil;
 import com.cloudhopper.smpp.SmppConstants;
+import com.cloudhopper.smpp.PduAsyncResponse;
 import com.cloudhopper.smpp.pdu.DeliverSm;
 import com.cloudhopper.smpp.pdu.PduResponse;
 import com.cloudhopper.smpp.pdu.SubmitSm;
@@ -9,22 +10,721 @@ import com.cloudhopper.smpp.tlv.Tlv;
 import com.cloudhopper.smpp.type.Address;
 import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
+import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
+import gr.cytech.sendium.core.queue.QueueProvider;
+import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
 import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.external.WorkerResourceProvider;
+import gr.cytech.sendium.routing.StandardOutboundDispatch;
+import gr.cytech.sendium.routing.StandardRoutingManager;
+import gr.cytech.sendium.routing.RoutingLookupResult;
+import gr.cytech.sendium.routing.RoutingFileParser;
+import jakarta.enterprise.inject.Vetoed;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ArcContainer;
+import io.quarkus.arc.ManagedContext;
 import org.junit.jupiter.api.Test;
+import utils.OutboundIngressFixture;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.time.Duration;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
 
 class SmppClientWorkerTest {
+
+    @Test
+    void idleLegacyPollingDoesNotAcquireSendPermits() {
+        var worker = new LegacyRateWorker();
+        int[] polls = {0};
+        var queue = new Queue<StandardMessage>() {
+            @Override
+            public StandardMessage dequeue(long timeout) {
+                if (++polls[0] == 3) {
+                    worker.keepOnRunning = false;
+                }
+                return null;
+            }
+        };
+        worker.useQueue(queue);
+
+        worker.new Worker(0).run();
+
+        assertThat(polls[0]).isEqualTo(3);
+        assertThat(worker.permits).isZero();
+        assertThat(worker.legacySends).isZero();
+    }
+
+    @Test
+    void shutdownDuringRateAcquisitionReturnsTheTakenLegacyMessage() throws Exception {
+        var worker = new LegacyRateWorker();
+        var queue = new Queue<StandardMessage>();
+        var message = messageWithNetwork();
+        queue.enqueue(message);
+        worker.useQueue(queue);
+        worker.afterPermit = () -> worker.keepOnRunning = false;
+
+        worker.new Worker(0).run();
+
+        assertThat(worker.permits).isEqualTo(1);
+        assertThat(worker.legacySends).isZero();
+        assertThat(queue.dequeue(0)).isSameAs(message);
+        assertThat(queue.isEmpty()).isTrue();
+    }
+
+    @Test
+    void shutdownDuringDequeueReturnsTheMessageWithoutAcquiringAPermit() throws Exception {
+        var worker = new LegacyRateWorker();
+        var queue = new Queue<StandardMessage>() {
+            @Override
+            public StandardMessage dequeue(long timeout) throws InterruptedException {
+                var message = super.dequeue(timeout);
+                worker.keepOnRunning = false;
+                return message;
+            }
+        };
+        var message = messageWithNetwork();
+        queue.enqueue(message);
+        worker.useQueue(queue);
+
+        worker.new Worker(0).run();
+
+        assertThat(worker.permits).isZero();
+        assertThat(worker.legacySends).isZero();
+        assertThat(queue.dequeue(0)).isSameAs(message);
+        assertThat(queue.isEmpty()).isTrue();
+    }
+
+    @Test
+    void legacyAndCoordinatedMessagesShareTheConfiguredWorkerRateLimit() throws Exception {
+        var worker = new LegacyRateWorker();
+        worker.configureRate(2);
+        var queue = new Queue<StandardMessage>();
+        queue.enqueue(messageWithNetwork());
+        worker.useQueue(queue);
+        var container = mock(ArcContainer.class);
+        when(container.requestContext()).thenReturn(mock(ManagedContext.class));
+        try (var arc = mockStatic(Arc.class)) {
+            arc.when(Arc::container).thenReturn(container);
+            worker.new Worker(0).run();
+        }
+        assertThat(worker.legacySends).isEqualTo(1);
+        assertThat(worker.permits).isEqualTo(1);
+        worker.keepOnRunning = true;
+
+        for (int i = 0; i < 2; i++) {
+            worker.submitPreparedCoordinated(messageWithNetwork(), (payload, policy) -> {
+                throw new AssertionError("Successful submission must not schedule a retry");
+            });
+        }
+
+        assertThat(worker.permits).isEqualTo(3);
+        assertThat(worker.coordinatedSendTime - worker.legacySendTime)
+                .isGreaterThanOrEqualTo(Duration.ofMillis(800).toNanos());
+        assertThat(worker.getTransactionsPerSecond()).isEqualTo(2);
+    }
+
+    @Test
+    void heldSourcesCopiedRouteRejectionMultipartReroutingAndHandoffRetryRemainOwnedThroughShutdown() throws Exception {
+        try (var fixture = new OutboundIngressFixture(2)) {
+            var first = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                    "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            var second = spy(new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker()));
+            when(second.getFullName()).thenReturn("smppclient.second");
+            var routing = new LifecycleRouting(java.util.List.of(first, second));
+            routing.use("+" + first.getFullName() + "::default:");
+            try (var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing)) {
+                var firstSource = new SourceId(UUID.randomUUID());
+                var secondSource = new SourceId(UUID.randomUUID());
+                var firstPart = messageWithNetwork();
+                firstPart.serial = firstSource.value().toString();
+                firstPart.body = "a".repeat(100);
+                var secondPart = messageWithNetwork();
+                secondPart.serial = secondSource.value().toString();
+                secondPart.body = "a".repeat(100);
+                fixture.coordinator.acceptHeld(firstSource, firstPart);
+                fixture.coordinator.acceptHeld(secondSource, secondPart);
+                assertThat(fixture.coordinator.selectToRouter(2)).isZero();
+                var prepared = messageWithNetwork();
+                prepared.serial = firstPart.serial;
+                prepared.body = firstPart.body + secondPart.body;
+                prepared.reassembledParts = new java.util.ArrayList<>(java.util.List.of(firstPart.serial, secondPart.serial));
+                fixture.coordinator.makeHeldReady(Set.of(firstSource, secondSource), prepared);
+                assertThat(fixture.coordinator.selectToRouter(2)).isEqualTo(1);
+                var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                assertThatThrownBy(() -> dispatch.routeSelected(selected))
+                        .isInstanceOfSatisfying(OutboundStorageException.class, failure ->
+                                assertThat(failure.reason()).isEqualTo(OutboundStorageException.Reason.UNSUPPORTED));
+                assertThat(first.coordinatedRequests).isEmpty();
+                assertThat(dispatch.takeForProvider(first.getFullName(), Duration.ZERO)).isEmpty();
+
+                routing.use(first.getFullName() + "::default:");
+                var returned = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                assertThat(returned.id()).isEqualTo(selected.id());
+                dispatch.routeSelected(returned);
+                var parent = dispatch.takeForProvider(first.getFullName(), Duration.ZERO).orElseThrow();
+                var execution = dispatch.submitToProvider(parent, first);
+                first.awaitRequests(2);
+                routing.use(second.getFullName() + "::default:");
+                dispatch.beginShutdown();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                respond(handler(first), first.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
+                second.awaitRequests(2);
+                assertThat(parent.destination()).isEqualTo(first.getFullName());
+                assertThat(execution.attempts()).extracting(StandardOutboundDispatch.AttemptSnapshot::destination)
+                        .containsExactly(first.getFullName(), second.getFullName());
+
+                second.failCoordinatedHandoff = true;
+                second.coordinatedRequests.forEach(request -> respond(handler(second), request, SmppConstants.STATUS_OK));
+                respond(handler(first), first.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
+                assertThat(execution.completion().toCompletableFuture()).isNotDone();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                assertThat(fixture.pending.find(firstSource).orElseThrow().body).isEqualTo(firstPart.body);
+                assertThat(fixture.pending.find(secondSource)).isPresent();
+                assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
+
+                second.failCoordinatedHandoff = false;
+                execution.retryPendingHandoffs();
+                execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(1))).isTrue();
+                assertThat(fixture.pending.find(firstSource)).isEmpty();
+                assertThat(fixture.pending.find(secondSource)).isEmpty();
+                assertThat(first.coordinatedRequests).hasSize(2);
+                assertThat(second.coordinatedRequests).hasSize(2);
+                int handoffs = second.coordinatedHandoffs;
+                respond(handler(second), second.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+                assertThat(second.coordinatedHandoffs).isEqualTo(handoffs);
+                assertThat(first.getRouterQueue().isEmpty()).isTrue();
+                assertThat(second.getRouterQueue().isEmpty()).isTrue();
+            }
+        }
+    }
+
+    @Test
+    void workerSlotAndRateGatePreventConcurrentPreparationAndEarlySending() throws Exception {
+        var scheduler = new ScheduledThreadPoolExecutor(2);
+        var rateGate = new CompletableFuture<Void>();
+        try (var fixture = new OutboundIngressFixture(2);
+             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class), scheduler)) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+            worker.rateGate = rateGate;
+            var executions = new java.util.ArrayList<StandardOutboundDispatch.ProviderExecution>();
+            for (int index = 0; index < 2; index++) {
+                var message = messageWithNetwork();
+                message.body = "hello";
+                fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message);
+            }
+            fixture.coordinator.selectToRouter(2);
+            for (int index = 0; index < 2; index++) {
+                var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+                executions.add(dispatch.submitToProvider(
+                        fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow(), worker));
+            }
+            assertThat(worker.rateEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
+            assertThat(worker.rateChecks).isEqualTo(1);
+            assertThat(worker.preparations).isZero();
+            assertThat(worker.coordinatedRequests).isEmpty();
+            rateGate.complete(null);
+            worker.awaitRequests(2);
+            worker.coordinatedRequests.forEach(request -> respond(handler(worker), request, SmppConstants.STATUS_OK));
+            for (var execution : executions) {
+                execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            }
+            assertThat(worker.rateChecks).isEqualTo(2);
+            assertThat(worker.preparations).isEqualTo(2);
+        } finally {
+            rateGate.complete(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void blockedWorkerUsesItsConfiguredSlotsWithoutBlockingOtherDestinationsOrTimers() throws Exception {
+        var scheduler = new ScheduledThreadPoolExecutor(1);
+        var rateGate = new CompletableFuture<Void>();
+        var blocked = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        blocked.threadCount = 3;
+        blocked.rateGate = rateGate;
+        blocked.rateEntered = new CountDownLatch(3);
+        var healthy = spy(new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker()));
+        when(healthy.getFullName()).thenReturn("smppclient.healthy");
+        try (var fixture = new OutboundIngressFixture(5)) {
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class), scheduler);
+            var executions = new java.util.ArrayList<StandardOutboundDispatch.ProviderExecution>();
+            try {
+                for (int i = 0; i < 4; i++) {
+                    executions.add(submitOwned(dispatch, fixture, blocked));
+                }
+                assertThat(blocked.rateEntered.await(5, TimeUnit.SECONDS)).isTrue();
+                scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                assertThat(blocked.rateChecks).isEqualTo(3);
+                assertThat(blocked.rateThreads).hasSize(3);
+                assertThat(blocked.coordinatedRequests).isEmpty();
+
+                var healthyExecution = submitOwned(dispatch, fixture, healthy);
+                healthy.awaitRequests(1);
+                respond(handler(healthy), healthy.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+                healthyExecution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(blocked.rateChecks).isEqualTo(3);
+                executions.forEach(execution -> assertThat(execution.completion().toCompletableFuture()).isNotDone());
+
+                dispatch.beginShutdown();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                assertThatThrownBy(dispatch::close).isInstanceOf(IllegalStateException.class);
+                rateGate.complete(null);
+                blocked.awaitRequests(4);
+                blocked.coordinatedRequests.forEach(request -> respond(handler(blocked), request, SmppConstants.STATUS_OK));
+                for (var execution : executions) {
+                    execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                }
+                assertThat(blocked.rateChecks).isEqualTo(4);
+                assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(1))).isTrue();
+            } finally {
+                rateGate.complete(null);
+                dispatch.close();
+            }
+            for (Thread thread : blocked.rateThreads) {
+                thread.join(Duration.ofSeconds(5));
+                assertThat(thread.isAlive()).isFalse();
+            }
+            for (Thread thread : healthy.rateThreads) {
+                thread.join(Duration.ofSeconds(5));
+                assertThat(thread.isAlive()).isFalse();
+            }
+            assertThat(scheduler.isShutdown()).isFalse();
+        } finally {
+            rateGate.complete(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void transitionMaintenanceRetiresStoppedWorkerPoolAndReplacementUsesItsOwnPool() throws Exception {
+        var stopped = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        var replacement = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        try (var fixture = new OutboundIngressFixture(1);
+             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class))) {
+            var first = submitOwned(dispatch, fixture, stopped);
+            stopped.awaitRequests(1);
+            respond(handler(stopped), stopped.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            first.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+            stopped.keepOnRunning = false;
+            dispatch.retryRoutingTransitions();
+            for (Thread thread : stopped.rateThreads) {
+                thread.join(Duration.ofSeconds(5));
+                assertThat(thread.isAlive()).isFalse();
+            }
+
+            var second = submitOwned(dispatch, fixture, replacement);
+            replacement.awaitRequests(1);
+            respond(handler(replacement), replacement.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            second.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertThat(stopped.coordinatedRequests).hasSize(1);
+            assertThat(replacement.rateThreads).doesNotContainAnyElementsOf(stopped.rateThreads);
+        }
+        for (Thread thread : replacement.rateThreads) {
+            thread.join(Duration.ofSeconds(5));
+            assertThat(thread.isAlive()).isFalse();
+        }
+    }
+
+    private static StandardOutboundDispatch.ProviderExecution submitOwned(StandardOutboundDispatch dispatch,
+            OutboundIngressFixture fixture, TestSmppClientWorker worker) throws Exception {
+        var message = messageWithNetwork();
+        message.body = "hello";
+        fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message);
+        fixture.coordinator.selectToRouter(1);
+        var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+        fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+        return dispatch.submitToProvider(
+                fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow(), worker);
+    }
+
+    @Test
+    void failedRetryLookupCanResumeWithoutLosingParentOrRepeatingOriginalSubmission() throws Exception {
+        var scheduler = new ScheduledThreadPoolExecutor(1);
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                    "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            var routing = mock(StandardRoutingManager.class);
+            var lookupTried = new CountDownLatch(1);
+            when(routing.lookupForLifecycle(org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
+                lookupTried.countDown();
+                throw new IllegalStateException("routing temporarily unavailable");
+            });
+            try (var dispatch = new StandardOutboundDispatch(fixture.coordinator, routing, scheduler)) {
+                var message = messageWithNetwork();
+                message.body = "hello";
+                SourceId source = new SourceId(UUID.randomUUID());
+                fixture.coordinator.accept(source, message);
+                fixture.coordinator.selectToRouter(1);
+                var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+                var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
+                var execution = dispatch.submitToProvider(work, worker);
+                worker.awaitRequests(1);
+                dispatch.beginShutdown();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+                assertThatThrownBy(() -> dispatch.submitToProvider(work, worker)).isInstanceOf(IllegalStateException.class);
+                respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
+                assertThat(lookupTried.await(5, TimeUnit.SECONDS)).isTrue();
+                scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                assertThat(execution.attempts().getLast().state()).isEqualTo(StandardOutboundDispatch.AttemptState.FAILED);
+                assertThat(execution.attempts().getLast().failure()).isInstanceOf(IllegalStateException.class);
+                assertThat(execution.completion().toCompletableFuture()).isNotDone();
+                assertThat(fixture.pending.find(source)).isPresent();
+                org.mockito.Mockito.doReturn(new RoutingLookupResult(java.util.List.of(worker), true))
+                        .when(routing).lookupForLifecycle(org.mockito.ArgumentMatchers.any());
+                execution.retryPendingHandoffs();
+                worker.awaitRequests(2);
+                respond(handler(worker), worker.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
+                execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(1))).isTrue();
+                assertThat(worker.coordinatedRequests).hasSize(2);
+                assertThat(fixture.pending.find(source)).isEmpty();
+            }
+            assertThat(scheduler.isShutdown()).isFalse();
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void preparedSubmissionMapsCharactersBeforeProviderRequestGeneration() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.mapCharacters = true;
+        var message = messageWithNetwork();
+        message.body = "aaa";
+        var submission = worker.submitPreparedCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No retry expected");
+        });
+        assertThat(CharsetUtil.decode(worker.coordinatedRequests.getFirst().getShortMessage(), CharsetUtil.NAME_GSM))
+                .isEqualTo("bbb");
+        respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void beforeProcessingDropCompletesWithoutSendingToProvider() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.preparationStatus = gr.cytech.sendium.external.filter.FilterStatusCodes.DROP;
+        var submission = worker.submitPreparedCoordinated(messageWithNetwork(), (payload, policy) -> {
+            throw new AssertionError("Dropped message must not retry");
+        });
+        submission.completion().toCompletableFuture().join();
+        assertThat(worker.coordinatedRequests).isEmpty();
+        assertThat(worker.coordinatedHandoffs).isZero();
+    }
+
+    @Test
+    void preparationReenqueueWithoutRouterRetainsOwnershipInSameWorkerReplacement() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), null, new CapturingTracker());
+        worker.preparationStatus = gr.cytech.sendium.external.filter.FilterStatusCodes.REENQUEUE;
+        var replacement = new CompletableFuture<Void>();
+        var retried = new java.util.ArrayList<StandardMessage>();
+        var original = messageWithNetwork();
+        var submission = worker.submitPreparedCoordinated(original, (payload, policy) -> {
+            assertThat(policy).isEqualTo(SmppClientWorker.NackHandlePolicy.RETRY_WORKER);
+            retried.add(payload);
+            return replacement;
+        });
+        assertThat(retried).containsExactly(original);
+        assertThat(worker.coordinatedRequests).isEmpty();
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void routerRetryTracksAnotherProviderWhileOriginalMultipartRequestIsOutstanding() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var first = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                    "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            var second = spy(new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker()));
+            when(second.getFullName()).thenReturn("smppclient.second");
+            var routing = mock(StandardRoutingManager.class);
+            when(routing.lookupForLifecycle(org.mockito.ArgumentMatchers.any())).thenReturn(
+                    new RoutingLookupResult(java.util.List.of(second), true));
+            try (var retryDispatch = new StandardOutboundDispatch(fixture.coordinator, routing)) {
+                SourceId source = new SourceId(UUID.randomUUID());
+                var message = messageWithNetwork();
+                message.body = "a".repeat(200);
+                fixture.coordinator.accept(source, message);
+                fixture.coordinator.selectToRouter(1);
+                var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                fixture.coordinator.recordToRouted(selected, new Destination<>(first.getFullName(), selected.message()));
+                var parent = fixture.coordinator.takeFromRouted(first.getFullName(), Duration.ZERO).orElseThrow();
+                var execution = retryDispatch.submitToProvider(parent, first);
+                first.awaitRequests(2);
+                respond(handler(first), first.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
+                second.awaitRequests(2);
+                assertThat(parent.destination()).isEqualTo(first.getFullName());
+                assertThat(execution.attempts()).extracting(StandardOutboundDispatch.AttemptSnapshot::destination)
+                        .containsExactly(first.getFullName(), second.getFullName());
+                second.coordinatedRequests.forEach(request -> respond(handler(second), request, SmppConstants.STATUS_OK));
+                assertThat(execution.completion().toCompletableFuture()).isNotDone();
+                assertThat(fixture.pending.find(source)).isPresent();
+                respond(handler(first), first.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
+                execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertThat(fixture.pending.find(source)).isEmpty();
+                assertThat(first.preparations).isEqualTo(1);
+                assertThat(second.preparations).isEqualTo(1);
+                assertThat(first.rateChecks).isEqualTo(1);
+                assertThat(second.rateChecks).isEqualTo(1);
+                assertThat(first.getRouterQueue().isEmpty()).isTrue();
+                assertThat(second.getRouterQueue().isEmpty()).isTrue();
+            }
+        }
+    }
+
+    @Test
+    void pausedAttemptWaitsWithoutSendingAndPreparesAfterResume() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1);
+             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class))) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+            worker.testPaused = true;
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.accept(source, messageWithNetwork());
+            fixture.coordinator.selectToRouter(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            selected.message().body = "hello";
+            fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
+            var execution = dispatch.submitToProvider(work, worker);
+            assertThat(worker.pauseChecked.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(worker.coordinatedRequests).isEmpty();
+            assertThat(worker.preparations).isZero();
+            assertThat(fixture.pending.find(source)).isPresent();
+            worker.testPaused = false;
+            worker.awaitRequests(1);
+            respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertThat(worker.preparations).isEqualTo(1);
+            assertThat(worker.rateChecks).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void firstSendFailureAbortsRemainingSubmitsAndRetriesOriginalPayload() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.failSendNumber = 1;
+        var message = messageWithNetwork();
+        message.body = "a".repeat(200);
+        var replacement = new CompletableFuture<Void>();
+        var retries = new java.util.ArrayList<StandardMessage>();
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            retries.add(payload);
+            return replacement;
+        });
+        assertThat(worker.coordinatedRequests).hasSize(1);
+        assertThat(retries).containsExactly(message);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void coordinatedAcceptanceWaitsForAsynchronousTrackerHandoff() throws Exception {
+        var accepted = new CompletableFuture<Void>();
+        var tracker = new CapturingTracker() {
+            @Override
+            public CompletionStage<Void> handoffProviderAccepted(String hash, StandardMessage message, String providerId) {
+                return accepted;
+            }
+        };
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), tracker);
+        worker.realCoordinatedHandoff = true;
+        var message = messageWithNetwork();
+        message.body = "hello";
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No retry expected");
+        });
+        respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        accepted.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void coordinatedExpiryGoesThroughFailurePolicyWithoutLegacyQueueInsertion() throws Exception {
+        var routerQueue = new Queue<StandardMessage>();
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), routerQueue, new CapturingTracker());
+        var message = messageWithNetwork();
+        message.body = "hello";
+        var retried = new java.util.ArrayList<StandardMessage>();
+        var replacement = new CompletableFuture<Void>();
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            retried.add(payload);
+            return replacement;
+        });
+        handler(worker).firePduRequestExpired(worker.coordinatedRequests.getFirst());
+        assertThat(retried).containsExactly(message);
+        assertThat(routerQueue.isEmpty()).isTrue();
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void firstPartRouterRetryKeepsParentSourcesThroughOriginalAndReplacementParts() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                    "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            var message = messageWithNetwork();
+            message.body = "a".repeat(200);
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.accept(source, message);
+            fixture.coordinator.selectToRouter(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
+            var routing = mock(StandardRoutingManager.class);
+            when(routing.lookupForLifecycle(org.mockito.ArgumentMatchers.any())).thenReturn(
+                    new RoutingLookupResult(java.util.List.of(worker), true));
+            var execution = new StandardOutboundDispatch(fixture.coordinator, routing).submitToProvider(work, worker);
+            worker.awaitRequests(2);
+            var session = handler(worker);
+            worker.expectedRequests = 4;
+            respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
+            assertThat(worker.requestsReady.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(worker.coordinatedRequests).hasSize(4);
+            respond(session, worker.coordinatedRequests.get(2), SmppConstants.STATUS_OK);
+            respond(session, worker.coordinatedRequests.get(3), SmppConstants.STATUS_OK);
+            assertThat(fixture.pending.find(source)).isPresent();
+            assertThat(execution.completion().toCompletableFuture()).isNotDone();
+            respond(session, worker.coordinatedRequests.get(1), SmppConstants.STATUS_OK);
+            execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertThat(fixture.pending.find(source)).isEmpty();
+            assertThat(worker.getRouterQueue().isEmpty()).isTrue();
+        }
+    }
+
+    @Test
+    void coordinatedSessionCallbacksCompleteRealLifecycleOnlyAfterEveryPart() throws Exception {
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+            var message = messageWithNetwork();
+            message.body = "a".repeat(200);
+            SourceId source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.accept(source, message);
+            fixture.coordinator.selectToRouter(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+            var work = fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow();
+            var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class));
+            var execution = dispatch.submitToProvider(work, worker);
+            worker.awaitRequests(2);
+            var session = handler(worker);
+            respond(session, worker.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);
+            assertThat(fixture.pending.find(source)).isPresent();
+            assertThat(execution.completion().toCompletableFuture()).isNotDone();
+            respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            execution.completion().toCompletableFuture().join();
+            assertThat(fixture.pending.find(source)).isEmpty();
+            respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+            assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+        }
+    }
+
+    private static void respond(SmppClientSessionHandler handler, SubmitSm request, int status) {
+        var response = request.createResponse();
+        response.setCommandStatus(status);
+        response.setMessageId("provider-id");
+        var async = mock(PduAsyncResponse.class);
+        when(async.getRequest()).thenReturn(request);
+        when(async.getResponse()).thenReturn(response);
+        handler.fireExpectedPduResponseReceived(async);
+    }
+
+    @Test
+    void coordinatedMultipartWaitsForAllResponsesAndIgnoresDuplicateCallbacks() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        var message = messageWithNetwork();
+        message.body = "a".repeat(200);
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No retry expected");
+        });
+        assertThat(worker.coordinatedRequests).hasSize(2);
+        Object first = worker.coordinatedRequests.getFirst().getReferenceObject();
+        Object last = worker.coordinatedRequests.getLast().getReferenceObject();
+        worker.handleCoordinatedResponse(last, SmppConstants.STATUS_OK, "second");
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        worker.handleCoordinatedResponse(last, SmppConstants.STATUS_OK, "duplicate");
+        worker.handleCoordinatedResponse(first, SmppConstants.STATUS_OK, "first");
+        submission.completion().toCompletableFuture().join();
+        assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+        assertThat(worker.success).isEmpty();
+        assertThat(worker.failures).isEmpty();
+    }
+
+    @Test
+    void coordinatedRouterRetryPreservesFirstWholeMessageAndLaterPartPayloads() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
+                "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+        var message = messageWithNetwork();
+        message.body = "a".repeat(200);
+        var retries = new java.util.ArrayList<StandardMessage>();
+        var replacement = new CompletableFuture<Void>();
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            assertThat(policy).isEqualTo(SmppClientWorker.NackHandlePolicy.RETRY_ROUTER);
+            retries.add(payload);
+            return replacement;
+        });
+        worker.coordinatedRequests.forEach(request -> worker.handleCoordinatedResponse(
+                request.getReferenceObject(), SmppConstants.STATUS_INVDSTADR, null));
+        assertThat(retries).hasSize(2);
+        assertThat(retries.getFirst()).isSameAs(message);
+        assertThat(retries.getFirst().body).hasSize(200);
+        assertThat(retries.getLast()).isNotSameAs(message);
+        assertThat(retries.getLast().binheader).isNotBlank();
+        assertThat(retries.getLast().body.length()).isLessThan(200);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        assertThat(worker.failures).isEmpty();
+        replacement.complete(null);
+        submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void coordinatedTrackingFailureRetriesOnlyHandoffWithoutResubmittingProvider() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.failCoordinatedHandoff = true;
+        var message = messageWithNetwork();
+        message.body = "hello";
+        var submission = worker.submitCoordinated(message, (payload, policy) -> {
+            throw new AssertionError("No provider retry expected");
+        });
+        worker.handleCoordinatedResponse(worker.coordinatedRequests.getFirst().getReferenceObject(),
+                SmppConstants.STATUS_OK, "accepted");
+        assertThat(submission.handoffFailures()).hasSize(1);
+        assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        worker.failCoordinatedHandoff = false;
+        submission.retryPendingHandoffs();
+        submission.completion().toCompletableFuture().join();
+        assertThat(worker.coordinatedRequests).hasSize(1);
+        assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+    }
 
     @Test
     void defaultsSensitiveDiagnosticLoggingOff() {
@@ -312,7 +1012,152 @@ class SmppClientWorkerTest {
         return msg;
     }
 
+    @Vetoed
+    private static final class LegacyRateWorker extends TestSmppClientWorker {
+        private int permits;
+        private int legacySends;
+        private long legacySendTime;
+        private long coordinatedSendTime;
+        private Runnable afterPermit = () -> { };
+
+        private LegacyRateWorker() {
+            super(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        }
+
+        private void useQueue(Queue<StandardMessage> queue) {
+            var resources = mock(WorkerResourceProvider.class);
+            var queues = mock(QueueProvider.class);
+            when(resources.geQueueProvider()).thenReturn(queues);
+            when(queues.subscribe(getFullName(), getQueueName(), false)).thenReturn(queue);
+            workerResources = resources;
+            checkSubscribeMessageQueue();
+        }
+
+        private void configureRate(double rate) {
+            configurationProvider.setProperty("tps", Double.toString(rate));
+            configRateLimiter();
+        }
+
+        @Override
+        protected void applyRateLimit() {
+            permits++;
+            super.applyRateLimit();
+            afterPermit.run();
+        }
+
+        @Override
+        public StandardMessage doMessage(int threadIndex, StandardMessage message) {
+            legacySends++;
+            legacySendTime = System.nanoTime();
+            keepOnRunning = false;
+            return null;
+        }
+
+        @Override
+        protected void sendCoordinatedRequest(SubmitSm request) {
+            coordinatedSendTime = System.nanoTime();
+        }
+    }
+
+    @Vetoed
+    private static final class LifecycleRouting extends StandardRoutingManager {
+        private final java.util.List<AbstractOutWorker> providers;
+
+        private LifecycleRouting(java.util.List<AbstractOutWorker> providers) {
+            this.providers = providers;
+        }
+
+        private void use(String rule) {
+            parseNewRoutingTable(RoutingFileParser.parseRoutingTable(java.util.List.of(rule)), providers);
+        }
+    }
+
     private static class TestSmppClientWorker extends SmppClientWorker<StandardMessage> {
+        private volatile boolean testPaused;
+        private volatile int preparations;
+        private volatile int rateChecks;
+        private CompletableFuture<Void> rateGate;
+        private CountDownLatch rateEntered = new CountDownLatch(1);
+        private final Set<Thread> rateThreads = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private boolean mapCharacters;
+        private gr.cytech.sendium.external.filter.FilterStatusCodes preparationStatus;
+        private final CountDownLatch pauseChecked = new CountDownLatch(1);
+
+        @Override
+        public boolean isPause() {
+            pauseChecked.countDown();
+            return testPaused || super.isPause();
+        }
+
+        @Override
+        protected void applyRateLimit() {
+            synchronized (this) {
+                rateChecks++;
+            }
+            rateThreads.add(Thread.currentThread());
+            if (rateGate != null) {
+                rateEntered.countDown();
+                rateGate.join();
+            }
+            super.applyRateLimit();
+        }
+
+        @Override
+        protected void checkBeforeDoMessageFilters(StandardMessage message) throws java.io.IOException {
+            preparations++;
+            if (preparationStatus != null) {
+                var status = preparationStatus;
+                preparationStatus = null;
+                throw new gr.cytech.sendium.external.filter.FilterException(null, status, message, "test filter");
+            }
+            super.checkBeforeDoMessageFilters(message);
+        }
+        private final java.util.concurrent.Semaphore requestsSeen = new java.util.concurrent.Semaphore(0);
+
+        private void awaitRequests(int count) throws InterruptedException {
+            while (coordinatedRequests.size() < count) {
+                assertThat(requestsSeen.tryAcquire(5, TimeUnit.SECONDS)).isTrue();
+            }
+        }
+
+        @Override
+        protected String charMap(String body) {
+            return mapCharacters ? body.replace('a', 'b') : body;
+        }
+
+        @Override
+        public boolean verifyConnectivity() {
+            return true;
+        }
+        private final java.util.List<SubmitSm> coordinatedRequests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private final CountDownLatch requestsReady = new CountDownLatch(1);
+        private volatile int expectedRequests = Integer.MAX_VALUE;
+        private int coordinatedHandoffs;
+        private boolean failCoordinatedHandoff;
+        private boolean realCoordinatedHandoff;
+        private int failSendNumber;
+
+        @Override
+        protected void sendCoordinatedRequest(SubmitSm request) throws java.io.IOException {
+            coordinatedRequests.add(request);
+            requestsSeen.release();
+            if (coordinatedRequests.size() == failSendNumber) {
+                throw new java.io.IOException("submit unavailable");
+            }
+            if (coordinatedRequests.size() >= expectedRequests) {
+                requestsReady.countDown();
+            }
+        }
+
+        @Override
+        protected CompletionStage<Void> coordinatedProviderHandoff(StandardMessage message, int status, String providerId) {
+            if (realCoordinatedHandoff) {
+                return super.coordinatedProviderHandoff(message, status, providerId);
+            }
+            coordinatedHandoffs++;
+            return failCoordinatedHandoff ? CompletableFuture.failedStage(new DlrStorageException("unavailable")) :
+                    CompletableFuture.completedStage(null);
+        }
         private final java.util.List<StandardMessage> success = new java.util.ArrayList<>();
         private final java.util.List<StandardMessage> temporaryFailures = new java.util.ArrayList<>();
         private final java.util.List<StandardMessage> failures = new java.util.ArrayList<>();
@@ -322,6 +1167,7 @@ class SmppClientWorkerTest {
                              Tracker<StandardMessage> tracker) {
             super(configurationProvider, routerQueue, new ScheduledThreadPoolExecutor(1));
             this.messageTracker = tracker;
+            this.suspendAuto = false;
         }
 
         TestSmppClientWorker(SendiumConfigurationProvider configurationProvider,

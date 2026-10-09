@@ -59,8 +59,19 @@ All properties below should be prefixed with your instance path. For example, if
 | `charset.latin1` | `ISO-8859-1` | The default charset mapping for Latin-1. |
 | `charset.ucs2` | `UCS-2` | The default charset mapping for UCS-2 (data coding `8`). |
 | `ccat.8bit` | `true` | Use 8-bit reference numbers for Concatenated (multipart) SMS instead of 16-bit. |
-| `reassembling.timeoutMillis` | `30000` | Timeout (in ms) to wait for all parts of a concatenated message to arrive before failing. |
+| `reassembling.timeoutMillis` | `30000` | Time (in ms) to wait for concatenated-message parts; incomplete groups release their received parts individually on expiry. |
 | `filters.beforeInsertMessage` | `""` |  (Filters Not supported yet) Comma-separated list of filter class names to process messages before queuing. |
+
+### Admission and acknowledgement
+
+The standalone server uses the shared memory outbound coordinator. It accepts a complete message, or retains
+each concatenated part as held work, before success. Parts are acknowledged individually rather than
+waiting for the whole message. Completed/expired reassembly work retains those original source IDs.
+
+In that coordinated path, capacity rejection returns `STATUS_THROTTLED`, unsupported input returns
+`STATUS_SUBMITFAIL`, and other lifecycle/storage failures return `STATUS_SYSERR`. A failure after
+acknowledgement during ready publication is retried without another client response. Embedded workers
+without a coordinator binding retain local ingress-queue admission before success. See [Outbound Message Storage](14-outbound-storage.md).
 
 ## 🧵 Thread Pool Configuration
 

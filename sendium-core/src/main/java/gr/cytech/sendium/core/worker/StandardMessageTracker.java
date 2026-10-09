@@ -109,7 +109,19 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
     public void createAndEnqueueSubmissionFailure(StandardMessage message, String providerMessageId,
                                                    String hashedProviderMessageId, String body,
                                                    int state, String errorCode,
-                                                   HashMap<String, String> tlvs) {
+                                                    HashMap<String, String> tlvs) {
+        recordSubmissionFailure(message, providerMessageId, body, state, errorCode, false);
+    }
+
+    @Override
+    public java.util.concurrent.CompletionStage<Void> handoffSubmissionFailure(StandardMessage message,
+            String providerMessageId, String hashedProviderMessageId, String body, int state, String errorCode) {
+        recordSubmissionFailure(message, providerMessageId, body, state, errorCode, true);
+        return java.util.concurrent.CompletableFuture.completedStage(null);
+    }
+
+    private void recordSubmissionFailure(StandardMessage message, String providerMessageId, String body,
+                                          int state, String errorCode, boolean strict) {
         if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
             return;
         }
@@ -121,7 +133,7 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         Optional<MessageState> rejected = outWorker.getWorkerResources().getDlrService()
                 .recordProviderRejected(returnState.get(), providerName, providerMessageId, state, errorCode);
         rejected.filter(result -> result.getDeliveryChannel() == MessageState.DeliveryChannel.SMPP)
-                .ifPresent(result -> enqueueDlr(result, providerMessageId, body, state, errorCode));
+                .ifPresent(result -> enqueueDlr(result, providerMessageId, body, state, errorCode, strict));
     }
 
     private Optional<MessageState> toMessageState(StandardMessage message) {
@@ -137,7 +149,12 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
     }
 
     private void enqueueDlr(MessageState state, String providerMessageId, String body,
-                            int dlrState, String errorCode) {
+                             int dlrState, String errorCode) {
+        enqueueDlr(state, providerMessageId, body, dlrState, errorCode, false);
+    }
+
+    private void enqueueDlr(MessageState state, String providerMessageId, String body,
+                             int dlrState, String errorCode, boolean strict) {
         StandardMessage dlrMsg = new StandardMessage();
         dlrMsg.serial = state.getGatewayMsgId();
         dlrMsg.from = state.getDestAddr();
@@ -153,6 +170,10 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         try {
             outWorker.enqueueToRouter(dlrMsg);
         } catch (InterruptedException ie) {
+            if (strict) {
+                Thread.currentThread().interrupt();
+                throw new DlrStorageException("Submission failure DLR handoff interrupted", ie);
+            }
             outWorker.handleException(ie);
         }
         if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_DLR)) {

@@ -5,9 +5,13 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundCoordinator;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.util.MessageTrace;
 import jakarta.annotation.security.PermitAll;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
@@ -38,6 +42,9 @@ public class KannelResource {
 
     @Inject
     InMemoryQueueProvider queueProvider;
+
+    @Inject
+    Instance<OutboundCoordinator<StandardMessage>> outboundCoordinators;
 
     @Inject
     CredentialFileWatcher credentialFileWatcher;
@@ -74,7 +81,7 @@ public class KannelResource {
             ),
             @APIResponse(
                     responseCode = "503",
-                    description = "Service Unavailable. Internal queue admission was interrupted.",
+                    description = "Service Unavailable. Admission is unavailable, at capacity, or interrupted.",
                     content = @Content(mediaType = MediaType.TEXT_PLAIN, schema = @Schema(examples = "Temporal failure, try again later."))
             )
     })
@@ -205,11 +212,16 @@ public class KannelResource {
                 msg.field4 = binfo;
             }
             msg.acked = dlrUrl != null && !dlrUrl.isBlank();
-            msg.serial = UUID.randomUUID().toString();
+            UUID gatewayMessageId = UUID.randomUUID();
+            msg.serial = gatewayMessageId.toString();
             if (msg.acked) {
                 msg.dlrReturnMetadata = DlrReturnMetadata.http(usr, msg.from, msg.to, dlrUrl);
             }
-            queueProvider.getRouterQueue().enqueue(msg);
+            if (outboundCoordinators.isUnsatisfied()) {
+                queueProvider.getRouterQueue().enqueue(msg);
+            } else {
+                outboundCoordinators.get().accept(new SourceId(gatewayMessageId), msg);
+            }
             if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
                 logger.info("message.accepted ingress=http {}", MessageTrace.identifiers(msg));
             }
@@ -218,7 +230,16 @@ public class KannelResource {
                     .entity(msg.serial)
                     .build();
 
+        } catch (OutboundStorageException e) {
+            logger.warn("HTTP SMS admission failed stage={} reason={}", e.stage(), e.reason());
+            return switch (e.reason()) {
+                case CAPACITY_EXCEEDED, UNAVAILABLE, OWNERSHIP_CONFLICT -> Response.status(Response.Status.SERVICE_UNAVAILABLE)
+                        .entity("Temporal failure, try again later.").build();
+                case UNSUPPORTED -> Response.status(Response.Status.BAD_REQUEST).entity("Unsupported SMS submission").build();
+                case INVALID_TRANSITION -> Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing SMS").build();
+            };
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             logger.error("Failed to enqueue message", e);
             return Response.status(Response.Status.SERVICE_UNAVAILABLE)
                     .entity("Temporal failure, try again later.")
