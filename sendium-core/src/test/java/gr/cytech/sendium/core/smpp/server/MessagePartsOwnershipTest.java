@@ -67,16 +67,19 @@ class MessagePartsOwnershipTest {
         private StandardMessage original;
         private StandardMessage duplicate;
 
+        @Override
         public void onMessagePartsHandlingEvent(MessagePartsHandler.MessagePartsEventType type, List<StandardMessage> parts) {
             events.add(type);
             groups.add(parts);
         }
 
+        @Override
         public void onDuplicateMessagePart(StandardMessage original, StandardMessage duplicate) {
             this.original = original;
             this.duplicate = duplicate;
         }
 
+        @Override
         public String getName() {
             return "ownership-test";
         }

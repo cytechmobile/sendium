@@ -30,6 +30,7 @@ public class StandaloneMessageStorage {
         }
     }
 
+    // The observed parameter registers early startup validation/logging; its payload is not needed.
     void start(@Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) StartupEvent event, MessageStorageProfile profile) {
         logger.info("Outbound message storage profile (pending/router-queue/routed-work): {}", profile);
         logger.warn("NON-DURABLE outbound message storage: accepted messages and in-flight work can be lost on process restart.");

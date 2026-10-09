@@ -125,7 +125,7 @@ class MessageLifecycleHttpTest {
     @Vetoed
     public static class Credentials extends CredentialFileWatcher {
         @Override
-        public Map<String, Credential> getValidCredentials() {
+        public synchronized Map<String, Credential> getValidCredentials() {
             return Map.of("http-user", new Credential(CredentialType.HTTP, null, null,
                     "http-user", "secret", null, Set.of()));
         }
