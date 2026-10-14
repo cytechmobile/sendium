@@ -10,6 +10,7 @@
     <artifactId>sendium-performance-harness</artifactId>
     <properties><maven.deploy.skip>true</maven.deploy.skip></properties>
     <dependencies>
+        <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId><version>2.2.2</version></dependency>
         <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
         <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
     </dependencies>
@@ -17,6 +18,7 @@
         <plugins>
             <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>${compiler-plugin.version}</version></plugin>
             <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>${surefire-plugin.version}</version></plugin>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.1</version><configuration><forceCreation>true</forceCreation></configuration></plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId><artifactId>maven-shade-plugin</artifactId><version>3.6.1</version>
                 <executions><execution><phase>package</phase><goals><goal>shade</goal></goals><configuration>
