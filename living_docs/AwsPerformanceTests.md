@@ -14,7 +14,7 @@
 |------:|-----:|-------|:----:|--------|-------|
 | 1 | 1.1 | Define harness configuration and versioned result contracts | M | 🟢 done | Added `performance/contracts/` specifications and JSON schemas; validated defaults, schema references, setup-failure output, and invalid boundaries. |
 | 1 | 1.2 | Package a standalone JVM harness with phase control | M | 🟢 done | Opt-in Maven module, executable validation CLI, and lifecycle controller; five tests and packaged-JAR smoke check pass. Protocol execution follows in Phase 2. |
-| 1 | 1.3 | Implement bounded message accounting and latency collection | M | ⚪ not started | Correlate measurement messages across asynchronous events; detect duplicates and unfinished work without unbounded bookkeeping. |
+| 1 | 1.3 | Implement bounded message accounting and latency collection | M | 🟢 done | Added synchronized token ledger, bounded active/retired history, outcome snapshots, and fixed-range HdrHistogram latency collection. All 15 harness tests pass. Minute aggregation follows in 3.2. |
 | 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | ⚪ not started | Single-part messages, unique provider identifiers, configurable fixed response and delivery delays. |
 | 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | ⚪ not started | Exercise HTTP admission and callbacks with delivery reports enabled and disabled. |
 | 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | ⚪ not started | Exercise SMPP admission and delivery receipts using Cloudhopper. |
@@ -171,6 +171,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 
 ## 5. Decision log
 
+### 2026-10-14 — Bound active correlation and retired duplicate history separately
+
+**Decision:** Use `MessageLedger` to serialize asynchronous event updates, retaining unfinished/ambiguous messages within `maxTrackedMessages` and bounding admission requests independently. Generate `runToken:base36Sequence` payload identities. Retain completed entries in a separately capped, age-limited duplicate history; expose evictions and events beyond retention. Use HdrHistogram at three significant digits, microsecond resolution, and a fixed one-hour maximum with explicit overflow counts.
+
+**Why:** Slow downstream processing must produce visible missed generation rather than unbounded memory or lost unfinished work. Provider and receipt events can precede ingress acknowledgements. Bounded duplicate history cannot guarantee an unlimited detection horizon; reporting must disclose coverage limitations instead of silently overstating correctness.
+
+**Alternatives considered:** Keeping every completed message grows with test volume. Evicting unfinished work corrupts drain accounting. Storing individual latency samples also grows with volume. Inferring acceptance from provider arrival hides ambiguous transport outcomes.
+
+**Verification:** All 15 harness tests pass, including concurrent callbacks, pre-acknowledgement completion, warm-up exclusion, request/tracking bounds, timeout ambiguity, duplicate/contradictory events, history expiry, frozen accounting, percentile accuracy, and histogram overflow. Repeated packaging now recreates the unshaded JAR before shading to avoid ingesting a previous shaded artifact.
+
 ### 2026-10-14 — Package the harness through an opt-in Maven profile
 
 **Decision:** Add `performance/harness` to the reactor only under `-Pperformance`. Package an executable shaded JVM JAR. Provide strict resolved-configuration validation and a lifecycle controller with injectable monotonic time and a protocol scenario interface. Protocol execution is added in Phase 2.
@@ -226,7 +236,7 @@ These are implementation details absent from the issue. Resolve repository-disco
 - Available AWS account, region, OIDC role, protected GitHub environment, and any account-specific restrictions needed for an actual AWS validation run.
 - Independent expiry mechanism and how its persistent bootstrap infrastructure is installed and operated.
 - Exact preset values: RDS size, instance architecture/AMI/JDK, connection windows, JVM settings, request limits, and bounded accounting capacity.
-- Correlation token encoding and bounded duplicate-detection implementation; percentile histogram algorithm/precision. Latency clock and interval attribution are defined in `performance/contracts/README.md`.
+- Correlation token encoding, bounded history, and histogram precision resolved in Task 1.3. Protocol-ID mapping is implemented with the adapters; interval publication remains Task 3.2.
 - Precise scenario-defined accounting violations and how timeout/unknown admission outcomes reconcile with provider observations.
 - Explicit artifact retention period and log redaction of isolated credentials.
 
@@ -234,4 +244,9 @@ These are implementation details absent from the issue. Resolve repository-disco
 
 ## 7. Lessons learned
 
-_Empty until the first implementation phase completes._
+### Phase 1 — Contracts and harness foundation
+
+- Provider completion may precede the ingress acknowledgement, so accounting must tolerate that ordering without losing completion counters.
+- Bounded completed-message retention requires explicit coverage limitations as well as duplicate counters.
+- Repeated shaded builds need the original application JAR recreated before shading; otherwise Maven can shade an already shaded artifact.
+- Phase 1 establishes reusable runtime components; actual protocol traffic, minute reporting, AWS infrastructure, and workflow execution remain tracked in later phases.
