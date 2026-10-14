@@ -1,6 +1,6 @@
 # On-demand AWS performance tests
 
-**Status:** Living document. Initial implementation plan awaiting review.
+**Status:** Living document. Implementation in progress; updated after each task.
 **Started:** 2026-10-14
 **Owner:** To be confirmed.
 **Planning doc:** [Issue #352](https://github.com/cytechmobile/sendium/issues/352)
@@ -13,7 +13,7 @@
 | Phase | Task | Title | Size | Status | Notes |
 |------:|-----:|-------|:----:|--------|-------|
 | 1 | 1.1 | Define harness configuration and versioned result contracts | M | 🟢 done | Added `performance/contracts/` specifications and JSON schemas; validated defaults, schema references, setup-failure output, and invalid boundaries. |
-| 1 | 1.2 | Package a standalone JVM harness with phase control | M | ⚪ not started | Separate process from Sendium; readiness, warm-up, measurement, bounded drain, and finalization. |
+| 1 | 1.2 | Package a standalone JVM harness with phase control | M | 🟢 done | Opt-in Maven module, executable validation CLI, and lifecycle controller; five tests and packaged-JAR smoke check pass. Protocol execution follows in Phase 2. |
 | 1 | 1.3 | Implement bounded message accounting and latency collection | M | ⚪ not started | Correlate measurement messages across asynchronous events; detect duplicates and unfinished work without unbounded bookkeeping. |
 | 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | ⚪ not started | Single-part messages, unique provider identifiers, configurable fixed response and delivery delays. |
 | 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | ⚪ not started | Exercise HTTP admission and callbacks with delivery reports enabled and disabled. |
@@ -146,7 +146,7 @@ Local checks are implemented alongside their respective tasks. Account-dependent
 
 The repository currently uses Java 25, Maven, Quarkus, and Cloudhopper SMPP. `sendium-core/src/test/java/utils/NativeE2eSmoke.java` contains provider/client and receipt-handling examples. `.github/workflows/run_tests.yml` already verifies PostgreSQL-backed restart behavior. These are references; benchmark load generation and timing need dedicated implementations.
 
-Proposed direction: a standalone Java harness reusing the managed Cloudhopper version. Module placement, packaging, and the specific expiry implementation remain to be selected after targeted inspection. CloudFormation is the agreed AWS provisioning approach.
+Original proposed direction: a standalone Java harness reusing the managed Cloudhopper version. ~~Module placement and packaging remain to be selected.~~ Task 1.2 adds `performance/harness` through an opt-in Maven `performance` profile and packages an executable shaded JAR. Cloudhopper integration follows with the protocol adapters. The specific expiry implementation remains open. CloudFormation is the agreed AWS provisioning approach.
 
 ---
 
@@ -170,6 +170,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-14 — Package the harness through an opt-in Maven profile
+
+**Decision:** Add `performance/harness` to the reactor only under `-Pperformance`. Package an executable shaded JVM JAR. Provide strict resolved-configuration validation and a lifecycle controller with injectable monotonic time and a protocol scenario interface. Protocol execution is added in Phase 2.
+
+**Why:** This reuses repository Java/dependency management without adding benchmark work to ordinary builds. Deterministic lifecycle tests exercise bounded drain, completion, readiness failure, and interrupted generation without waiting through full phases.
+
+**Alternatives considered:** Always adding the module increases routine build scope. A separate unrelated Maven project duplicates managed versions. Real-clock lifecycle tests would be slower and less deterministic.
+
+**Verification:** `./mvnw -Pperformance -pl performance/harness verify` passed all five tests; the shaded JAR successfully validated the fixture via `validate-config`. Readiness, generation, and finalization hooks are implemented by later protocol/accounting tasks; the current executable does not claim to run a benchmark.
 
 ### 2026-10-14 — Define workload and measurement contracts before runtime code
 
@@ -211,7 +221,7 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 
 These are implementation details absent from the issue. Resolve repository-discoverable details through inspection before asking the user.
 
-- Standalone harness module placement and packaging; whether ordinary application builds should include it or use an explicit benchmark profile.
+- Harness module placement and packaging resolved in Task 1.2; runtime protocol wiring remains tracked in Phase 2.
 - Networking stack lifetime and ownership; whether to support existing networking as well as the dedicated CloudFormation network.
 - Available AWS account, region, OIDC role, protected GitHub environment, and any account-specific restrictions needed for an actual AWS validation run.
 - Independent expiry mechanism and how its persistent bootstrap infrastructure is installed and operated.
