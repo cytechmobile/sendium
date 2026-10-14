@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sendium performance results v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "provenance", "configuration", "validity", "overall", "cohortIntervals", "eventIntervals", "resources", "drain", "measurementMetadata", "diagnostics"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "provenance": {
+      "type": "object",
+      "required": ["branch", "applicationCommit", "harnessRevision", "workflowRunUrl", "runIdentity", "artifacts"],
+      "properties": {
+        "branch": { "type": "string", "minLength": 1 },
+        "applicationCommit": { "$ref": "#/$defs/commit" },
+        "harnessRevision": { "$ref": "#/$defs/commit" },
+        "workflowRunUrl": { "type": ["string", "null"] },
+        "runIdentity": { "type": "string", "minLength": 1 },
+        "artifacts": { "type": "array", "items": { "type": "object", "required": ["name", "sha256"], "properties": { "name": { "type": "string" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } } }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "required": ["workload", "application", "infrastructure"],
+      "properties": {
+        "workload": { "$ref": "run-config.schema.json" },
+        "application": { "type": "object", "required": ["jvmArguments", "connections", "dlrStorage"], "properties": { "jvmArguments": { "type": "array", "items": { "type": "string" } }, "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled"] } } },
+        "infrastructure": { "type": "object", "required": ["preset", "region", "sendium", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object" } } }
+      }
+    },
+    "validity": { "type": "object", "required": ["status", "reasons"], "properties": { "status": { "enum": ["valid", "inconclusive", "failed"] }, "reasons": { "type": "array", "items": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1 }, "message": { "type": "string", "minLength": 1 } } } } } },
+    "overall": { "$ref": "#/$defs/measurements" },
+    "cohortIntervals": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/measurements" }, { "type": "object", "required": ["startOffsetSeconds", "endOffsetSeconds"], "properties": { "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "endOffsetSeconds": { "$ref": "#/$defs/nonnegative" } } }] } },
+    "eventIntervals": { "type": "array", "items": { "type": "object", "required": ["phase", "startOffsetSeconds", "durationSeconds", "providerResponses", "receiptsForwarded"], "properties": { "phase": { "enum": ["measurement", "drain"] }, "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "durationSeconds": { "type": "number", "exclusiveMinimum": 0 }, "providerResponses": { "$ref": "#/$defs/count" }, "receiptsForwarded": { "$ref": "#/$defs/count" } } } },
+    "resources": { "type": "object", "required": ["sendium", "harness", "cpuCredits"], "properties": { "sendium": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "harness": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "cpuCredits": { "type": "array", "items": { "type": "object", "required": ["instanceId", "mode", "samples"], "properties": { "instanceId": { "type": "string" }, "mode": { "enum": ["standard", "unlimited", "not-applicable", "unknown"] }, "samples": { "type": "array", "items": { "type": "object" } } } } } } },
+    "drain": { "type": "object", "required": ["durationSeconds", "timeoutReached", "unfinishedAccepted", "pendingAdmission"], "properties": { "durationSeconds": { "$ref": "#/$defs/nonnegative" }, "timeoutReached": { "type": "boolean" }, "unfinishedAccepted": { "$ref": "#/$defs/count" }, "pendingAdmission": { "$ref": "#/$defs/count" } } },
+    "measurementMetadata": { "type": "object", "required": ["histogramAlgorithm", "histogramPrecision", "histogramOverflowCount", "duplicateDetectionHorizonSeconds", "limitations"], "properties": { "histogramAlgorithm": { "type": "string" }, "histogramPrecision": { "type": "object" }, "histogramOverflowCount": { "$ref": "#/$defs/count" }, "duplicateDetectionHorizonSeconds": { "$ref": "#/$defs/nonnegative" }, "limitations": { "type": "array", "items": { "type": "string" } } } },
+    "diagnostics": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "count": { "type": "integer", "minimum": 0 },
+    "nonnegative": { "type": "number", "minimum": 0 },
+    "nullableNonnegative": { "type": ["number", "null"], "minimum": 0 },
+    "distribution": { "type": "object", "required": ["count", "p50Millis", "p95Millis", "p99Millis", "minMillis", "maxMillis"], "properties": { "count": { "$ref": "#/$defs/count" }, "p50Millis": { "$ref": "#/$defs/nullableNonnegative" }, "p95Millis": { "$ref": "#/$defs/nullableNonnegative" }, "p99Millis": { "$ref": "#/$defs/nullableNonnegative" }, "minMillis": { "$ref": "#/$defs/nullableNonnegative" }, "maxMillis": { "$ref": "#/$defs/nullableNonnegative" } } },
+    "measurements": {
+      "type": "object",
+      "required": ["durationSeconds", "counts", "rates", "latencies"],
+      "properties": {
+        "durationSeconds": { "$ref": "#/$defs/nonnegative" },
+        "counts": { "type": "object", "required": ["scheduled", "attempted", "missed", "accepted", "rejected", "failed", "timedOut", "pendingAdmission", "providerArrivals", "providerResponses", "acceptedProviderCompleted", "acceptedAwaitingProvider", "receiptsGenerated", "receiptsForwarded", "acceptedReceiptForwarded", "acceptedAwaitingReceipt", "duplicateProviderRequests", "duplicateReceipts", "providerObservedWithoutAcceptance", "peakOutstanding", "peakTracked"], "additionalProperties": { "$ref": "#/$defs/count" } },
+        "rates": { "type": "object", "required": ["requestedInputPerSecond", "attemptedInputPerSecond", "providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond"], "additionalProperties": { "$ref": "#/$defs/nullableNonnegative" } },
+        "latencies": { "type": "object", "required": ["acknowledgement", "submissionToProvider", "providerResponseCompletion", "receiptForwarding", "simulatorReceiptDelay"], "additionalProperties": { "$ref": "#/$defs/distribution" } }
+      }
+    },
+    "resourceSample": { "type": "object", "required": ["timestamp", "cpuPercent", "rssBytes", "hostMemoryUsedBytes"], "properties": { "timestamp": { "type": "string", "format": "date-time" }, "cpuPercent": { "$ref": "#/$defs/nullableNonnegative" }, "rssBytes": { "type": ["integer", "null"], "minimum": 0 }, "hostMemoryUsedBytes": { "type": ["integer", "null"], "minimum": 0 } } }
+  }
+}

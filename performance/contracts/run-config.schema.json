@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Resolved Sendium performance workload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "ingressMode", "offeredMessagesPerSecond", "workerTps", "warmupSeconds", "measurementSeconds", "drainTimeoutSeconds", "dlrEnabled", "providerResponseDelayMillis", "providerDlrDelayMillis", "admissionTimeoutMillis", "maxOutstandingRequests", "maxTrackedMessages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "ingressMode": { "enum": ["http", "smpp"] },
+    "offeredMessagesPerSecond": { "type": "number", "exclusiveMinimum": 0 },
+    "workerTps": { "type": "integer", "minimum": 1 },
+    "warmupSeconds": { "type": "integer", "minimum": 0, "default": 120 },
+    "measurementSeconds": { "type": "integer", "minimum": 1, "default": 600 },
+    "drainTimeoutSeconds": { "type": "integer", "minimum": 0, "default": 120 },
+    "dlrEnabled": { "type": "boolean", "default": true },
+    "providerResponseDelayMillis": { "type": "integer", "minimum": 0 },
+    "providerDlrDelayMillis": { "type": "integer", "minimum": 0 },
+    "admissionTimeoutMillis": { "type": "integer", "minimum": 1 },
+    "maxOutstandingRequests": { "type": "integer", "minimum": 1 },
+    "maxTrackedMessages": { "type": "integer", "minimum": 1 }
+  }
+}
