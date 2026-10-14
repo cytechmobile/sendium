@@ -15,7 +15,7 @@
 | 1 | 1.1 | Define harness configuration and versioned result contracts | M | 🟢 done | Added `performance/contracts/` specifications and JSON schemas; validated defaults, schema references, setup-failure output, and invalid boundaries. |
 | 1 | 1.2 | Package a standalone JVM harness with phase control | M | 🟢 done | Opt-in Maven module, executable validation CLI, and lifecycle controller; five tests and packaged-JAR smoke check pass. Protocol execution follows in Phase 2. |
 | 1 | 1.3 | Implement bounded message accounting and latency collection | M | 🟢 done | Added synchronized token ledger, bounded active/retired history, outcome snapshots, and fixed-range HdrHistogram latency collection. All 15 harness tests pass. Minute aggregation follows in 3.2. |
-| 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | ⚪ not started | Single-part messages, unique provider identifiers, configurable fixed response and delivery delays. |
+| 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | 🟢 done | Added authenticated asynchronous Cloudhopper provider with bounded pending work, configurable delays, unique IDs, and successful receipts. Seven TCP/SMPP tests pass; all 22 harness tests pass. |
 | 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | ⚪ not started | Exercise HTTP admission and callbacks with delivery reports enabled and disabled. |
 | 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | ⚪ not started | Exercise SMPP admission and delivery receipts using Cloudhopper. |
 | 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | ⚪ not started | Isolated ingress credentials, routing to the provider simulator, worker TPS, PostgreSQL delivery-report storage, callback addresses, and delivery reports disabled configuration. |
@@ -170,6 +170,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-14 — Execute provider delays outside network event loops
+
+**Decision:** Reuse the repository-managed Cloudhopper version and JitPack repository. Respond asynchronously from permit-bounded virtual-thread tasks; each permit covers response delay/write, receipt delay, and bounded receipt acknowledgement. Authenticate isolated binds and validate single-part known correlation tokens. Diagnose simulator saturation separately from Sendium overload. Delivery-report runs require transceiver binds.
+
+**Why:** Sleeping in a request callback serializes unrelated traffic on the Netty event loop and creates an artificial provider bottleneck. Unlimited per-message tasks would hide saturation through memory growth. The simulator must keep responding during drain and report protocol failures without claiming a forwarded receipt was received merely because its upstream acknowledgement succeeded.
+
+**Alternatives considered:** Event-loop sleeping is simple but distorts throughput. An unbounded delayed-task queue does not meet bounded bookkeeping requirements. Separate transmitter/receiver session pairing adds connection-routing complexity unnecessary for the initial single-provider scenario.
+
+**Verification:** All 22 harness tests pass. Seven real TCP/SMPP tests cover delay boundaries, receipt ID/address/status, disabled delivery reports, unique response IDs, invalid/multipart/unknown submissions, bound authentication, pending-work saturation, negative receipt acknowledgements, and cancellation/resource release. Packaged-JAR configuration smoke verification also passes. Cloudhopper response writing waits for local channel-write completion, matching the documented simulator-side latency boundary.
 
 ### 2026-10-14 — Bound active correlation and retired duplicate history separately
 

@@ -9,7 +9,11 @@
     </parent>
     <artifactId>sendium-performance-harness</artifactId>
     <properties><maven.deploy.skip>true</maven.deploy.skip></properties>
+    <repositories>
+        <repository><id>jitpack.io</id><url>https://jitpack.io</url></repository>
+    </repositories>
     <dependencies>
+        <dependency><groupId>com.github.cytechmobile</groupId><artifactId>cloudhopper-smpp</artifactId></dependency>
         <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId><version>2.2.2</version></dependency>
         <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
         <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>

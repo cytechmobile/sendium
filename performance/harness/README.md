@@ -63,3 +63,42 @@ resolution, a fixed one-hour maximum, and millisecond output. Overflow is counte
 never silently clamped; the reporting validity classifier must mark it
 inconclusive. Empty distributions have null percentiles. This bounds memory
 independently of message volume.
+
+## Simulated SMPP provider
+
+`SmppProvider` listens at the explicit address/port in `ProviderSettings`,
+authenticates isolated system ID/password credentials, and checks that submitted
+single-part correlation payloads are known to the ledger. The provider accepts
+default GSM or IA5 coding, rejects multipart indicators/message-payload TLVs,
+and requires receipt requests to match the workload's delivery-report setting.
+Delivery-report runs bind as transceivers; transmitter-only binds are allowed
+when delivery reports are disabled.
+
+Each successful submit receives a unique run-local `p-<base36Sequence>` provider
+ID. Bounded virtual-thread tasks wait the configured response delay, complete
+the response write, then wait the configured delivery delay before generating
+a successful `DELIVRD` receipt. Receipt addresses reverse the submitted
+source/destination. Receipt acknowledgement waits are bounded by the deployment
+I/O timeout. Forwarded receipt reception is accounted by later ingress adapters,
+not inferred from the provider's receipt acknowledgement.
+
+No configured delay blocks a Netty event loop. `maxPending` bounds all delayed
+responses and receipt acknowledgements together, independently of connection
+and SMPP window limits. Saturation returns `STATUS_THROTTLED` and increments a
+provider saturation counter; this is a harness limitation that later validity
+reporting must classify as inconclusive, not ordinary Sendium overload.
+Invalid submissions/correlation and protocol/I/O failures have separate bounded
+diagnostic counters. A receipt timeout destroys the failed session to release
+its outstanding request window; reconnection/failure-injection workloads remain
+outside V1.
+
+Use `start()`, `awaitBound(timeout)`, and `snapshot()` for lifecycle integration.
+Drain must keep the provider running and include `snapshot().pending()` so
+outstanding receipt acknowledgements are not lost. Quiesce/close it before
+freezing the ledger. `close()` cancels delayed work and releases executor and
+network resources idempotently. The simulator is currently a reusable component;
+full scenario/CLI wiring follows with the ingress adapters.
+
+Cloudhopper uses the same managed version and JitPack repository as
+`sendium-core`. Deployment credentials are redacted from the settings' string
+representation; protocol payload/byte logging is disabled.

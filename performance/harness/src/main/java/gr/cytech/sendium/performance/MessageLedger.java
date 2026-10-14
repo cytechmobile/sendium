@@ -142,6 +142,18 @@ public final class MessageLedger {
         retireIfComplete(token, entry);
     }
 
+    /** Validate and record provider arrival atomically before accepting a submit. */
+    public synchronized boolean acceptProviderArrival(String token) {
+        ensureOpen();
+        prune();
+        Entry entry = active.get(token);
+        if (entry == null && retired.containsKey(token)) { entry = retired.get(token).entry(); }
+        boolean valid = entry != null && entry.admission != Admission.REJECTED
+                && !entry.events.containsKey(Event.PROVIDER_ARRIVAL);
+        event(token, Event.PROVIDER_ARRIVAL);
+        return valid;
+    }
+
     private boolean validOrder(Entry entry, Event event) {
         return switch (event) {
             case PROVIDER_ARRIVAL -> true;
