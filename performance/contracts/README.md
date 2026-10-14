@@ -1,0 +1,147 @@
+# Performance harness contracts, version 1
+
+These contracts implement Task 1.1 of `living_docs/AwsPerformanceTests.md`.
+They describe JSON exchanged by orchestration, the harness, and reporting;
+they do not provision infrastructure or execute traffic.
+
+Validate both schemas and boundary examples with `python validate.py` from
+this directory after installing the development-only `jsonschema` package.
+Structural schema validation does not replace runtime validation of accounting
+equations, interval ordering, empty distributions, or configuration consistency
+(for example, PostgreSQL storage when delivery reports are enabled).
+
+## Configuration
+
+`run-config.schema.json` describes a fully resolved workload configuration.
+Orchestration must resolve defaults before passing it to the harness. JSON
+Schema `default` annotations are documentation, not automatic insertion.
+
+Defaults are warm-up 120 seconds, measurement 600 seconds, drain 120 seconds,
+and delivery reports enabled. Rates, provider delays, request bounds, and
+accounting capacity must be explicitly recorded. No universal throughput or
+instance-size default is imposed by this contract.
+
+`maxTrackedMessages` bounds all active correlation entries, including warm-up
+messages and unresolved admission outcomes. Never evict an unfinished message
+to make room for new traffic: miss the generation target and flag saturation.
+`maxOutstandingRequests` bounds admission requests separately. Completed
+entries may be retired into bounded duplicate-detection bookkeeping; results
+must state its detection horizon. Duplicate detection beyond that horizon is
+a recorded limitation, not a claim of exhaustive detection.
+
+Actual endpoints and credentials belong to deployment configuration, not
+these public result artifacts. Never serialize passwords, authorization
+headers, database secrets, or credential-bearing URLs.
+
+## Message accounting
+
+Each generated message carries a unique run-local correlation token in its
+single-part payload. Map ingress acknowledgement IDs and provider IDs to that
+token. The simulator rejects malformed or unknown correlation tokens as an
+accounting violation. Receipt correlation uses the provider ID and the
+forwarded ingress ID, rather than assuming those IDs are equal.
+
+Admission outcomes are mutually exclusive: accepted, rejected (explicit
+negative acknowledgement), failed (transport/protocol failure), timed out,
+or pending. A failed/timed-out request may still reach the provider: retain
+its identity and count that observation as `providerObservedWithoutAcceptance`.
+Do not automatically turn ambiguous transport outcomes into rejections.
+
+For a reporting cohort:
+
+```text
+scheduled = attempted + missed
+attempted = accepted + rejected + failed + timedOut + pendingAdmission
+accepted = acceptedProviderCompleted + acceptedAwaitingProvider
+```
+
+When delivery reports are enabled:
+
+```text
+accepted = acceptedReceiptForwarded + acceptedAwaitingReceipt
+```
+
+`acceptedAwaitingReceipt` includes messages not yet processed by the provider;
+it overlaps `acceptedAwaitingProvider` and must not be added to it. Unfinished
+accepted work is accepted messages without their final required outcome:
+provider response completion when reports are off, receipt forwarding when on.
+Use unique-message counts for accounting, and separate duplicate counters.
+
+Expected overload rejection is an outcome, not an accounting failure. Pending
+work after bounded drain is reported; it is not an arbitrary performance gate.
+Contradictory outcomes, unexpected duplicates, malformed identities, or failed
+accounting equations are scenario violations and fail the run.
+
+## Phases and interval attribution
+
+Warm-up and measurement have distinct correlation cohorts. Stop generation at
+the measurement boundary and continue outstanding provider/receipt processing
+during drain. Do not count warm-up outcomes as measurement outcomes.
+
+Each measurement message belongs to the interval of its **scheduled generation
+time**, with half-open intervals `[start, end)`. The last interval may be shorter
+than 60 seconds. Its final admission/completion counts and latency samples can
+therefore change during drain. Sum cohort counters to obtain overall counters.
+
+Also publish event-time provider-response and receipt-forwarding counters per
+minute, with an explicit `phase` of `measurement` or `drain`. These count only
+measurement messages, but place completions at the time they actually occur.
+Event-time rates expose delayed output and backlog; cohort completion divided
+by measurement duration alone must not be presented as sustainable throughput.
+Overall event throughput uses the measurement observation window; drain counts
+are separate. Requested/attempted input rates use measurement duration.
+
+## Latency boundaries and clocks
+
+All workload timing uses the harness monotonic clock. The generator, provider
+simulator, and forwarded receipt receiver run on the same harness instance;
+no cross-host wall-clock subtraction is needed. UTC timestamps identify runs
+and resource sample windows only.
+
+| Metric | Start | End |
+|--------|-------|-----|
+| Acknowledgement | Immediately before admission request dispatch | Complete HTTP response or SMPP submit response |
+| Submission to provider | Admission request dispatch | Simulator receives complete submit request |
+| Provider response completion | Admission request dispatch | Simulator completes sending the successful submit response |
+| Receipt forwarding | Simulator starts sending the generated receipt | Harness receives complete forwarded callback or SMPP receipt |
+
+The response-completion boundary is simulator-side send completion, not proof
+that Sendium consumed the response. Record this limitation in results.
+Configured delivery delay is measured from provider response send completion
+to the start of receipt generation; report actual simulator scheduling delay
+separately. It is excluded from receipt-forwarding latency.
+
+Publish count, p50/p95/p99, min/max in milliseconds for each distribution.
+No samples means null percentiles/min/max, not zero. Record the histogram
+algorithm, precision, and overflow count. Overflow makes affected latency
+statistics incomplete and the run inconclusive.
+
+## Result envelope
+
+`results.schema.json` defines the artifact envelope. Schema version changes
+when interpretation or required fields change. Version 1 includes fully
+resolved workload/application/infrastructure settings, provenance, overall
+measurements, cohort intervals, event intervals, resources, drain accounting,
+diagnostics, and validity reasons.
+
+Application/infrastructure objects preserve effective settings rather than
+silently omitting preset values. Record instance IDs/types/architecture/AZ,
+database size/placement, JVM arguments, connection/window settings, preset
+identity, worker TPS, and artifact digests. Sanitized configuration must not
+include credentials. Artifact identifiers may be updated by publication after
+execution without changing benchmark measurements.
+
+## Validity and execution outcome
+
+- `valid`: completed measurement with no detected harness bottleneck or
+  accounting/setup failure; does not imply sustainable throughput.
+- `inconclusive`: missed generation due to harness limits/scheduling, simulator
+  saturation, missing required resource samples, or measurement overflow.
+- `failed`: setup/protocol failure or a scenario accounting violation.
+
+Failure takes precedence over inconclusive. Always publish machine-readable
+reason codes plus explanations. Setup/accounting failures produce a nonzero
+execution status. Inconclusive runs remain downloadable and visibly labeled;
+overload rejections and unfinished work alone do not impose performance gates.
+If measurement never starts, observation duration is zero, intervals are empty,
+and undefined rates/distributions are null. Preserve available diagnostics.
