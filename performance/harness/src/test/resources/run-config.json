@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "ingressMode": "http",
+  "offeredMessagesPerSecond": 100,
+  "workerTps": 100,
+  "warmupSeconds": 120,
+  "measurementSeconds": 600,
+  "drainTimeoutSeconds": 120,
+  "dlrEnabled": true,
+  "providerResponseDelayMillis": 0,
+  "providerDlrDelayMillis": 1000,
+  "admissionTimeoutMillis": 10000,
+  "maxOutstandingRequests": 1000,
+  "maxTrackedMessages": 10000
+}

@@ -12,6 +12,15 @@
         <module>sendium-app</module>
     </modules>
 
+    <profiles>
+        <profile>
+            <id>performance</id>
+            <modules>
+                <module>performance/harness</module>
+            </modules>
+        </profile>
+    </profiles>
+
     <distributionManagement>
         <repository>
             <id>github</id>
