@@ -112,8 +112,8 @@ time without creating a negative accepted-message backlog before acknowledgement
 The final measurement/drain intervals may be shorter than a minute. Early-ended
 measurements retain planned cohort boundaries and their observed durations,
 including zero observed duration for future cohorts with missed targets. Resource
-collection and final validity classification are still pending Task 3.3; current
-reports explicitly declare that limitation instead of claiming valid results.
+evidence and classification are described in `../resources/README.md`; missing
+evidence is explicitly inconclusive rather than interpreted as zero utilization.
 
 Interval storage has an explicit default budget of 256 minute windows across
 measurement and maximum drain. Histograms are allocated only for sampled

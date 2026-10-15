@@ -22,7 +22,7 @@
 | 2 | 2.5 | Add local packaged-JVM scenario verification | M | 🟢 done | Added opt-in Failsafe checks using generated configuration, actual packaged Sendium JVMs, and disposable PostgreSQL 17. All four scenarios and 50 unit/socket tests pass; verified database tracking/cleanup and warm-up exclusion. |
 | 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | 🟢 done | Added absolute-time open-loop scheduling shared by both adapters, scheduling/capacity misses, intended timestamps, rate/saturation statistics, and stop/join control. All 63 unit/socket and four packaged integration tests pass. |
 | 3 | 3.2 | Produce overall and one-minute measurement reports | M | 🟢 done | Added bounded cohort/event minute aggregation, JSON/Markdown reports, drain backlog and latency percentiles. All 74 unit/socket and four packaged integration tests pass; generated reports validate against schema v1. Resource validity remains 3.3. |
-| 3 | 3.3 | Collect resource utilization and classify run validity | M | ⚪ not started | Sendium and harness CPU/memory; burstable-instance CPU-credit balances and Standard/Unlimited mode; classify harness bottlenecks as inconclusive. |
+| 3 | 3.3 | Collect resource utilization and classify run validity | M | 🟢 done | Added bounded Linux CPU/RSS/host agents, protected read-only AWS credit collection, resource summaries and validity/exit policy. 86 Java tests, eight Python tests, four packaged scenarios, schema checks and a live Linux sampler check pass. AWS API collection is mocked; live verification remains 6.1. |
 | 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | ⚪ not started | Warm-up exclusion, measurement outcomes during drain, minute boundaries, bounded bookkeeping, duplicate detection, timeout reconciliation, missed load, expected overload, and unfinished work. |
 | 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | ⚪ not started | Load generated runtime inputs, check application/database/protocol readiness, coordinate adapters/generator/collectors through phases and bounded drain, emit reports on failure, and return classified exit status before AWS integration. |
 | 4 | 4.1 | Define the AWS and workload preset | S | ⚪ not started | Record region, database size, instance architecture, JVM settings, connections/windows, traffic limits, and deployment prerequisites. |
@@ -171,6 +171,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-15 — Classify resource evidence without performance utilization thresholds
+
+**Decision:** Collect Linux process/host samples with standard-library Python agents and import bounded JSONL evidence into the harness. Keep AWS instance/credit queries in protected orchestration through a read-only CLI helper. Use actual instance-type burstability metadata and Standard/Unlimited state, preserving missing/partial CloudWatch values. Publish weighted overall/minute CPU and memory summaries with valid/inconclusive/failed classification and explicit exit status.
+
+**Why:** Memory is not available from standard EC2 CloudWatch metrics, and process/host measurements need distinct CPU denominators. CPU calculations use local monotonic deltas; UTC aligns resource windows without introducing cross-host workload-latency subtraction. Missing evidence must not appear as zero utilization. High utilization, normal overload rejection, and unfinished accepted work are measured outcomes, not arbitrary performance gates. Application/harness execution must not receive AWS provisioning credentials.
+
+**Alternatives considered:** Giving the harness AWS access expands its trust boundary unnecessarily. Treating one-core process CPU as host-wide percentage misstates multithreaded JVM utilization. Filling missing CPU-credit samples with zero creates false credit-exhaustion evidence. Applying CPU/rejection/latency thresholds would exceed the issue's V1 scope. Strict and best-effort resource import are both available so failed diagnostics do not erase other good sources.
+
+**Verification:** All 86 Java unit/socket tests pass; all four packaged Sendium/PostgreSQL scenarios passed during integration regression checks. Eight Python tests cover proc parsing, CPU denominators, PID reuse, sample budgets, AWS metadata/modes, coarse windows, missing values, and partial failures. A Linux Docker check sampled a live busy process with stable identity, positive CPU counters, RSS and host metrics. Generated resource-bearing reports validate against schema v1. AWS API tests use controlled responses; real-account collection/permissions and remote agent orchestration remain validation work in Tasks 4.5/6.1, with CLI wiring in 3.5.
 
 ### 2026-10-15 — Separate cohort accounting from minute-window throughput in reports
 
