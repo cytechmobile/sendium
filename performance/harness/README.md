@@ -276,3 +276,50 @@ listeners bind to all local interfaces inside the private environment.
 Per-message trace, raw SMPP logging, and HTTP access logging are disabled and
 recorded in the effective configuration. AWS sizing, JVM arguments, and final
 infrastructure presets remain later tasks.
+
+## Local packaged-application verification
+
+Requires Java 25, Maven, and a running Docker daemon. Build the actual application
+first, then explicitly enable the harness integration profile:
+
+```sh
+./mvnw -DskipTests -pl sendium-app -am package
+./mvnw -Pperformance,performance-integration -pl performance/harness verify
+```
+
+On Windows, use `mvnw.cmd` and quote `"-Pperformance,performance-integration"`
+when invoking Maven from PowerShell. Ordinary harness verification without
+`performance-integration` runs only the unit/socket tests and needs no Docker.
+
+`PackagedSendiumIT` starts a disposable PostgreSQL 17 container and a separate
+packaged Sendium JVM for each HTTP/SMPP and DLR enabled/disabled combination.
+Each case has an isolated database, run directory, credentials, and listener
+ports. The tests consume generated configuration directly, start the provider
+and appropriate ingress adapters, require readiness to identify PostgreSQL, and
+verify the upstream bind before submitting traffic.
+
+Each case sends two warm-up messages and three measurement messages. Assertions
+verify admission, provider completion, receipt forwarding when requested, zero
+accounting violations/harness diagnostics, and exclusion of warm-up messages
+from measurement counts. Storage metrics must show provider acceptance,
+resolution, and successful downstream completion for all five DLR-enabled
+messages, with no storage errors and no remaining message/correlation rows.
+DLR-disabled cases keep PostgreSQL available but require no tracking writes or
+generated/forwarded receipts.
+
+These are bounded functional checks, not fixed-rate performance runs or
+throughput gates. Lifecycle scheduling, interval reports, and resource sampling
+remain Phase 3 work. The integration runner stops application processes in
+`finally` blocks and stops the disposable database after the suite.
+
+Generated runtime inputs and local diagnostic logs/accounting snapshots remain
+under `performance/harness/target/integration-runs/<run-identity>/`. This private
+tree includes credentials: publish only its sanitized `public/` subtree when
+needed. Failsafe's test reports are in `target/failsafe-reports/`. A failed
+readiness check points to that case's `diagnostics/sendium.log` rather than
+printing raw runtime configuration. Nothing generated is committed.
+
+To test another compatible packaged application, set `-Dsendium.app.jar` to its
+absolute `quarkus-app/quarkus-run.jar` path; retain that directory's companion
+libraries. `-Dintegration.output.directory` can select an external diagnostic
+directory. The default application path targets the current checkout's build.

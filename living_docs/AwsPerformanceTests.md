@@ -19,7 +19,7 @@
 | 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | 🟢 done | Added asynchronous Kannel GET admission and bounded callback receiver, gateway-ID validation, race handling, and diagnostics. Ten HTTP tests pass; all 33 harness tests pass. Real Sendium/PostgreSQL integration remains 2.5. |
 | 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | 🟢 done | Added bounded transceiver client, gateway-ID correlation, timestamp-preserving early-receipt buffer, and protocol diagnostics. Nine SMPP adapter tests pass; all 42 harness tests pass. |
 | 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | 🟢 done | Added deployment input, isolated Sendium/harness bundles, sanitized configuration artifact, and `generate-config` CLI. All four mode/DLR combinations verified; all 50 harness tests and packaged CLI smoke check pass. |
-| 2 | 2.5 | Add local packaged-JVM scenario verification | M | ⚪ not started | Run Sendium, the harness, and PostgreSQL together; verify both ingress modes with delivery reports enabled and disabled before AWS integration. |
+| 2 | 2.5 | Add local packaged-JVM scenario verification | M | 🟢 done | Added opt-in Failsafe checks using generated configuration, actual packaged Sendium JVMs, and disposable PostgreSQL 17. All four scenarios and 50 unit/socket tests pass; verified database tracking/cleanup and warm-up exclusion. |
 | 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | ⚪ not started | Count scheduled, attempted, and missed submissions; expose achieved rate and harness saturation. |
 | 3 | 3.2 | Produce overall and one-minute measurement reports | M | ⚪ not started | JSON and human-readable output; throughput, percentiles, admission outcomes, receipts, backlog, and drain results. |
 | 3 | 3.3 | Collect resource utilization and classify run validity | M | ⚪ not started | Sendium and harness CPU/memory; burstable-instance CPU-credit balances and Standard/Unlimited mode; classify harness bottlenecks as inconclusive. |
@@ -171,6 +171,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 
 ## 5. Decision log
 
+### 2026-10-15 — Verify packaged Sendium against disposable PostgreSQL before AWS integration
+
+**Decision:** Add an explicit `performance-integration` Maven profile running four local packaged-JVM scenarios. Reuse generated runtime bundles and harness adapters, with isolated databases/ports/credentials per case and a suite-owned PostgreSQL 17 container. Verify storage operation metrics and final table state as well as protocol outcomes. Keep these functional checks separate from fixed-rate performance measurement.
+
+**Why:** Adapter tests alone cannot establish compatibility with Sendium's actual configuration loading, routing, PostgreSQL tracking, and receipt forwarding. Database metrics prove DLR-enabled runs exercise storage even when completed rows are deleted before inspection. The opt-in profile keeps ordinary harness checks Docker-independent.
+
+**Alternatives considered:** Embedded or mocked Sendium would not verify the packaged application boundary. Testing against shared local database state risks contamination. Running benchmarks as functional assertions would introduce premature performance thresholds. An application container is unnecessary for this JVM check: a separate Java process consumes the actual Quarkus package and generated working directory.
+
+**Verification:** Built `sendium-app` with `./mvnw -DskipTests -pl sendium-app -am package`; then `./mvnw -Pperformance,performance-integration -pl performance/harness verify` passed all 50 unit/socket tests and all four integration scenarios. DLR-enabled scenarios recorded five provider acceptances/resolutions and successful downstream completions, no storage errors, and empty final tracking/correlation tables. DLR-disabled scenarios emitted no receipts or tracking writes. Measurement accounting included three messages while excluding two warm-up messages. Application processes and the test database were stopped after execution.
+
 ### 2026-10-15 — Generate private runtime bundles and sanitized effective settings
 
 **Decision:** Generate Sendium configuration, selected ingress credentials, one provider route, harness endpoints/credentials, and a separate public effective-configuration artifact from resolved workload/deployment inputs. Refuse existing output directories. Preserve the application's build-time PostgreSQL subsystem in both DLR modes; disable receipt requests/callbacks at the workload level. Set explicit worker TPS, windows, timeouts, one outgoing transceiver, no provider-response retries, and reduced per-message logging.
@@ -290,3 +300,10 @@ These are implementation details absent from the issue. Resolve repository-disco
 - Bounded completed-message retention requires explicit coverage limitations as well as duplicate counters.
 - Repeated shaded builds need the original application JAR recreated before shading; otherwise Maven can shade an already shaded artifact.
 - Phase 1 establishes reusable runtime components; actual protocol traffic, minute reporting, AWS infrastructure, and workflow execution remain tracked in later phases.
+
+### Phase 2 — Protocol scenarios and packaged application verification
+
+- Generated credentials, callback addresses, and provider namespaces work with the actual packaged application for both ingress modes.
+- DLR-disabled traffic does not require a different application build: the standalone PostgreSQL subsystem remains configured while message-level receipt requests are omitted.
+- Successful forwarding deletes tracking rows quickly. Storage operation metrics plus empty final tables provide evidence of the full database-backed path without depending on a transient row observation.
+- A separate packaged JVM and disposable database are sufficient for local functional verification; fixed-rate scheduling, minute reports, resource sampling, and AWS execution remain subsequent work.
