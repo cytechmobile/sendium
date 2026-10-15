@@ -38,9 +38,9 @@ public final class Lifecycle {
             observer.accept(Phase.READINESS);
             scenario.awaitReady();
             generate(scenario, Phase.WARMUP, config.warmupSeconds());
-            generate(scenario, Phase.MEASUREMENT, config.measurementSeconds());
+            long measurementEnd = generate(scenario, Phase.MEASUREMENT, config.measurementSeconds());
             observer.accept(Phase.DRAIN);
-            long start = clock.nanoTime();
+            long start = measurementEnd;
             long budget = Duration.ofSeconds(config.drainTimeoutSeconds()).toNanos();
             while (scenario.hasOutstandingWork() && clock.nanoTime() - start < budget) {
                 clock.sleepNanos(Math.max(0, Math.min(POLL_NANOS, budget - (clock.nanoTime() - start))));
@@ -54,7 +54,7 @@ public final class Lifecycle {
         }
     }
 
-    private void generate(Scenario scenario, Phase phase, int seconds) throws Exception {
+    private long generate(Scenario scenario, Phase phase, int seconds) throws Exception {
         observer.accept(phase);
         long start = clock.nanoTime();
         long duration = Duration.ofSeconds(seconds).toNanos();
@@ -68,5 +68,6 @@ public final class Lifecycle {
         } finally {
             scenario.stopGeneration();
         }
+        return start + duration;
     }
 }

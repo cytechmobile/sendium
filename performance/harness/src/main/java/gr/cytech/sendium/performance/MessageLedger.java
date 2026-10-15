@@ -5,6 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.EnumMap;
 import java.util.function.LongSupplier;
+import java.util.concurrent.TimeUnit;
+import static gr.cytech.sendium.performance.Measurements.Counter.*;
 
 /** All protocol callbacks share this bounded, synchronized ledger. */
 public final class MessageLedger {
@@ -25,14 +27,16 @@ public final class MessageLedger {
     private static final class Entry {
         final boolean measured;
         final long scheduledNanos;
+        final Measurements cohort;
         long dispatch;
+        long admittedAt;
         boolean explicitlyDispatched;
         Admission admission = Admission.PENDING;
         String ingressId;
         String forwardedIngressId;
         final EnumMap<Event, Long> events = new EnumMap<>(Event.class);
-        Entry(boolean measured, long scheduledNanos, long dispatch) {
-            this.measured = measured; this.scheduledNanos = scheduledNanos; this.dispatch = dispatch;
+        Entry(boolean measured, long scheduledNanos, long dispatch, Measurements cohort) {
+            this.measured = measured; this.scheduledNanos = scheduledNanos; this.dispatch = dispatch; this.cohort = cohort;
         }
     }
 
@@ -44,11 +48,9 @@ public final class MessageLedger {
     private final Map<String, Entry> active = new HashMap<>();
     private final Map<String, String> ingressIds = new HashMap<>();
     private final LinkedHashMap<String, Retired> retired = new LinkedHashMap<>();
-    private final EnumMap<Latency, LatencyHistogram> histograms = new EnumMap<>(Latency.class);
-    private long sequence, scheduled, attempted, missed, accepted, rejected, failed, timedOut;
-    private long providerArrivals, providerResponses, receiptsGenerated, receiptsForwarded;
-    private long providerCompleted, receiptCompleted, ambiguousProvider, duplicateProvider, duplicateReceipt;
-    private long violations, outstanding, measuredPending, peakOutstanding, peakTracked, retiredEvictions;
+    private final Measurements overall = new Measurements();
+    private MeasurementTimeline timeline;
+    private long sequence, violations, outstanding, peakOutstanding, peakTracked, retiredEvictions;
     private long eventsBeyondRetention;
     private boolean frozen;
 
@@ -60,8 +62,26 @@ public final class MessageLedger {
         this.prefix = runToken + ":";
         this.clock = clock;
         this.retentionNanos = retentionNanos;
-        for (Latency latency : Latency.values()) { histograms.put(latency, new LatencyHistogram()); }
     }
+
+    public synchronized void beginMeasurement(long start, long duration) {
+        beginMeasurement(start, duration, MeasurementTimeline.DEFAULT_MAX_INTERVALS);
+    }
+
+    public synchronized void beginMeasurement(long start, long duration, int intervalBudget) {
+        ensureOpen();
+        if (duration == 0) { return; }
+        if (timeline != null) {
+            if (!timeline.matches(start, duration)) { throw new IllegalStateException("Measurement window already defined"); }
+            return;
+        }
+        if (overall.get(SCHEDULED) != 0) { throw new IllegalStateException("Define the window before measurement traffic"); }
+        timeline = new MeasurementTimeline(start, duration, TimeUnit.SECONDS.toNanos(config.drainTimeoutSeconds()), intervalBudget);
+    }
+
+    public synchronized long endMeasurement() { return timeline == null ? clock.getAsLong() : timeline.end(clock.getAsLong()); }
+    public synchronized void finishDrain() { if (timeline != null) { timeline.finish(clock.getAsLong()); } }
+    public synchronized MeasurementTimeline.Snapshot timeline() { return timeline == null ? null : timeline.snapshot(config.dlrEnabled(), clock.getAsLong()); }
 
     /** Null means a missed generation target. Never evict unfinished work. */
     public synchronized String attempt(boolean measured) {
@@ -71,17 +91,21 @@ public final class MessageLedger {
     public synchronized String attempt(boolean measured, long scheduledNanos) {
         ensureOpen();
         prune();
-        if (measured) { scheduled++; }
+        Measurements cohort = measured && timeline != null ? timeline.cohort(scheduledNanos) : null;
+        Entry entry = new Entry(measured, scheduledNanos, clock.getAsLong(), cohort);
+        add(entry, SCHEDULED, 1);
         if (active.size() >= config.maxTrackedMessages() || outstanding >= config.maxOutstandingRequests()) {
-            if (measured) { missed++; }
+            add(entry, MISSED, 1);
             return null;
         }
         String token = prefix + Long.toUnsignedString(++sequence, 36);
-        active.put(token, new Entry(measured, scheduledNanos, clock.getAsLong()));
+        active.put(token, entry);
         outstanding++;
         peakOutstanding = Math.max(peakOutstanding, outstanding);
         peakTracked = Math.max(peakTracked, active.size());
-        if (measured) { attempted++; measuredPending++; }
+        add(entry, ATTEMPTED, 1); add(entry, PENDING, 1);
+        if (cohort != null) { cohort.reserve(); }
+        if (measured && timeline != null) { timeline.backlog(clock.getAsLong(), 1, 0, 0); }
         return token;
     }
 
@@ -90,8 +114,17 @@ public final class MessageLedger {
         ensureOpen();
         if (count < 0) { throw new IllegalArgumentException("Negative target count"); }
         if (measured) {
-            scheduled = Math.addExact(scheduled, count);
-            missed = Math.addExact(missed, count);
+            if (timeline != null) { throw new IllegalStateException("Interval accounting requires timestamped missed targets"); }
+            overall.add(SCHEDULED, count); overall.add(MISSED, count);
+        }
+    }
+
+    synchronized void missedTargets(boolean measured, long phaseStart, long first, long count, double rate) {
+        ensureOpen();
+        if (count < 0) { throw new IllegalArgumentException("Negative target count"); }
+        if (measured) {
+            if (timeline != null) { timeline.missedRange(phaseStart, first, count, rate); }
+            overall.add(SCHEDULED, count); overall.add(MISSED, count);
         }
     }
 
@@ -125,6 +158,7 @@ public final class MessageLedger {
         if (entry == null) { return; }
         if (outcome == Admission.PENDING || entry.admission != Admission.PENDING) { violations++; return; }
         entry.admission = outcome;
+        entry.admittedAt = clock.getAsLong();
         entry.ingressId = ingressId;
         if (ingressId != null) {
             String previous = ingressIds.putIfAbsent(ingressId, token);
@@ -134,23 +168,26 @@ public final class MessageLedger {
                 && !ingressId.equals(entry.forwardedIngressId)) { violations++; }
         outstanding--;
         if (entry.measured) {
-            measuredPending--;
+            long providerBefore = overall.providerPending(), receiptBefore = overall.receiptPending(config.dlrEnabled());
+            add(entry, PENDING, -1);
             switch (outcome) {
                 case ACCEPTED -> {
-                    accepted++;
-                    if (entry.events.containsKey(Event.PROVIDER_RESPONSE)) { providerCompleted++; }
-                    if (entry.events.containsKey(Event.RECEIPT_FORWARDED)) { receiptCompleted++; }
+                    add(entry, ACCEPTED, 1);
+                    if (entry.events.containsKey(Event.PROVIDER_RESPONSE)) { add(entry, PROVIDER_COMPLETED, 1); }
+                    if (entry.events.containsKey(Event.RECEIPT_FORWARDED)) { add(entry, RECEIPT_COMPLETED, 1); }
                 }
-                case REJECTED -> rejected++;
-                case FAILED -> failed++;
-                case TIMED_OUT -> timedOut++;
+                case REJECTED -> add(entry, REJECTED, 1);
+                case FAILED -> add(entry, FAILED, 1);
+                case TIMED_OUT -> add(entry, TIMED_OUT, 1);
                 default -> throw new IllegalStateException();
             }
             if (outcome == Admission.ACCEPTED || outcome == Admission.REJECTED) {
-                histograms.get(Latency.ACKNOWLEDGEMENT).recordNanos(clock.getAsLong() - entry.dispatch);
+                sample(entry, Latency.ACKNOWLEDGEMENT, entry.admittedAt - entry.dispatch);
             }
             if ((outcome == Admission.FAILED || outcome == Admission.TIMED_OUT)
-                    && entry.events.containsKey(Event.PROVIDER_ARRIVAL)) { ambiguousProvider++; }
+                    && entry.events.containsKey(Event.PROVIDER_ARRIVAL)) { add(entry, AMBIGUOUS_PROVIDER, 1); }
+            if (timeline != null) { timeline.backlog(entry.admittedAt, -1,
+                    overall.providerPending() - providerBefore, overall.receiptPending(config.dlrEnabled()) - receiptBefore); }
         }
         if (outcome == Admission.REJECTED && !entry.events.isEmpty()) { violations++; }
         retireIfComplete(token, entry);
@@ -166,8 +203,8 @@ public final class MessageLedger {
         if (entry == null) { return; }
         if (entry.events.containsKey(event)) {
             violations++;
-            if (entry.measured && event == Event.PROVIDER_ARRIVAL) { duplicateProvider++; }
-            if (entry.measured && event == Event.RECEIPT_FORWARDED) { duplicateReceipt++; }
+            if (event == Event.PROVIDER_ARRIVAL) { add(entry, DUPLICATE_PROVIDER, 1); }
+            if (event == Event.RECEIPT_FORWARDED) { add(entry, DUPLICATE_RECEIPT, 1); }
             return;
         }
         if (entry.admission == Admission.REJECTED || !validOrder(entry, event)) { violations++; return; }
@@ -180,26 +217,33 @@ public final class MessageLedger {
         if (now - predecessor < 0) { violations++; return; }
         entry.events.put(event, now);
         if (entry.measured) {
+            long providerBefore = overall.providerPending(), receiptBefore = overall.receiptPending(config.dlrEnabled());
             switch (event) {
                 case PROVIDER_ARRIVAL -> {
-                    providerArrivals++;
-                    sample(Latency.SUBMISSION_TO_PROVIDER, now - entry.dispatch);
-                    if (entry.admission == Admission.FAILED || entry.admission == Admission.TIMED_OUT) { ambiguousProvider++; }
+                    add(entry, PROVIDER_ARRIVALS, 1);
+                    sample(entry, Latency.SUBMISSION_TO_PROVIDER, now - entry.dispatch);
+                    if (entry.admission == Admission.FAILED || entry.admission == Admission.TIMED_OUT) { add(entry, AMBIGUOUS_PROVIDER, 1); }
                 }
                 case PROVIDER_RESPONSE -> {
-                    providerResponses++;
-                    if (entry.admission == Admission.ACCEPTED) { providerCompleted++; }
-                    sample(Latency.PROVIDER_RESPONSE_COMPLETION, now - entry.dispatch);
+                    add(entry, PROVIDER_RESPONSES, 1);
+                    if (entry.admission == Admission.ACCEPTED) { add(entry, PROVIDER_COMPLETED, 1); }
+                    sample(entry, Latency.PROVIDER_RESPONSE_COMPLETION, now - entry.dispatch);
                 }
                 case RECEIPT_GENERATED -> {
-                    receiptsGenerated++;
-                    sample(Latency.SIMULATOR_RECEIPT_DELAY, now - entry.events.get(Event.PROVIDER_RESPONSE));
+                    add(entry, RECEIPTS_GENERATED, 1);
+                    sample(entry, Latency.SIMULATOR_RECEIPT_DELAY, now - entry.events.get(Event.PROVIDER_RESPONSE));
                 }
                 case RECEIPT_FORWARDED -> {
-                    receiptsForwarded++;
-                    if (entry.admission == Admission.ACCEPTED) { receiptCompleted++; }
-                    sample(Latency.RECEIPT_FORWARDING, now - entry.events.get(Event.RECEIPT_GENERATED));
+                    add(entry, RECEIPTS_FORWARDED, 1);
+                    if (entry.admission == Admission.ACCEPTED) { add(entry, RECEIPT_COMPLETED, 1); }
+                    sample(entry, Latency.RECEIPT_FORWARDING, now - entry.events.get(Event.RECEIPT_GENERATED));
                 }
+            }
+            if (timeline != null) {
+                timeline.recordEvent(now, event);
+                long backlogTime = entry.admission == Admission.ACCEPTED && now - entry.admittedAt < 0 ? entry.admittedAt : now;
+                timeline.backlog(backlogTime, 0, overall.providerPending() - providerBefore,
+                        overall.receiptPending(config.dlrEnabled()) - receiptBefore);
             }
         }
         retireIfComplete(token, entry);
@@ -259,7 +303,13 @@ public final class MessageLedger {
         };
     }
 
-    private void sample(Latency latency, long nanos) { histograms.get(latency).recordNanos(nanos); }
+    private void add(Entry entry, Measurements.Counter counter, long amount) {
+        if (entry.measured) { overall.add(counter, amount); if (entry.cohort != null) { entry.cohort.add(counter, amount); } }
+    }
+    private void sample(Entry entry, Latency latency, long nanos) {
+        overall.sample(latency, nanos);
+        if (entry.cohort != null) { entry.cohort.sample(latency, nanos); }
+    }
 
     private Entry find(String token) {
         prune();
@@ -287,12 +337,14 @@ public final class MessageLedger {
                 || entry.admission == Admission.ACCEPTED && entry.events.containsKey(
                         config.dlrEnabled() ? Event.RECEIPT_FORWARDED : Event.PROVIDER_RESPONSE);
         if (complete && active.remove(token) != null) {
+            if (entry.cohort != null) { entry.cohort.retire(); }
             retired.put(token, new Retired(entry, clock.getAsLong()));
             prune();
         }
     }
 
     private void prune() {
+        if (frozen) { return; }
         var iterator = retired.entrySet().iterator();
         long now = clock.getAsLong();
         while (iterator.hasNext()) {
@@ -308,17 +360,11 @@ public final class MessageLedger {
     }
 
     public synchronized Counts snapshot() {
-        return new Counts(scheduled, attempted, missed, accepted, rejected, failed, timedOut,
-                measuredPending, providerArrivals, providerResponses, receiptsGenerated, receiptsForwarded,
-                providerCompleted, accepted - providerCompleted, receiptCompleted,
-                config.dlrEnabled() ? accepted - receiptCompleted : 0,
-                ambiguousProvider, duplicateProvider, duplicateReceipt, violations, peakOutstanding, peakTracked);
+        return overall.snapshot(config.dlrEnabled(), violations, peakOutstanding, peakTracked);
     }
 
     public synchronized Map<Latency, LatencyHistogram.Snapshot> latencies() {
-        Map<Latency, LatencyHistogram.Snapshot> result = new EnumMap<>(Latency.class);
-        histograms.forEach((key, value) -> result.put(key, value.snapshot()));
-        return Map.copyOf(result);
+        return overall.latencies();
     }
 
     public synchronized boolean hasOutstandingWork() { return !active.isEmpty(); }
@@ -326,6 +372,9 @@ public final class MessageLedger {
     public synchronized int retiredSize() { prune(); return retired.size(); }
     public synchronized long retiredEvictions() { return retiredEvictions; }
     public synchronized long eventsBeyondRetention() { return eventsBeyondRetention; }
-    public synchronized void freeze() { frozen = true; }
+    public synchronized long outstandingRequests() { return outstanding; }
+    public synchronized long retentionNanos() { return retentionNanos; }
+    public synchronized boolean isFrozen() { return frozen; }
+    public synchronized void freeze() { prune(); if (timeline != null) { timeline.finish(clock.getAsLong()); } frozen = true; }
     private void ensureOpen() { if (frozen) { throw new IllegalStateException("Accounting is finalized"); } }
 }

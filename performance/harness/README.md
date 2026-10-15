@@ -368,4 +368,64 @@ future does not cancel the internal phase or permit overlapping phases; use
 Adapters retain the original scheduled timestamp alongside actual dispatch
 timing, providing the basis for submission-cohort intervals in Task 3.2. Network
 latency still begins at actual request dispatch rather than scheduled time.
-JSON/summary reporting and final validity classification remain Tasks 3.2/3.3.
+JSON/summary reporting is described below; full validity classification remains Task 3.3.
+
+## Overall and one-minute reports
+
+`ResultReport` builds a schema-version-1 `results.json` and a GitHub-compatible
+`summary.md` from frozen accounting. Supply exact branch/commit/harness/artifact
+provenance, sanitized application/infrastructure settings, ordered generator
+phase statistics, and the drain timeout outcome. Never supply the private
+runtime bundles as report context. `write()` refuses existing report files.
+
+The fixed-rate generator defines the measurement origin automatically. Manual
+drivers must call `ledger.beginMeasurement(startNanos, durationNanos)` before
+measurement traffic. End measurement on early termination, call `finishDrain()`
+when observation stops, quiesce the adapters, then freeze accounting before
+reporting. Finalization does not extend an already recorded drain window.
+The lifecycle controller's absolute drain deadline includes time spent stopping
+generation, keeping its budget aligned with reporting boundaries.
+
+Reports contain two complementary minute views:
+
+- **Submission cohorts:** admission outcomes, provider/receipt completion counts,
+  unfinished work, and p50/p95/p99 latency boundaries for messages scheduled in
+  each minute. Outcomes received during drain update their original cohorts.
+- **Event-time output:** provider arrivals/responses and receipts per second in
+  actual measurement/drain minute windows, plus end-of-window pending admission
+  and accepted work awaiting provider/receipt completion. Warm-up events are
+  excluded, including those arriving during measurement or drain.
+
+Overall sending/receipt rates exclude drain completions. Cohort provider/receipt
+rate fields are null rather than misleading completion-derived throughput.
+Partial minutes use their actual observation duration. Empty distributions/rates
+are null where undefined. Overall peaks include warm-up resource pressure;
+per-cohort peaks and global scenario violations are not additive counters.
+
+Shared counter and histogram update rules serve both overall and cohort totals.
+Minute counters/histograms survive message-history eviction without retaining
+individual events. The default interval budget is 256 measurement-plus-drain
+minute windows; call the three-argument `beginMeasurement` first to configure a
+different explicit memory budget. Histogram allocation is lazy per metric and
+cohort. Out-of-window updates are counted as a limitation, not silently added to
+the measured throughput.
+
+Until Task 3.3 integrates resource collection and full validity classification,
+reports carry `RESOURCE_MEASUREMENTS_PENDING` and remain inconclusive. Known
+accounting violations or an unstarted measurement are reported as failed. Empty
+resource arrays mean unavailable measurements, not zero utilization. No
+performance pass/fail thresholds are introduced.
+
+Report tests write synthetic fixtures under `target/report-fixtures/` and cover
+minute boundaries, drain attribution, replayed receipt timestamps, bounded
+history/budgets, partial observations, and stable finalization. Validate the
+actual JSON output against the contract from the repository root:
+
+```sh
+python -m pip install -r performance/contracts/requirements-dev.txt
+python performance/contracts/validate.py --results-directory performance/harness/target/report-fixtures
+```
+
+The current CLI exposes validation/config generation; a dedicated pending Task
+3.5 wires readiness, adapters, phases, collectors, reporting, and exit status
+into a runnable benchmark command before AWS deployment integration.

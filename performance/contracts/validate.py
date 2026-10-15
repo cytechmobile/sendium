@@ -1,6 +1,7 @@
 """Validate contract schemas and boundary examples (requires jsonschema)."""
 
 import copy
+import argparse
 import json
 from pathlib import Path
 
@@ -83,3 +84,14 @@ invalid = copy.deepcopy(result)
 invalid["overall"]["latencies"]["acknowledgement"]["p99Millis"] = -1
 assert not result_validator.is_valid(invalid), "Latency must reject negative values"
 print("Both schemas valid; resolved workload, setup-failure output, and invalid boundaries verified.")
+
+parser = argparse.ArgumentParser(description="Validate performance contracts and generated results")
+parser.add_argument("--results-directory", type=Path)
+arguments = parser.parse_args()
+if arguments.results_directory is not None:
+    results = sorted(arguments.results_directory.rglob("results.json"))
+    if not results:
+        raise SystemExit("No generated results.json files found")
+    for path in results:
+        result_validator.validate(json.loads(path.read_text(encoding="utf-8")))
+    print(f"Validated {len(results)} generated reports against the version 1 result schema.")
