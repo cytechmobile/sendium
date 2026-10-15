@@ -10,6 +10,7 @@ import java.util.function.LongSupplier;
 public final class MessageLedger {
     public enum Admission { PENDING, ACCEPTED, REJECTED, FAILED, TIMED_OUT }
     public enum Event { PROVIDER_ARRIVAL, PROVIDER_RESPONSE, RECEIPT_GENERATED, RECEIPT_FORWARDED }
+    public enum ReceiptResult { RECORDED, INVALID, BEYOND_RETENTION }
     public enum Latency { ACKNOWLEDGEMENT, SUBMISSION_TO_PROVIDER, PROVIDER_RESPONSE_COMPLETION,
         RECEIPT_FORWARDING, SIMULATOR_RECEIPT_DELAY }
 
@@ -23,8 +24,11 @@ public final class MessageLedger {
 
     private static final class Entry {
         final boolean measured;
-        final long dispatch;
+        long dispatch;
+        boolean explicitlyDispatched;
         Admission admission = Admission.PENDING;
+        String ingressId;
+        String forwardedIngressId;
         final EnumMap<Event, Long> events = new EnumMap<>(Event.class);
         Entry(boolean measured, long dispatch) { this.measured = measured; this.dispatch = dispatch; }
     }
@@ -35,6 +39,7 @@ public final class MessageLedger {
     private final String prefix;
     private final long retentionNanos;
     private final Map<String, Entry> active = new HashMap<>();
+    private final Map<String, String> ingressIds = new HashMap<>();
     private final LinkedHashMap<String, Retired> retired = new LinkedHashMap<>();
     private final EnumMap<Latency, LatencyHistogram> histograms = new EnumMap<>(Latency.class);
     private long sequence, scheduled, attempted, missed, accepted, rejected, failed, timedOut;
@@ -74,11 +79,35 @@ public final class MessageLedger {
     }
 
     public synchronized void admission(String token, Admission outcome) {
+        admission(token, outcome, null);
+    }
+
+    /** Exclude request construction from network latency; token allocation still reserves capacity. */
+    public synchronized void markDispatched(String token) {
+        ensureOpen();
+        Entry entry = active.get(token);
+        if (entry == null || entry.explicitlyDispatched || entry.admission != Admission.PENDING
+                || !entry.events.isEmpty()) {
+            violations++;
+            throw new IllegalStateException("Invalid dispatch transition");
+        }
+        entry.dispatch = clock.getAsLong();
+        entry.explicitlyDispatched = true;
+    }
+
+    public synchronized void admission(String token, Admission outcome, String ingressId) {
         ensureOpen();
         Entry entry = find(token);
         if (entry == null) { return; }
         if (outcome == Admission.PENDING || entry.admission != Admission.PENDING) { violations++; return; }
         entry.admission = outcome;
+        entry.ingressId = ingressId;
+        if (ingressId != null) {
+            String previous = ingressIds.putIfAbsent(ingressId, token);
+            if (previous != null && !previous.equals(token)) { violations++; }
+        }
+        if (ingressId != null && entry.forwardedIngressId != null
+                && !ingressId.equals(entry.forwardedIngressId)) { violations++; }
         outstanding--;
         if (entry.measured) {
             measuredPending--;
@@ -154,6 +183,30 @@ public final class MessageLedger {
         return valid;
     }
 
+    /** Callback token permits correlation before the admission response supplies its gateway ID. */
+    public synchronized boolean receipt(String token, String ingressId) {
+        return receiveReceipt(token, ingressId) == ReceiptResult.RECORDED;
+    }
+
+    public synchronized ReceiptResult receiveReceipt(String token, String ingressId) {
+        ensureOpen();
+        long before = eventsBeyondRetention;
+        Entry entry = find(token);
+        if (entry == null) {
+            return eventsBeyondRetention > before ? ReceiptResult.BEYOND_RETENTION : ReceiptResult.INVALID;
+        }
+        if (ingressId == null || ingressId.isBlank()
+                || entry.ingressId != null && !entry.ingressId.equals(ingressId)
+                || entry.forwardedIngressId != null && !entry.forwardedIngressId.equals(ingressId)) {
+            violations++;
+            return ReceiptResult.INVALID;
+        }
+        entry.forwardedIngressId = ingressId;
+        boolean valid = validOrder(entry, Event.RECEIPT_FORWARDED) && entry.admission != Admission.REJECTED;
+        event(token, Event.RECEIPT_FORWARDED);
+        return valid ? ReceiptResult.RECORDED : ReceiptResult.INVALID;
+    }
+
     private boolean validOrder(Entry entry, Event event) {
         return switch (event) {
             case PROVIDER_ARRIVAL -> true;
@@ -200,9 +253,13 @@ public final class MessageLedger {
         var iterator = retired.entrySet().iterator();
         long now = clock.getAsLong();
         while (iterator.hasNext()) {
-            Retired value = iterator.next().getValue();
+            var retiredEntry = iterator.next();
+            Retired value = retiredEntry.getValue();
             if (retired.size() <= config.maxTrackedMessages() && now - value.retiredAt() < retentionNanos) { break; }
             iterator.remove();
+            if (value.entry().ingressId != null) {
+                ingressIds.remove(value.entry().ingressId, retiredEntry.getKey());
+            }
             retiredEvictions++;
         }
     }

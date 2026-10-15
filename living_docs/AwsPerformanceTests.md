@@ -16,7 +16,7 @@
 | 1 | 1.2 | Package a standalone JVM harness with phase control | M | 🟢 done | Opt-in Maven module, executable validation CLI, and lifecycle controller; five tests and packaged-JAR smoke check pass. Protocol execution follows in Phase 2. |
 | 1 | 1.3 | Implement bounded message accounting and latency collection | M | 🟢 done | Added synchronized token ledger, bounded active/retired history, outcome snapshots, and fixed-range HdrHistogram latency collection. All 15 harness tests pass. Minute aggregation follows in 3.2. |
 | 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | 🟢 done | Added authenticated asynchronous Cloudhopper provider with bounded pending work, configurable delays, unique IDs, and successful receipts. Seven TCP/SMPP tests pass; all 22 harness tests pass. |
-| 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | ⚪ not started | Exercise HTTP admission and callbacks with delivery reports enabled and disabled. |
+| 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | 🟢 done | Added asynchronous Kannel GET admission and bounded callback receiver, gateway-ID validation, race handling, and diagnostics. Ten HTTP tests pass; all 33 harness tests pass. Real Sendium/PostgreSQL integration remains 2.5. |
 | 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | ⚪ not started | Exercise SMPP admission and delivery receipts using Cloudhopper. |
 | 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | ⚪ not started | Isolated ingress credentials, routing to the provider simulator, worker TPS, PostgreSQL delivery-report storage, callback addresses, and delivery reports disabled configuration. |
 | 2 | 2.5 | Add local packaged-JVM scenario verification | M | ⚪ not started | Run Sendium, the harness, and PostgreSQL together; verify both ingress modes with delivery reports enabled and disabled before AWS integration. |
@@ -170,6 +170,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-14 — Correlate HTTP callbacks with token and gateway acknowledgement identity
+
+**Decision:** Include the run-local token plus Sendium's `%s` gateway ID and `%d` delivery status in each callback template. Validate callback identity against the admission response even when receipt reception precedes acknowledgement. Keep a bounded gateway-ID index to detect reuse. Use bounded asynchronous HTTP requests and a fixed-worker, bounded-queue callback receiver; expose saturation. Start latency timing after request construction.
+
+**Why:** Callback delivery can race with HTTP response consumption. Waiting for acknowledgement mapping before accepting a valid callback would create artificial retries. Token correlation preserves early outcomes while later identity validation detects mismatches. Body/query limits and bounded callbacks preserve the harness memory budget.
+
+**Alternatives considered:** Gateway-ID-only lookup loses early callbacks unless another queue is introduced. A blocking submission loop reduces offered load when admission slows. Following redirects obscures API errors and exposes credentials beyond the configured endpoint. Treating server errors as confirmed rejection discards potentially admitted work.
+
+**Verification:** All 33 harness tests pass, including ten HTTP adapter tests for encoded parameters, callback-before-acknowledgement, delivery reports disabled, overload/authentication/server/redirect outcomes, timeout ambiguity, request limits, malformed/oversized response bodies, duplicate/mismatched callback identities, queue saturation, expired-history limitations, and cancellation. A ledger test additionally verifies the dispatch latency boundary. These controlled-endpoint tests do not substitute for packaged Sendium and PostgreSQL verification in Task 2.5.
 
 ### 2026-10-14 — Execute provider delays outside network event loops
 

@@ -15,6 +15,18 @@ class MessageLedgerTest {
     }
 
     @Test
+    void dispatchTimestampExcludesConstructionAndCanOnlyBeSetOnce() {
+        MessageLedger ledger = ledger(false, 1, 1);
+        String token = ledger.attempt(true);
+        time.set(10_000_000);
+        ledger.markDispatched(token);
+        time.set(11_000_000);
+        ledger.event(token, PROVIDER_ARRIVAL);
+        assertEquals(1.0, ledger.latencies().get(MessageLedger.Latency.SUBMISSION_TO_PROVIDER).p50Millis(), 0.01);
+        assertThrows(IllegalStateException.class, () -> ledger.markDispatched(token));
+    }
+
+    @Test
     void concurrentProtocolCallbacksPreserveUniqueMessageTotals() throws Exception {
         MessageLedger ledger = ledger(false, 100, 100);
         try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
