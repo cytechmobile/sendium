@@ -18,7 +18,7 @@
 | 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | 🟢 done | Added authenticated asynchronous Cloudhopper provider with bounded pending work, configurable delays, unique IDs, and successful receipts. Seven TCP/SMPP tests pass; all 22 harness tests pass. |
 | 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | 🟢 done | Added asynchronous Kannel GET admission and bounded callback receiver, gateway-ID validation, race handling, and diagnostics. Ten HTTP tests pass; all 33 harness tests pass. Real Sendium/PostgreSQL integration remains 2.5. |
 | 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | 🟢 done | Added bounded transceiver client, gateway-ID correlation, timestamp-preserving early-receipt buffer, and protocol diagnostics. Nine SMPP adapter tests pass; all 42 harness tests pass. |
-| 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | ⚪ not started | Isolated ingress credentials, routing to the provider simulator, worker TPS, PostgreSQL delivery-report storage, callback addresses, and delivery reports disabled configuration. |
+| 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | 🟢 done | Added deployment input, isolated Sendium/harness bundles, sanitized configuration artifact, and `generate-config` CLI. All four mode/DLR combinations verified; all 50 harness tests and packaged CLI smoke check pass. |
 | 2 | 2.5 | Add local packaged-JVM scenario verification | M | ⚪ not started | Run Sendium, the harness, and PostgreSQL together; verify both ingress modes with delivery reports enabled and disabled before AWS integration. |
 | 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | ⚪ not started | Count scheduled, attempted, and missed submissions; expose achieved rate and harness saturation. |
 | 3 | 3.2 | Produce overall and one-minute measurement reports | M | ⚪ not started | JSON and human-readable output; throughput, percentiles, admission outcomes, receipts, backlog, and drain results. |
@@ -170,6 +170,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-15 — Generate private runtime bundles and sanitized effective settings
+
+**Decision:** Generate Sendium configuration, selected ingress credentials, one provider route, harness endpoints/credentials, and a separate public effective-configuration artifact from resolved workload/deployment inputs. Refuse existing output directories. Preserve the application's build-time PostgreSQL subsystem in both DLR modes; disable receipt requests/callbacks at the workload level. Set explicit worker TPS, windows, timeouts, one outgoing transceiver, no provider-response retries, and reduced per-message logging.
+
+**Why:** Packaged Sendium enables DLR persistence during Quarkus augmentation; disabling it at runtime would change or break the tested application boundary. Consistent generated credentials/endpoints prevent hand-edited scenarios from diverging. Runtime secrets must not enter downloadable results. V1 excludes retry workloads, and logging settings affect benchmark reproducibility.
+
+**Alternatives considered:** Rebuilding a different application for DLR-disabled runs changes the tested artifact. Publishing runtime configuration verbatim leaks credentials. Reusing a mutable output directory risks mixing settings and database state across runs. Leaving provider-response retry defaults enabled can create duplicate traffic when the harness saturates.
+
+**Verification:** All 50 harness tests pass, including eight configuration tests covering four ingress/DLR combinations, YAML credential parsing, properties/JSON round trips, runtime credential consistency, sanitized publication, independent credentials, invalid input/capacity, file ownership boundaries, and CLI overwrite refusal. The executable JAR also generated a fresh bundle successfully. POSIX permission assertions are conditional and were not exercised on this Windows host. Packaged Sendium/PostgreSQL execution remains Task 2.5.
 
 ### 2026-10-15 — Preserve arrival timestamps while buffering early SMPP receipts
 
