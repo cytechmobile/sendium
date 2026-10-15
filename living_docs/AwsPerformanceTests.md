@@ -21,9 +21,10 @@
 | 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | 🟢 done | Added deployment input, isolated Sendium/harness bundles, sanitized configuration artifact, and `generate-config` CLI. All four mode/DLR combinations verified; all 50 harness tests and packaged CLI smoke check pass. |
 | 2 | 2.5 | Add local packaged-JVM scenario verification | M | 🟢 done | Added opt-in Failsafe checks using generated configuration, actual packaged Sendium JVMs, and disposable PostgreSQL 17. All four scenarios and 50 unit/socket tests pass; verified database tracking/cleanup and warm-up exclusion. |
 | 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | 🟢 done | Added absolute-time open-loop scheduling shared by both adapters, scheduling/capacity misses, intended timestamps, rate/saturation statistics, and stop/join control. All 63 unit/socket and four packaged integration tests pass. |
-| 3 | 3.2 | Produce overall and one-minute measurement reports | M | ⚪ not started | JSON and human-readable output; throughput, percentiles, admission outcomes, receipts, backlog, and drain results. |
+| 3 | 3.2 | Produce overall and one-minute measurement reports | M | 🟢 done | Added bounded cohort/event minute aggregation, JSON/Markdown reports, drain backlog and latency percentiles. All 74 unit/socket and four packaged integration tests pass; generated reports validate against schema v1. Resource validity remains 3.3. |
 | 3 | 3.3 | Collect resource utilization and classify run validity | M | ⚪ not started | Sendium and harness CPU/memory; burstable-instance CPU-credit balances and Standard/Unlimited mode; classify harness bottlenecks as inconclusive. |
 | 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | ⚪ not started | Warm-up exclusion, measurement outcomes during drain, minute boundaries, bounded bookkeeping, duplicate detection, timeout reconciliation, missed load, expected overload, and unfinished work. |
+| 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | ⚪ not started | Load generated runtime inputs, check application/database/protocol readiness, coordinate adapters/generator/collectors through phases and bounded drain, emit reports on failure, and return classified exit status before AWS integration. |
 | 4 | 4.1 | Define the AWS and workload preset | S | ⚪ not started | Record region, database size, instance architecture, JVM settings, connections/windows, traffic limits, and deployment prerequisites. |
 | 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | ⚪ not started | Persistent artifact storage, GitHub OIDC integration/roles, expiry infrastructure permissions, and outputs; document one-time installation and reuse of an existing OIDC provider. |
 | 4 | 4.3 | Create the private networking CloudFormation template | M | ⚪ not started | VPC, private subnets, restricted security groups, and management/artifact connectivity; include subnet placement required by RDS. Define stack ownership and lifetime. |
@@ -170,6 +171,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-15 — Separate cohort accounting from minute-window throughput in reports
+
+**Decision:** Reuse shared counter/histogram updates for overall and bounded submission-cohort aggregates, preserving totals after correlation eviction. Record event-time minute output and backlog changes separately. Publish JSON schema v1 and Markdown with overall/interval counts, percentiles, drain work, and explicit unavailable-resource status. Anchor the lifecycle drain budget at the measurement deadline so stop/join time cannot silently extend it. Add an explicit pending Task 3.5 for runnable harness orchestration before AWS work.
+
+**Why:** Counting drain completions as measurement throughput hides backlog. Timestamp-preserving early receipt replay must not create a negative historical accepted-message backlog. Retaining per-message event history would grow with traffic volume. The existing plan covered reusable components but did not explicitly own the executable command that connects them.
+
+**Alternatives considered:** Cohort completion rates are misleading as sustainable sending rates, so provider/receipt rate fields in that view are null and actual rates appear in event intervals. Reconstructing intervals from retained message history loses completed/evicted messages. An unlimited number of per-minute histograms risks memory growth; the default explicit window budget is 256 and is recorded/configurable. Resource placeholders are labeled unavailable/inconclusive rather than published as zero utilization or valid measurements.
+
+**Verification:** All 74 unit/socket tests and all four packaged Sendium/PostgreSQL integration scenarios pass. Ten report tests cover partial/exact minute boundaries, bulk missed-target attribution, drain completions, original SMPP receipt timestamps, post-eviction totals, setup failure, memory budget, early termination, duplicate/out-of-window diagnostics, stable freeze, and overwrite refusal. A lifecycle regression check proves delayed stop does not extend the drain deadline. Generated Java reports were validated with the Draft 2020-12 version 1 schema. Task 3.3 owns resource sampling/full classification; Task 3.5 will wire production report execution.
 
 ### 2026-10-15 — Preserve offered load with absolute deadlines and explicit missed targets
 

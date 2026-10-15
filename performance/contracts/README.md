@@ -5,7 +5,13 @@ They describe JSON exchanged by orchestration, the harness, and reporting;
 they do not provision infrastructure or execute traffic.
 
 Validate both schemas and boundary examples with `python validate.py` from
-this directory after installing the development-only `jsonschema` package.
+this directory after installing `requirements-dev.txt` in a development environment.
+After the Java report tests, also validate actual generated reports from the
+repository root:
+
+```sh
+python performance/contracts/validate.py --results-directory performance/harness/target/report-fixtures
+```
 Structural schema validation does not replace runtime validation of accounting
 equations, interval ordering, empty distributions, or configuration consistency
 (for example, PostgreSQL storage when delivery reports are enabled).
@@ -81,7 +87,11 @@ during drain. Do not count warm-up outcomes as measurement outcomes.
 Each measurement message belongs to the interval of its **scheduled generation
 time**, with half-open intervals `[start, end)`. The last interval may be shorter
 than 60 seconds. Its final admission/completion counts and latency samples can
-therefore change during drain. Sum cohort counters to obtain overall counters.
+therefore change during drain. Sum additive cohort counters to obtain overall
+counts. Peaks are not additive: overall peaks include all harness work, including
+warm-up, whereas cohort peaks count concurrent entries belonging to that cohort.
+Scenario-wide violations can include unknown identities and warm-up violations
+and are reported globally rather than assigned to an invented cohort.
 
 Also publish event-time provider-response and receipt-forwarding counters per
 minute, with an explicit `phase` of `measurement` or `drain`. These count only
@@ -90,6 +100,29 @@ Event-time rates expose delayed output and backlog; cohort completion divided
 by measurement duration alone must not be presented as sustainable throughput.
 Overall event throughput uses the measurement observation window; drain counts
 are separate. Requested/attempted input rates use measurement duration.
+
+In `cohortIntervals`, provider/receipt throughput rate fields are null on purpose;
+cohort completions divided by cohort duration are not sustainable sending rates.
+`eventIntervals` supplies minute-window counts/rates and outstanding measurement
+work at each window's exclusive end. Changes exactly at a minute boundary belong
+to the next interval. Pending admission reflects outcomes known by that boundary;
+an early SMPP receipt replayed after acknowledgement retains its original event
+time without creating a negative accepted-message backlog before acknowledgement.
+
+The final measurement/drain intervals may be shorter than a minute. Early-ended
+measurements retain planned cohort boundaries and their observed durations,
+including zero observed duration for future cohorts with missed targets. Resource
+collection and final validity classification are still pending Task 3.3; current
+reports explicitly declare that limitation instead of claiming valid results.
+
+Interval storage has an explicit default budget of 256 minute windows across
+measurement and maximum drain. Histograms are allocated only for sampled
+boundaries, and counters survive correlation-history eviction. A larger budget
+may be supplied before generation and is recorded in metadata; an insufficient
+budget fails setup before allocating an unbounded interval history. Events or
+backlog updates beyond the bounded observation window are disclosed and excluded
+from event-time rates. Drain unfinished-accepted counts use the window-end
+backlog; all-phase physical counts are labeled as finalization-time observations.
 
 ## Latency boundaries and clocks
 

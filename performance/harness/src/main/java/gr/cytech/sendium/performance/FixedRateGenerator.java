@@ -89,6 +89,7 @@ public final class FixedRateGenerator implements AutoCloseable {
         validatePhase(phase, start, deadline);
         boolean measured = phase == Lifecycle.Phase.MEASUREMENT;
         long duration = deadline - start;
+        if (measured) { ledger.beginMeasurement(start, duration); }
         // Exact decimal count at setup avoids spurious extra slots for fractional rates (e.g. 0.7/s).
         long total = BigDecimal.valueOf(rate).multiply(BigDecimal.valueOf(duration))
                 .divide(BigDecimal.valueOf(1_000_000_000L), 0, RoundingMode.CEILING).longValueExact();
@@ -104,7 +105,7 @@ public final class FixedRateGenerator implements AutoCloseable {
             long latestDue = Math.min(total - 1, (long) Math.floor(elapsed / periodNanos));
             if (latestDue > index) {
                 long skipped = latestDue - index;
-                ledger.missedTargets(measured, skipped);
+                ledger.missedTargets(measured, start, index, skipped, rate);
                 missedScheduling += skipped;
                 index = latestDue;
                 offset = offset(index);
@@ -117,7 +118,7 @@ public final class FixedRateGenerator implements AutoCloseable {
         }
         long unattempted = total - index;
         if (unattempted > 0) {
-            ledger.missedTargets(measured, unattempted);
+            ledger.missedTargets(measured, start, index, unattempted, rate);
             missedScheduling += unattempted;
         }
         // The observation window includes the quiet tail after the final scheduled slot.
@@ -125,6 +126,7 @@ public final class FixedRateGenerator implements AutoCloseable {
             pause(Math.max(0, Math.min(POLL_NANOS, duration - (clock.nanoTime() - start))), stopped);
         }
         long elapsed = Math.max(0, clock.nanoTime() - start);
+        if (measured && duration > 0) { elapsed = ledger.endMeasurement() - start; }
         return new Statistics(rate, total, attempted, missedScheduling, missedCapacity,
                 Math.min(elapsed, duration), maxLateness, stopped.get() && elapsed < duration);
     }
