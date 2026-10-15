@@ -43,8 +43,12 @@ public final class HttpAdmissionClient implements AutoCloseable {
     }
 
     public synchronized Optional<Submission> submit(boolean measured) {
+        return submit(measured, System.nanoTime());
+    }
+
+    public synchronized Optional<Submission> submit(boolean measured, long scheduledNanos) {
         if (closed) { throw new IllegalStateException("HTTP client is closed"); }
-        String token = ledger.attempt(measured);
+        String token = ledger.attempt(measured, scheduledNanos);
         if (token == null) { return Optional.empty(); }
         try {
             HttpRequest request = HttpRequest.newBuilder(uri(token))

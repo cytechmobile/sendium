@@ -323,3 +323,49 @@ To test another compatible packaged application, set `-Dsendium.app.jar` to its
 absolute `quarkus-app/quarkus-run.jar` path; retain that directory's companion
 libraries. `-Dintegration.output.directory` can select an external diagnostic
 directory. The default application path targets the current checkout's build.
+
+## Fixed-rate traffic scheduling
+
+`FixedRateGenerator` supplies the same open-loop schedule to either ingress
+adapter. For example, construct it with
+`(measured, scheduled) -> client.submit(measured, scheduled).isPresent()`.
+The callback must return promptly and must use the ledger-backed adapter: a
+false result means that adapter already counted the capacity-missed target.
+The scheduler never waits for the returned admission completion future.
+
+Call `start(phase, startNanos, deadlineNanos)` from the scenario's
+`startGeneration` hook and `stop()` from `stopGeneration`. Only warm-up and
+measurement phases generate traffic. Stop wakes the generator and joins it
+before switching cohorts or draining. Existing provider responses, admission
+requests, and receipts continue through their adapters during drain. Close the
+generator and adapters before freezing the ledger. Target exceptions propagate
+through the phase future and `stop()`; they are execution failures, not valid
+performance measurements.
+
+Targets occupy a half-open interval `[start, deadline)`, beginning at offset
+zero. The count is `ceil(rate * durationSeconds)`, with decimal arithmetic at
+phase setup to avoid fractional-rate boundary errors. Individual deadlines are
+rounded up to nanosecond resolution. Rates above one target per nanosecond are
+not representable and are rejected. Normal phase statistics include the quiet
+tail after the last target, so achieved input rate uses the full observation
+window rather than an artificially shortened denominator.
+
+The schedule remains anchored to its original start. When late, the generator
+counts expired slots as missed in constant space and submits only the latest
+due slot; it never replays the skipped backlog. Slow responses cannot reduce
+the requested rate silently. Full admission/tracking budgets count capacity
+misses without evicting unfinished work. Warm-up uses the same budgets but does
+not contribute to measurement counters; leftover warm-up work can therefore
+produce visible capacity misses during measurement.
+
+Phase statistics expose requested/achieved input rate, scheduled/attempted
+targets, scheduling misses, capacity misses, maximum dispatch-call lateness,
+elapsed observation, early stop, and saturation. Early stop accounts for unsent
+targets and marks the observation partial. A cancelled caller-facing result
+future does not cancel the internal phase or permit overlapping phases; use
+`stop()` to terminate generation safely. Only one phase can be active or queued.
+
+Adapters retain the original scheduled timestamp alongside actual dispatch
+timing, providing the basis for submission-cohort intervals in Task 3.2. Network
+latency still begins at actual request dispatch rather than scheduled time.
+JSON/summary reporting and final validity classification remain Tasks 3.2/3.3.
