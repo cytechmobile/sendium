@@ -17,7 +17,7 @@
 | 1 | 1.3 | Implement bounded message accounting and latency collection | M | 🟢 done | Added synchronized token ledger, bounded active/retired history, outcome snapshots, and fixed-range HdrHistogram latency collection. All 15 harness tests pass. Minute aggregation follows in 3.2. |
 | 2 | 2.1 | Add simulated SMPP provider responses and delivery receipts | M | 🟢 done | Added authenticated asynchronous Cloudhopper provider with bounded pending work, configurable delays, unique IDs, and successful receipts. Seven TCP/SMPP tests pass; all 22 harness tests pass. |
 | 2 | 2.2 | Add HTTP submission and forwarded receipt reception | M | 🟢 done | Added asynchronous Kannel GET admission and bounded callback receiver, gateway-ID validation, race handling, and diagnostics. Ten HTTP tests pass; all 33 harness tests pass. Real Sendium/PostgreSQL integration remains 2.5. |
-| 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | ⚪ not started | Exercise SMPP admission and delivery receipts using Cloudhopper. |
+| 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | 🟢 done | Added bounded transceiver client, gateway-ID correlation, timestamp-preserving early-receipt buffer, and protocol diagnostics. Nine SMPP adapter tests pass; all 42 harness tests pass. |
 | 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | ⚪ not started | Isolated ingress credentials, routing to the provider simulator, worker TPS, PostgreSQL delivery-report storage, callback addresses, and delivery reports disabled configuration. |
 | 2 | 2.5 | Add local packaged-JVM scenario verification | M | ⚪ not started | Run Sendium, the harness, and PostgreSQL together; verify both ingress modes with delivery reports enabled and disabled before AWS integration. |
 | 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | ⚪ not started | Count scheduled, attempted, and missed submissions; expose achieved rate and harness saturation. |
@@ -170,6 +170,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-15 — Preserve arrival timestamps while buffering early SMPP receipts
+
+**Decision:** Use one transceiver session with bounded virtual-thread admission tasks. Require the local window to cover outstanding request capacity. Buffer gateway-ID-only receipts until acknowledgement mapping is available, bounded by tracked-message capacity, preserving original arrival timestamps and duplicates. Distinguish unmatched receipts from mapping limitations caused by history eviction or ambiguous admission, including warm-up.
+
+**Why:** Sendium's forwarded SMPP receipt has a gateway ID but does not echo the payload token. An early receipt cannot be mapped immediately, and recording its replay time would incorrectly include acknowledgement wait in forwarding latency. Unknown mappings after transport timeouts do not prove invalid traffic.
+
+**Alternatives considered:** Assuming receipt text echoes the token contradicts Sendium's implementation. Rejecting early receipts manufactures retry traffic. Unbounded buffering violates harness memory requirements. A smaller local window introduces generator-side waiting that can be misrepresented as application latency.
+
+**Verification:** All 42 harness tests pass, including nine SMPP adapter tests over real sockets: reports enabled/disabled, early/duplicate receipt timestamps, rejection versus malformed acknowledgements, single-slot timeout/window cleanup, bounded unknown-receipt buffering, retained-history and ambiguous-admission limitations, invalid receipt states, bind failure, and pending-request cancellation. Full Sendium/PostgreSQL verification remains Task 2.5.
 
 ### 2026-10-14 — Correlate HTTP callbacks with token and gateway acknowledgement identity
 

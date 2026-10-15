@@ -133,6 +133,10 @@ public final class MessageLedger {
     }
 
     public synchronized void event(String token, Event event) {
+        eventAt(token, event, clock.getAsLong());
+    }
+
+    private void eventAt(String token, Event event, long now) {
         ensureOpen();
         Entry entry = find(token);
         if (entry == null) { return; }
@@ -143,7 +147,13 @@ public final class MessageLedger {
             return;
         }
         if (entry.admission == Admission.REJECTED || !validOrder(entry, event)) { violations++; return; }
-        long now = clock.getAsLong();
+        long predecessor = switch (event) {
+            case PROVIDER_ARRIVAL -> entry.dispatch;
+            case PROVIDER_RESPONSE -> entry.events.get(Event.PROVIDER_ARRIVAL);
+            case RECEIPT_GENERATED -> entry.events.get(Event.PROVIDER_RESPONSE);
+            case RECEIPT_FORWARDED -> entry.events.get(Event.RECEIPT_GENERATED);
+        };
+        if (now - predecessor < 0) { violations++; return; }
         entry.events.put(event, now);
         if (entry.measured) {
             switch (event) {
@@ -189,6 +199,15 @@ public final class MessageLedger {
     }
 
     public synchronized ReceiptResult receiveReceipt(String token, String ingressId) {
+        return receiveReceiptAt(token, ingressId, clock.getAsLong());
+    }
+
+    public synchronized String tokenForIngressId(String ingressId) {
+        prune();
+        return ingressIds.get(ingressId);
+    }
+
+    public synchronized ReceiptResult receiveReceiptAt(String token, String ingressId, long arrivalNanos) {
         ensureOpen();
         long before = eventsBeyondRetention;
         Entry entry = find(token);
@@ -203,7 +222,7 @@ public final class MessageLedger {
         }
         entry.forwardedIngressId = ingressId;
         boolean valid = validOrder(entry, Event.RECEIPT_FORWARDED) && entry.admission != Admission.REJECTED;
-        event(token, Event.RECEIPT_FORWARDED);
+        eventAt(token, Event.RECEIPT_FORWARDED, arrivalNanos);
         return valid ? ReceiptResult.RECORDED : ReceiptResult.INVALID;
     }
 

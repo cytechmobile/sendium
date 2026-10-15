@@ -164,3 +164,48 @@ and workers before freezing accounting.
 These adapters are tested over real local HTTP sockets against a controlled API
 endpoint. Packaged Sendium/PostgreSQL integration remains Task 2.5; workload
 scheduling and workflow execution remain later tracked tasks.
+
+## SMPP submission and forwarded receipts
+
+`SmppAdmissionClient` binds one authenticated transceiver session using
+`SmppIngressSettings`. Connection/bind/write/request waits are bounded. The
+configured window must cover `maxOutstandingRequests` so local window waiting
+does not silently become application latency. Credentials are redacted from
+settings and protocol byte/PDU logging is disabled.
+
+`submit(measured)` returns an optional token/completion pair, reserving ledger
+capacity before starting a bounded virtual-thread request task. Empty means a
+missed generation target. Single-part default-GSM payloads contain the run token;
+registered delivery is requested only when enabled. Successful acknowledgements
+require a nonblank provider/gateway ID. `STATUS_THROTTLED` and `STATUS_MSGQFUL`
+are expected overload rejections; other negative acknowledgements are rejections
+with protocol diagnostics. Timeouts and transport failures remain ambiguous,
+not inferred rejections. Read `problems()` alongside ledger counters.
+
+Forwarded `deliver_sm` requests must be successful single-part delivery receipts
+with the expected receipt flag, default/IA5 coding, delivered state, zero error,
+and one submitted/delivered message. Unlike HTTP callbacks, these receipts carry
+only the gateway ID. A receipt arriving before acknowledgement mapping is stored
+in a buffer bounded by `maxTrackedMessages`, including duplicates. Mapping replays
+the original arrival timestamps into the ledger; acknowledgement wait time is
+therefore excluded from receipt-forwarding latency. The ledger validates event
+timestamp order before recording a latency sample.
+
+Known valid and duplicate receipts are acknowledged successfully; duplicates
+still count as scenario violations. Invalid receipt bodies/states are rejected.
+Buffer saturation returns `STATUS_THROTTLED` and exposes a harness saturation
+diagnostic. During drain, keep this client connected and include pending requests
+and buffered receipts in outstanding-work observations.
+
+After admission tasks stop, `finalizeReceipts()` classifies unmatched IDs:
+`UNCORRELATED_RECEIPT` when no mapping limitation is known, `LIMITED_HISTORY`
+after retained mapping eviction, or `AMBIGUOUS_RECEIPT` after an admission
+timeout/failure (including warm-up). The latter two are inconclusive coverage
+limitations; they are not proof of malformed traffic. No unverified receipt is
+added to completion/latency totals. Final validity classification is implemented
+in Task 3.3. `close()` destroys the session, interrupts/awaits request tasks,
+releases network resources, and finalizes buffered receipts once requests stop.
+Close adapters before freezing the ledger.
+
+Tests use real SMPP sockets against the provider simulator and controlled gateway
+behaviors. Actual Sendium/PostgreSQL scenario verification remains Task 2.5.
