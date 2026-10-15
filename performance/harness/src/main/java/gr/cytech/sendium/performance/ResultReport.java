@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Schema-v1 JSON and Markdown from frozen accounting. Resource collection follows in Task 3.3. */
+/** Schema-v1 JSON and Markdown from frozen accounting and explicit resource evidence. */
 public final class ResultReport {
     public record Artifact(String name, String sha256) {
         public Artifact {
@@ -46,6 +46,12 @@ public final class ResultReport {
 
     public Report build(RunConfig config, MessageLedger ledger, Context context,
             List<FixedRateGenerator.Statistics> generatorPhases, boolean drainTimeoutReached) {
+        return build(config, ledger, context, generatorPhases, drainTimeoutReached, ResourceEvidence.empty(), null, List.of());
+    }
+
+    public Report build(RunConfig config, MessageLedger ledger, Context context,
+            List<FixedRateGenerator.Statistics> generatorPhases, boolean drainTimeoutReached,
+            ResourceEvidence evidence, ResourceEvidence.Window resourceWindow, List<RunValidity.Reason> observations) {
         if (!ledger.isFrozen()) { throw new IllegalStateException("Freeze accounting before publishing results"); }
         var timeline = ledger.timeline();
         var counts = ledger.snapshot();
@@ -120,19 +126,11 @@ public final class ResultReport {
         limitations.add("Cohort completions include drain; throughput rates use only the stated event-time observation window.");
         limitations.add("Duplicate detection is bounded by age and capacity; configured retention is an upper bound, not guaranteed coverage.");
         limitations.add("A short run does not establish sustainable throughput or long-term burstable-instance CPU-credit capacity.");
-        ObjectNode resources = root.putObject("resources");
-        resources.putArray("sendium"); resources.putArray("harness"); resources.putArray("cpuCredits");
-        var reasons = root.putObject("validity").put("status", counts.violations() > 0 ? "failed" : "inconclusive").putArray("reasons");
-        reasons.addObject().put("code", "RESOURCE_MEASUREMENTS_PENDING").put("message", "Resource sampling and complete validity classification are not yet integrated (Task 3.3).");
-        if (counts.violations() > 0) { reasons.addObject().put("code", "ACCOUNTING_VIOLATION").put("message", "Scenario accounting detected " + counts.violations() + " violations."); }
-        if (counts.missed() > 0) { reasons.addObject().put("code", "GENERATOR_SATURATION").put("message", "The harness missed " + counts.missed() + " measurement submission targets."); }
-        if (overflow > 0) { reasons.addObject().put("code", "LATENCY_OVERFLOW").put("message", "Latency samples exceeded the histogram range."); }
-        if (ledger.eventsBeyondRetention() > 0) { reasons.addObject().put("code", "LIMITED_HISTORY").put("message", "Events arrived beyond retained correlation history."); }
-        if (timeline != null && timeline.outsideWindowEvents() > 0) { reasons.addObject().put("code", "OUTSIDE_OBSERVATION_WINDOW").put("message", "Some events occurred outside the bounded observation window."); }
-        if (duration == 0) { root.withObject("/validity").put("status", "failed"); reasons.addObject().put("code", "MEASUREMENT_NOT_STARTED").put("message", "No measurement observation window completed."); }
-        else if (duration < java.util.concurrent.TimeUnit.SECONDS.toNanos(config.measurementSeconds())) {
-            reasons.addObject().put("code", "PARTIAL_MEASUREMENT").put("message", "Measurement ended before its configured duration.");
-        }
+        limitations.add("Process CPU uses one logical core as 100 percent; host CPU uses aggregate machine capacity.");
+        limitations.add("Resource windows use synchronized UTC timestamps; workload latencies use the harness monotonic clock.");
+        limitations.add("CloudWatch CPU-credit samples are coarse period observations and may lag; absent values are not zero.");
+        root.set("resources", evidence.json(mapper, resourceWindow, timeline));
+        root.set("validity", mapper.valueToTree(RunValidity.assess(config, ledger, context, generatorPhases, evidence, resourceWindow, observations)));
         root.set("diagnostics", mapper.valueToTree(context.diagnostics()));
         return new Report(root, markdown(root));
     }
@@ -233,9 +231,48 @@ public final class ResultReport {
                 .append(root.path("drain").path("timeoutReached").asBoolean()).append("; unfinished accepted: ")
                 .append(root.path("drain").path("unfinishedAccepted").asLong()).append("; unfinished across all phases at finalization: ")
                 .append(root.path("drain").path("unfinishedAllPhases").asLong()).append(".\n\n")
-                .append("## Resources\n\nResource measurements and complete validity classification are pending Task 3.3.\n\n## Limitations\n\n");
+                .append("## Resources\n\nProcess CPU: 100% is one logical core. Host CPU: 100% is aggregate host capacity.\n\n")
+                .append("| Source | Process CPU avg % | Process CPU max % | Host CPU avg % | Peak RSS MiB | Peak host used MiB | CPU coverage s |\n|---|---:|---:|---:|---:|---:|---:|\n");
+        for (String source : List.of("sendium", "harness")) {
+            resourceRow(out, source, root.path("resources").path("summary").path("overall").path(source));
+        }
+        out.append("\n<details><summary>Per-minute resource measurements</summary>\n\n")
+                .append("| Phase / interval / source | Process CPU avg % | Process CPU max % | Host CPU avg % | Peak RSS MiB | Peak host used MiB | CPU coverage s |\n|---|---:|---:|---:|---:|---:|---:|\n");
+        for (var interval : root.path("resources").path("summary").path("intervals")) {
+            for (String source : List.of("sendium", "harness")) {
+                resourceRow(out, interval.path("phase").asText() + " / " + number(interval.path("startOffsetSeconds")) + "s / " + source, interval.path(source));
+            }
+        }
+        out.append("\n</details>\n\n### Instance CPU-credit observations\n\n| Source | Instance | Type | Mode | Balance min | Balance max | Samples |\n|---|---|---|---|---:|---:|---:|\n");
+        for (var credit : root.path("resources").path("cpuCredits")) {
+            Double minimum = null, maximum = null;
+            for (var sample : credit.path("samples")) {
+                if (sample.path("balanceAverage").isNumber()) {
+                    double value = sample.path("balanceAverage").asDouble();
+                    minimum = minimum == null ? value : Math.min(minimum, value);
+                    maximum = maximum == null ? value : Math.max(maximum, value);
+                }
+            }
+            out.append('|').append(text(credit.path("source").asText())).append('|').append(text(credit.path("instanceId").asText()))
+                    .append('|').append(text(credit.path("instanceType").asText())).append('|').append(text(credit.path("mode").asText()))
+                    .append('|').append(minimum == null ? "n/a" : String.format(Locale.ROOT, "%.3f", minimum))
+                    .append('|').append(maximum == null ? "n/a" : String.format(Locale.ROOT, "%.3f", maximum))
+                    .append('|').append(credit.path("samples").size()).append("|\n");
+        }
+        if (root.path("resources").path("cpuCredits").isEmpty()) { out.append("\nNo EC2 credit observations supplied. Local verification does not require them; AWS runs require matching instance credit metadata.\n"); }
+        out.append("\n## Limitations\n\n");
         for (var limitation : root.path("measurementMetadata").path("limitations")) { out.append("- ").append(text(limitation.asText())).append('\n'); }
         return out.toString();
+    }
+
+    private static void resourceRow(StringBuilder out, String label, com.fasterxml.jackson.databind.JsonNode summary) {
+        out.append('|').append(text(label)).append('|').append(number(summary.path("cpuPercentAverage")))
+                .append('|').append(number(summary.path("cpuPercentMaximum"))).append('|').append(number(summary.path("hostCpuPercentAverage")))
+                .append('|').append(mebibytes(summary.path("rssBytesMaximum"))).append('|').append(mebibytes(summary.path("hostMemoryUsedBytesMaximum")))
+                .append('|').append(String.format(Locale.ROOT, "%.3f", summary.path("cpuCoverageNanos").asLong() / 1_000_000_000.0)).append("|\n");
+    }
+    private static String mebibytes(com.fasterxml.jackson.databind.JsonNode value) {
+        return value.isNumber() ? String.format(Locale.ROOT, "%.3f", value.asDouble() / 1_048_576.0) : "n/a";
     }
 
     private static void latencyTable(StringBuilder out, String heading, com.fasterxml.jackson.databind.JsonNode latencies) {

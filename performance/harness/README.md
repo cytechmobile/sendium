@@ -368,7 +368,7 @@ future does not cancel the internal phase or permit overlapping phases; use
 Adapters retain the original scheduled timestamp alongside actual dispatch
 timing, providing the basis for submission-cohort intervals in Task 3.2. Network
 latency still begins at actual request dispatch rather than scheduled time.
-JSON/summary reporting is described below; full validity classification remains Task 3.3.
+JSON/summary reporting and evidence-based validity classification are described below.
 
 ## Overall and one-minute reports
 
@@ -410,11 +410,13 @@ different explicit memory budget. Histogram allocation is lazy per metric and
 cohort. Out-of-window updates are counted as a limitation, not silently added to
 the measured throughput.
 
-Until Task 3.3 integrates resource collection and full validity classification,
-reports carry `RESOURCE_MEASUREMENTS_PENDING` and remain inconclusive. Known
-accounting violations or an unstarted measurement are reported as failed. Empty
-resource arrays mean unavailable measurements, not zero utilization. No
-performance pass/fail thresholds are introduced.
+Supply `ResourceEvidence`, the aligned UTC measurement window, and typed
+`RunValidity` observations to classify results as valid, inconclusive, or failed.
+Reports without resource evidence remain inconclusive. Empty arrays mean
+unavailable measurements, not zero utilization. Accounting/setup/protocol failures
+take precedence over evidence limitations; expected overload and unfinished work
+alone impose no performance gate. See `../resources/README.md` for agents, AWS
+read-only collection, import APIs, CPU/memory definitions, and status policy.
 
 Report tests write synthetic fixtures under `target/report-fixtures/` and cover
 minute boundaries, drain attribution, replayed receipt timestamps, bounded
