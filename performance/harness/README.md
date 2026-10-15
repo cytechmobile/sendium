@@ -102,3 +102,65 @@ full scenario/CLI wiring follows with the ingress adapters.
 Cloudhopper uses the same managed version and JitPack repository as
 `sendium-core`. Deployment credentials are redacted from the settings' string
 representation; protocol payload/byte logging is disabled.
+
+## HTTP submission and receipt reception
+
+`HttpAdmissionClient` submits asynchronous Kannel-compatible GET requests to the
+configured `/sendsms` URI. Each request URL-encodes credentials, synthetic
+addresses, and the run token as single-part text. Delivery-report requests add
+a URL-encoded callback template containing `token`, `messageId=%s`, and
+`status=%d`; disabled delivery reports omit `dlr-url` entirely. Deployment
+settings contain the advertised callback URI separately from the receiver's
+listen address, supporting private EC2 networking.
+
+`submit(measured)` reserves ledger capacity and returns an optional submission
+with its token and completion future. Empty means a missed target, not a
+rejection. The dispatch timestamp is set immediately before `sendAsync`, after
+request construction. Request/connect timeouts use `admissionTimeoutMillis`.
+Response bodies are limited to 4096 bytes, redirects are not followed, and
+HTTP/1.1 is used consistently.
+
+Classification:
+
+| Response | Admission outcome | Diagnostic |
+|----------|-------------------|------------|
+| 202 with canonical UUID | Accepted | None |
+| 503 or 429 | Rejected | Expected overload, separately counted |
+| Other 4xx | Rejected | Authentication or unexpected-status failure |
+| Invalid 202 body, redirects, other statuses including 500 | Failed/ambiguous | Protocol failure |
+| Request/connect timeout | Timed out/ambiguous | Visible admission timeout |
+| Transport/body-limit failure or cancellation | Failed/ambiguous | Transport failure |
+
+The future resolves after ledger admission accounting. `problems()` provides
+bounded diagnostics for later validity reporting. Authentication/protocol and
+transport failures must remain distinguishable from ordinary overload. Do not
+log request URIs or raw error messages: authentication uses query parameters.
+`close()` cancels pending requests before ledger finalization; cancellation does
+not prove the application never accepted them.
+
+`HttpReceiptReceiver` accepts GET callbacks at an exact configured path, validates
+the three query fields and a canonical gateway UUID, and requires delivered
+status `1`. It records receipt forwarding through the ledger, checks gateway
+identity against the acknowledgement, and tolerates callbacks arriving before
+that acknowledgement. Later identity disagreement or gateway-ID reuse is an
+accounting violation. The gateway-ID index is bounded by active plus retained
+entries and expires with retired history.
+
+Valid callbacks receive 204. Duplicate callbacks also receive 204 to avoid
+manufacturing callback retry traffic, while the ledger records duplicates as
+scenario violations. Previously issued tokens beyond retired-history retention
+also receive 204, with a `LIMITED_HISTORY` diagnostic and no new completion count;
+reporting must mark that coverage limitation inconclusive. Unknown/mismatched identities and malformed callbacks
+receive 400; unexpected delivery status or disabled-report callbacks receive
+422. Receipt forwarding is measured at callback reception, not HTTP response
+completion. Failed acknowledgement writes are separately counted.
+
+Receiver worker count and queue capacity are explicit and bounded. Queue
+saturation increments a diagnostic and applies caller-runs backpressure;
+validity reporting must mark that harness saturation inconclusive. Queries are
+bounded to 4096 characters and reject duplicate fields. `close()` stops reception
+and workers before freezing accounting.
+
+These adapters are tested over real local HTTP sockets against a controlled API
+endpoint. Packaged Sendium/PostgreSQL integration remains Task 2.5; workload
+scheduling and workflow execution remain later tracked tasks.
