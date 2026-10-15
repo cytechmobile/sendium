@@ -24,13 +24,16 @@ public final class MessageLedger {
 
     private static final class Entry {
         final boolean measured;
+        final long scheduledNanos;
         long dispatch;
         boolean explicitlyDispatched;
         Admission admission = Admission.PENDING;
         String ingressId;
         String forwardedIngressId;
         final EnumMap<Event, Long> events = new EnumMap<>(Event.class);
-        Entry(boolean measured, long dispatch) { this.measured = measured; this.dispatch = dispatch; }
+        Entry(boolean measured, long scheduledNanos, long dispatch) {
+            this.measured = measured; this.scheduledNanos = scheduledNanos; this.dispatch = dispatch;
+        }
     }
 
     private record Retired(Entry entry, long retiredAt) { }
@@ -62,6 +65,10 @@ public final class MessageLedger {
 
     /** Null means a missed generation target. Never evict unfinished work. */
     public synchronized String attempt(boolean measured) {
+        return attempt(measured, clock.getAsLong());
+    }
+
+    public synchronized String attempt(boolean measured, long scheduledNanos) {
         ensureOpen();
         prune();
         if (measured) { scheduled++; }
@@ -70,12 +77,29 @@ public final class MessageLedger {
             return null;
         }
         String token = prefix + Long.toUnsignedString(++sequence, 36);
-        active.put(token, new Entry(measured, clock.getAsLong()));
+        active.put(token, new Entry(measured, scheduledNanos, clock.getAsLong()));
         outstanding++;
         peakOutstanding = Math.max(peakOutstanding, outstanding);
         peakTracked = Math.max(peakTracked, active.size());
         if (measured) { attempted++; measuredPending++; }
         return token;
+    }
+
+    /** Account for skipped scheduler targets in constant space, including a late phase start/stop. */
+    public synchronized void missedTargets(boolean measured, long count) {
+        ensureOpen();
+        if (count < 0) { throw new IllegalArgumentException("Negative target count"); }
+        if (measured) {
+            scheduled = Math.addExact(scheduled, count);
+            missed = Math.addExact(missed, count);
+        }
+    }
+
+    public synchronized Long scheduledNanos(String token) {
+        prune();
+        Entry entry = active.get(token);
+        if (entry == null && retired.containsKey(token)) { entry = retired.get(token).entry(); }
+        return entry == null ? null : entry.scheduledNanos;
     }
 
     public synchronized void admission(String token, Admission outcome) {

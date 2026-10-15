@@ -77,8 +77,12 @@ public final class SmppAdmissionClient implements AutoCloseable {
     public boolean isBound() { return session != null && session.isBound(); }
 
     public synchronized Optional<Submission> submit(boolean measured) {
+        return submit(measured, System.nanoTime());
+    }
+
+    public synchronized Optional<Submission> submit(boolean measured, long scheduledNanos) {
         if (closed || !isBound()) { throw new IllegalStateException("SMPP client is not bound"); }
-        String token = ledger.attempt(measured);
+        String token = ledger.attempt(measured, scheduledNanos);
         if (token == null) { return Optional.empty(); }
         CompletableFuture<MessageLedger.Admission> completion = new CompletableFuture<>();
         pending.put(token, completion);

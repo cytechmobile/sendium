@@ -20,7 +20,7 @@
 | 2 | 2.3 | Add SMPP submission and forwarded receipt reception | M | 🟢 done | Added bounded transceiver client, gateway-ID correlation, timestamp-preserving early-receipt buffer, and protocol diagnostics. Nine SMPP adapter tests pass; all 42 harness tests pass. |
 | 2 | 2.4 | Generate Sendium configuration for both benchmark scenarios | M | 🟢 done | Added deployment input, isolated Sendium/harness bundles, sanitized configuration artifact, and `generate-config` CLI. All four mode/DLR combinations verified; all 50 harness tests and packaged CLI smoke check pass. |
 | 2 | 2.5 | Add local packaged-JVM scenario verification | M | 🟢 done | Added opt-in Failsafe checks using generated configuration, actual packaged Sendium JVMs, and disposable PostgreSQL 17. All four scenarios and 50 unit/socket tests pass; verified database tracking/cleanup and warm-up exclusion. |
-| 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | ⚪ not started | Count scheduled, attempted, and missed submissions; expose achieved rate and harness saturation. |
+| 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | 🟢 done | Added absolute-time open-loop scheduling shared by both adapters, scheduling/capacity misses, intended timestamps, rate/saturation statistics, and stop/join control. All 63 unit/socket and four packaged integration tests pass. |
 | 3 | 3.2 | Produce overall and one-minute measurement reports | M | ⚪ not started | JSON and human-readable output; throughput, percentiles, admission outcomes, receipts, backlog, and drain results. |
 | 3 | 3.3 | Collect resource utilization and classify run validity | M | ⚪ not started | Sendium and harness CPU/memory; burstable-instance CPU-credit balances and Standard/Unlimited mode; classify harness bottlenecks as inconclusive. |
 | 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | ⚪ not started | Warm-up exclusion, measurement outcomes during drain, minute boundaries, bounded bookkeeping, duplicate detection, timeout reconciliation, missed load, expected overload, and unfinished work. |
@@ -170,6 +170,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-15 — Preserve offered load with absolute deadlines and explicit missed targets
+
+**Decision:** Schedule targets against absolute monotonic deadlines, independently of admission completions. Skip expired backlog rather than replaying catch-up batches. Count scheduling and capacity misses separately, preserving original scheduled timestamps in the ledger. Use one bounded phase worker with explicit stop/join and expose requested/achieved rates, lateness, saturation, and early termination. Include the final quiet interval in the input-rate denominator.
+
+**Why:** Response-paced traffic understates offered load when Sendium slows down. Catch-up batches change the workload after harness stalls. A shortened denominator after the final submission overstates achieved rate. The generator must stop and join before phase changes without interrupting outstanding adapter work needed for drain.
+
+**Alternatives considered:** Sleeping a fixed period after each submission accumulates drift. Waiting for acknowledgements turns the generator into a closed-loop client. Enqueuing every overdue target grows memory and creates artificial bursts. A caller-cancellable internal phase future could permit new phases to queue while traffic still runs, so the public future is an isolated result copy.
+
+**Verification:** All 63 unit/socket tests and all four packaged Sendium/PostgreSQL scenarios pass. Thirteen scheduler tests cover exact/half-open and fractional slots, late starts, slow dispatch, bounded outstanding work, warm-up exclusion, early stop, cancellation/overlap protection, zero-duration phases, adapter failures, lifecycle stop-before-drain, and actual HTTP/SMPP adapters with slow responses. Reporting and validity integration remain Tasks 3.2/3.3.
 
 ### 2026-10-15 — Verify packaged Sendium against disposable PostgreSQL before AWS integration
 
