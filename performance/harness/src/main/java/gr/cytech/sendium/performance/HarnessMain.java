@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Path;
 
-/** Configuration validation entry point; protocol execution is added in Phase 2. */
+/** Workload validation and isolated runtime configuration generation. */
 public final class HarnessMain {
     private HarnessMain() { }
 
@@ -15,8 +15,10 @@ public final class HarnessMain {
     }
 
     static int run(String[] args) {
-        if (args.length != 2 || !"validate-config".equals(args[0])) {
+        boolean generate = args.length == 4 && "generate-config".equals(args[0]);
+        if (!generate && (args.length != 2 || !"validate-config".equals(args[0]))) {
             System.err.println("Usage: java -jar harness.jar validate-config <run-config.json>");
+            System.err.println("   or: java -jar harness.jar generate-config <run-config.json> <deployment.json> <new-output-directory>");
             return 2;
         }
         try {
@@ -28,11 +30,16 @@ public final class HarnessMain {
                     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .build();
             RunConfig config = mapper.readValue(Path.of(args[1]).toFile(), RunConfig.class);
-            System.out.println(mapper.writeValueAsString(config));
+            if (generate) {
+                BenchmarkDeployment deployment = mapper.readValue(Path.of(args[2]).toFile(), BenchmarkDeployment.class);
+                BenchmarkConfigGenerator generator = new BenchmarkConfigGenerator();
+                generator.write(Path.of(args[3]), generator.generate(config, deployment));
+                System.out.println("Generated private runtime bundles and public effective configuration");
+            } else { System.out.println(mapper.writeValueAsString(config)); }
             return 0;
         } catch (Exception exception) {
             // Parser messages may contain input content; do not expose configuration secrets.
-            System.err.println("Invalid or unreadable workload configuration");
+            System.err.println("Invalid configuration or unavailable output directory");
             return 2;
         }
     }

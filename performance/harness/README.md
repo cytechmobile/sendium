@@ -209,3 +209,70 @@ Close adapters before freezing the ledger.
 
 Tests use real SMPP sockets against the provider simulator and controlled gateway
 behaviors. Actual Sendium/PostgreSQL scenario verification remains Task 2.5.
+
+## Generate isolated runtime configuration
+
+From the repository root, after building the harness:
+
+```sh
+java -jar performance/harness/target/sendium-performance-harness-0.5.2-SNAPSHOT.jar \
+  generate-config \
+  performance/harness/src/test/resources/run-config.json \
+  performance/harness/src/test/resources/deployment.json \
+  performance/harness/target/local-config
+```
+
+The fixture inputs illustrate local settings and contain test-only database
+credentials. Deployment orchestration supplies actual resolved preset values,
+private host addresses, and an isolated database. The output directory's parent
+must exist; the output directory itself must not exist. Existing runs are never
+overwritten. Generation does not connect to services or start a benchmark.
+
+Generated files:
+
+```text
+<output>/
+  sendium/
+    config/application.properties   # Quarkus listener, paths, pool, and logging
+    conf/smsg.properties            # Provider worker, TPS/windows, SMPP ingress
+    conf/credentials.yml            # Only the selected ingress credential type
+    conf/routingTable.conf          # One outbound route; SMPP receipt return route
+    environment.json               # Private PostgreSQL environment variables
+  harness/
+    run-config.json                # Fully resolved workload
+    runtime-settings.json          # Private provider/ingress credentials and endpoints
+  public/
+    effective-configuration.json   # Sanitized settings for later result publication
+```
+
+Every generation creates independent ingress/provider credentials. The two
+runtime bundles contain secrets and are deployment inputs, not downloadable
+result artifacts. Only `public/` is intended for publication. PostgreSQL URLs
+must identify a database and contain no embedded authentication parameters;
+credentials travel separately. On POSIX filesystems the output root is created
+with mode 700 and files with mode 600; other filesystems use their native access
+controls. Generated configuration should stay in ignored build output or external
+run directories.
+
+Launch the packaged Sendium application with `sendium/` as its working directory
+and the key/value pairs from `sendium/environment.json` in its process environment.
+Quarkus reads `config/application.properties`; Sendium reads its generated
+`conf/` paths. Deployment scripts must set the JSON values as environment values,
+not evaluate the JSON as shell commands. Copy the packaged application separately.
+Task 2.5 verifies this launch path against actual Sendium and PostgreSQL.
+
+The standalone application has PostgreSQL persistence enabled at build time.
+**DLR disabled means no receipt request or callback; it does not remove the
+datasource or disable the compiled persistence subsystem.** PostgreSQL remains
+configured in both modes, and the public configuration records `dlrStorage` as
+`postgresql` alongside the separate `dlrRequested` flag.
+
+The provider worker gets the exact workload TPS, one transceiver, explicit
+window/request timeout/thread settings, and a run-specific provider namespace.
+Its provider-response retry lists are empty with a default `FAIL` policy, matching
+V1's exclusion of retries. SMPP ingress is enabled only for SMPP runs, with no
+extra ingress rate cap. HTTP callbacks advertise the harness host, while its
+listeners bind to all local interfaces inside the private environment.
+Per-message trace, raw SMPP logging, and HTTP access logging are disabled and
+recorded in the effective configuration. AWS sizing, JVM arguments, and final
+infrastructure presets remain later tasks.
