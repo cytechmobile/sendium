@@ -28,7 +28,7 @@
 | 4 | 4.1 | Define the AWS and workload preset | S | 🟢 done | Added `performance/presets/aws-private-jvm-v1.json`, deployment mapping/prerequisites, and static compatibility checks. Defines private run-owned networking, JVM/RDS sizing, sample/phase budgets, expiry and artifact retention; live AWS availability remains preflight/6.1 work. |
 | 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | 🟢 done | Added `performance/infrastructure/bootstrap.yaml`: private temporary artifact bucket, optional/reused OIDC, orchestration/diagnostic/service roles, required runtime boundary, expiry role/logs and outputs. CloudFormation lint and seven policy tests pass; actual handler/schedule remains 4.7 and live authorization 6.1. |
 | 4 | 4.3 | Create the private networking CloudFormation template | M | 🟢 done | Added disposable `network.yaml`: two private AZ subnets, role-paired security rules, three interface endpoints and run-scoped S3 gateway endpoint. Both templates lint; all 12 infrastructure tests pass. Parent integration follows in 4.4; live connectivity remains 4.5/6.1. |
-| 4 | 4.4 | Create the per-run benchmark CloudFormation template | M | ⚪ not started | Sendium/harness EC2, instance profiles, private RDS, isolated credentials, run identity/expiry tags, placement, and deployment outputs. |
+| 4 | 4.4 | Create the per-run benchmark CloudFormation template | M | 🟢 done | Added `run.yaml`: network child, separate private EC2s/profiles, bounded per-node IAM, generated database secret, TLS-enforced private PostgreSQL and deployment outputs. Aligned network CIDRs to preset. Three templates lint; 21 infrastructure checks and preset validation pass. Live provisioning remains 4.5/6.1. |
 | 4 | 4.5 | Implement artifact deployment and execution scripts | M | ⚪ not started | Upload artifacts, render scenario configuration, deploy through Systems Manager, check readiness, run phases, and retrieve results/logs even after scenario failure. |
 | 4 | 4.6 | Implement run-owned stack and temporary artifact cleanup | M | ⚪ not started | Idempotent deletion after success, failure, cancellation, and partial provisioning; delete dependent resources in the correct order and surface cleanup failures. |
 | 4 | 4.7 | Implement independent expiry of abandoned benchmark runs | M | ⚪ not started | Scheduled expiry outside GitHub Actions; recover tagged expired stacks and temporary artifacts with narrowly scoped permissions; install through bootstrap CloudFormation. |
@@ -177,6 +177,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Own compute, database and credentials in a disposable parent stack
+
+**Decision:** Add create/run/delete `run.yaml`, nesting the reviewed network template from the exact run artifact key. Use separate primary-AZ private EC2s with per-node profiles, required runtime boundaries, IMDSv2 and encrypted/delete-on-termination AMI-minimum root disks. Provision PostgreSQL 17 with required TLS, 20 GiB encrypted gp3, no backups/autoscaling/final snapshot and explicit delete policies. Resolve credentials through a generated per-run secret, accessible only to Sendium. Grant each node its own input/evidence paths; allow Sendium to publish only the generated harness configuration prefix as a one-way private credential handoff. Keep resolved image/storage/engine inputs explicit and runtime deployment in Task 4.5.
+
+**Rationale:** Preserves the agreed low-cost defaults, separate resource budgets and privilege separation while making the parent responsible for dependency-ordered network teardown. Stack outputs expose identifiers and secret ARN only; the harness and GitHub controller do not need database-secret values. Bound run identity length to 27 characters so names fit IAM constraints at maximum resource-prefix length.
+
+**Correction:** Task 4.3's initial CIDRs differed from the versioned preset. Aligned the template/README to `10.70.0.0/24` and `10.70.0.0/26`, `10.70.0.64/26`; added a direct preset-consistency check.
+
+**Verification:** Three templates pass CloudFormation lint, all 21 offline infrastructure checks pass, and preset/schema compatibility validation passes. Checks cover private placement, storage/deletion, credit-family conditions, secret separation, runtime policy/boundary compatibility, maximum role-name lengths, ownership and cross-template interfaces. Live IAM/SSM/RDS lifecycle validation remains Tasks 4.5/6.1; no AWS resources deployed.
 
 ### 2026-10-16 — Isolate each run with endpoint-only networking
 
