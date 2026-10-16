@@ -156,9 +156,11 @@ public final class MessageLedger {
         ensureOpen();
         Entry entry = find(token);
         if (entry == null) { return; }
-        if (outcome == Admission.PENDING || entry.admission != Admission.PENDING) { violations++; return; }
+        if (outcome == null || outcome == Admission.PENDING || entry.admission != Admission.PENDING) { violations++; return; }
+        long admittedAt = clock.getAsLong();
+        if (admittedAt - entry.dispatch < 0) { violations++; return; }
         entry.admission = outcome;
-        entry.admittedAt = clock.getAsLong();
+        entry.admittedAt = admittedAt;
         entry.ingressId = ingressId;
         if (ingressId != null) {
             String previous = ingressIds.putIfAbsent(ingressId, token);
@@ -197,24 +199,28 @@ public final class MessageLedger {
         eventAt(token, event, clock.getAsLong());
     }
 
-    private void eventAt(String token, Event event, long now) {
+    private boolean eventAt(String token, Event event, long now) {
         ensureOpen();
         Entry entry = find(token);
-        if (entry == null) { return; }
-        if (entry.events.containsKey(event)) {
-            violations++;
-            if (event == Event.PROVIDER_ARRIVAL) { add(entry, DUPLICATE_PROVIDER, 1); }
-            if (event == Event.RECEIPT_FORWARDED) { add(entry, DUPLICATE_RECEIPT, 1); }
-            return;
-        }
-        if (entry.admission == Admission.REJECTED || !validOrder(entry, event)) { violations++; return; }
+        return entry != null && eventAt(token, entry, event, now);
+    }
+
+    private boolean eventAt(String token, Entry entry, Event event, long now) {
+        if (!validOrder(entry, event)) { violations++; return false; }
         long predecessor = switch (event) {
             case PROVIDER_ARRIVAL -> entry.dispatch;
             case PROVIDER_RESPONSE -> entry.events.get(Event.PROVIDER_ARRIVAL);
             case RECEIPT_GENERATED -> entry.events.get(Event.PROVIDER_RESPONSE);
             case RECEIPT_FORWARDED -> entry.events.get(Event.RECEIPT_GENERATED);
         };
-        if (now - predecessor < 0) { violations++; return; }
+        if (now - predecessor < 0 || now - clock.getAsLong() > 0) { violations++; return false; }
+        if (entry.events.containsKey(event)) {
+            violations++;
+            if (event == Event.PROVIDER_ARRIVAL) { add(entry, DUPLICATE_PROVIDER, 1); }
+            if (event == Event.RECEIPT_FORWARDED) { add(entry, DUPLICATE_RECEIPT, 1); }
+            return event == Event.RECEIPT_FORWARDED;
+        }
+        if (entry.admission == Admission.REJECTED) { violations++; return false; }
         entry.events.put(event, now);
         if (entry.measured) {
             long providerBefore = overall.providerPending(), receiptBefore = overall.receiptPending(config.dlrEnabled());
@@ -247,18 +253,14 @@ public final class MessageLedger {
             }
         }
         retireIfComplete(token, entry);
+        return true;
     }
 
     /** Validate and record provider arrival atomically before accepting a submit. */
     public synchronized boolean acceptProviderArrival(String token) {
         ensureOpen();
-        prune();
-        Entry entry = active.get(token);
-        if (entry == null && retired.containsKey(token)) { entry = retired.get(token).entry(); }
-        boolean valid = entry != null && entry.admission != Admission.REJECTED
-                && !entry.events.containsKey(Event.PROVIDER_ARRIVAL);
-        event(token, Event.PROVIDER_ARRIVAL);
-        return valid;
+        Entry entry = find(token);
+        return entry != null && eventAt(token, entry, Event.PROVIDER_ARRIVAL, clock.getAsLong());
     }
 
     /** Callback token permits correlation before the admission response supplies its gateway ID. */
@@ -288,10 +290,9 @@ public final class MessageLedger {
             violations++;
             return ReceiptResult.INVALID;
         }
+        if (!eventAt(token, entry, Event.RECEIPT_FORWARDED, arrivalNanos)) { return ReceiptResult.INVALID; }
         entry.forwardedIngressId = ingressId;
-        boolean valid = validOrder(entry, Event.RECEIPT_FORWARDED) && entry.admission != Admission.REJECTED;
-        eventAt(token, Event.RECEIPT_FORWARDED, arrivalNanos);
-        return valid ? ReceiptResult.RECORDED : ReceiptResult.INVALID;
+        return ReceiptResult.RECORDED;
     }
 
     private boolean validOrder(Entry entry, Event event) {
@@ -323,7 +324,7 @@ public final class MessageLedger {
             try {
                 long issued = token != null && token.startsWith(prefix)
                         ? Long.parseUnsignedLong(token.substring(prefix.length()), 36) : 0;
-                if (issued > 0 && issued <= sequence) { eventsBeyondRetention++; }
+                if (issued > 0 && issued <= sequence && token.equals(prefix + Long.toUnsignedString(issued, 36))) { eventsBeyondRetention++; }
                 else { violations++; }
             } catch (NumberFormatException exception) {
                 violations++;

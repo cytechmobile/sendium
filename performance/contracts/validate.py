@@ -7,6 +7,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
+from semantics import validate_results
 
 
 ROOT = Path(__file__).resolve().parent
@@ -93,5 +94,10 @@ if arguments.results_directory is not None:
     if not results:
         raise SystemExit("No generated results.json files found")
     for path in results:
-        result_validator.validate(json.loads(path.read_text(encoding="utf-8")))
-    print(f"Validated {len(results)} generated reports against the version 1 result schema.")
+        document = json.loads(path.read_text(encoding="utf-8"))
+        result_validator.validate(document)
+        try:
+            validate_results(document)
+        except ValueError as exception:
+            raise ValueError(f"{path}: {exception}") from exception
+    print(f"Validated {len(results)} generated reports against the version 1 result schema and accounting/window semantics.")

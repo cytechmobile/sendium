@@ -15,6 +15,15 @@ python performance/contracts/validate.py --results-directory performance/harness
 Structural schema validation does not replace runtime validation of accounting
 equations, interval ordering, empty distributions, or configuration consistency
 (for example, PostgreSQL storage when delivery reports are enabled).
+The generated-report command also runs the independent `semantics.py` checks:
+admission/completion equations, additive cohort and latency counts, contiguous
+observation windows, event-rate denominators, drain backlog, null/ordered latency
+statistics, and validity/exit consistency. A report can describe a failed run and
+still be a valid artifact; inconsistent report data fails validation itself.
+
+```sh
+python -m unittest discover -s performance/contracts -p 'test_*.py'
+```
 
 ## Configuration
 
@@ -46,6 +55,8 @@ single-part payload. Map ingress acknowledgement IDs and provider IDs to that
 token. The simulator rejects malformed or unknown correlation tokens as an
 accounting violation. Receipt correlation uses the provider ID and the
 forwarded ingress ID, rather than assuming those IDs are equal.
+Tokens must use their issued canonical spelling. Numeric aliases such as
+`run:01` or `run:+1` are malformed, not evidence of expired duplicate history.
 
 Admission outcomes are mutually exclusive: accepted, rejected (explicit
 negative acknowledgement), failed (transport/protocol failure), timed out,
@@ -114,6 +125,13 @@ measurements retain planned cohort boundaries and their observed durations,
 including zero observed duration for future cohorts with missed targets. Resource
 evidence and classification are described in `../resources/README.md`; missing
 evidence is explicitly inconclusive rather than interpreted as zero utilization.
+When early finalization shares a monotonic clock tick with an already-recorded
+update, the exclusive observation end advances by the minimum one nanosecond
+needed to include that update. Configured measurement/drain deadlines remain
+exclusive and are never extended. This avoids silently dropping a same-tick
+callback into a nonexistent interval. Receipt timestamps must be between their
+predecessor event and recording time; invalid timestamps cannot mutate receipt
+identity, completion counters, or latency samples.
 
 Interval storage has an explicit default budget of 256 minute windows across
 measurement and maximum drain. Histograms are allocated only for sampled

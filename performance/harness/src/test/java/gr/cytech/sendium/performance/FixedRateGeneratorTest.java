@@ -162,7 +162,7 @@ class FixedRateGeneratorTest {
             var stats = generator.generate(MEASUREMENT, 0, 1_000_000_000L, stopped);
             assertEquals(2, stats.attempted());
             assertEquals(8, stats.missedScheduling());
-            assertEquals(100_000_000L, stats.elapsedNanos());
+            assertEquals(100_000_001L, stats.elapsedNanos()); // Exclusive close includes the same-tick final attempt.
             assertTrue(stats.stoppedEarly());
         }
     }

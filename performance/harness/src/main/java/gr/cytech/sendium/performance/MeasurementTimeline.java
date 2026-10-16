@@ -28,6 +28,7 @@ public final class MeasurementTimeline {
     private final Events[] measurementEvents, drainEvents;
     private Long endOffset, finishOffset;
     private long outsideWindowEvents;
+    private long lastMeasurementUpdate = -1, lastDrainUpdate = -1;
 
     MeasurementTimeline(long start, long duration, long maxDrain, int budget) {
         if (duration <= 0 || maxDrain < 0 || budget < 1 || buckets(duration) + buckets(maxDrain) > budget) {
@@ -88,21 +89,26 @@ public final class MeasurementTimeline {
         long offset = when - start;
         long end = endOffset == null ? plannedDuration : endOffset;
         if (offset < 0 || offset >= end + maxDrain || finishOffset != null && offset >= finishOffset) { outsideWindowEvents++; return null; }
-        return offset < end ? measurementEvents[(int) (offset / MINUTE)] : drainEvents[(int) ((offset - end) / MINUTE)];
+        if (offset < end) {
+            lastMeasurementUpdate = Math.max(lastMeasurementUpdate, offset);
+            return measurementEvents[(int) (offset / MINUTE)];
+        }
+        lastDrainUpdate = Math.max(lastDrainUpdate, offset);
+        return drainEvents[(int) ((offset - end) / MINUTE)];
     }
 
     long end(long now) {
-        if (endOffset == null) { endOffset = Math.max(0, Math.min(plannedDuration, now - start)); }
+        if (endOffset == null) { endOffset = observedEnd(now); }
         return start + endOffset;
     }
     void finish(long now) {
         end(now);
-        if (finishOffset == null) { finishOffset = Math.max(endOffset, Math.min(endOffset + maxDrain, now - start)); }
+        if (finishOffset == null) { finishOffset = observedFinish(now, endOffset); }
     }
 
     Snapshot snapshot(boolean dlr, long now) {
-        long end = endOffset == null ? Math.max(0, Math.min(plannedDuration, now - start)) : endOffset;
-        long finish = finishOffset == null ? Math.max(end, Math.min(end + maxDrain, now - start)) : finishOffset;
+        long end = endOffset == null ? observedEnd(now) : endOffset;
+        long finish = finishOffset == null ? observedFinish(now, end) : finishOffset;
         List<Cohort> cohortSnapshots = new ArrayList<>();
         for (int i = 0; i < cohorts.length; i++) {
             long from = i * MINUTE, to = Math.min(plannedDuration, from + MINUTE);
@@ -115,6 +121,11 @@ public final class MeasurementTimeline {
         append(events, "drain", drainEvents, end, finish - end, backlog);
         return new Snapshot(end, finish - end, List.copyOf(cohortSnapshots), List.copyOf(events), outsideWindowEvents, budget);
     }
+
+    // Closing a half-open observation after a same-tick callback must include that callback.
+    // Absolute configured deadlines remain exclusive; this only advances early close by one tick.
+    private long observedEnd(long now) { return Math.max(0, Math.min(plannedDuration, Math.max(now - start, lastMeasurementUpdate + 1))); }
+    private long observedFinish(long now, long end) { return Math.max(end, Math.min(end + maxDrain, Math.max(now - start, lastDrainUpdate + 1))); }
 
     private static void append(List<EventInterval> result, String phase, Events[] buckets, long base, long duration, long[] backlog) {
         for (int i = 0; i < buckets.length && i * MINUTE < duration; i++) {

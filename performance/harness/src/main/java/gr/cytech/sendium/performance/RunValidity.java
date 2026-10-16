@@ -34,6 +34,7 @@ public final class RunValidity {
         if (timeline == null || timeline.durationNanos() == 0) {
             failed(reasons, "MEASUREMENT_NOT_STARTED", "No measurement observation window completed.");
         } else {
+            checkIntervals(counts, timeline, config, ledger, reasons);
             if (timeline.durationNanos() < java.util.concurrent.TimeUnit.SECONDS.toNanos(config.measurementSeconds())) {
                 inconclusive(reasons, "PARTIAL_MEASUREMENT", "Measurement ended before its configured duration.");
             }
@@ -73,6 +74,61 @@ public final class RunValidity {
         List<Reason> unique = reasons.stream().distinct().toList();
         boolean failed = unique.stream().anyMatch(reason -> reason.severity() == Severity.FAILED);
         return new Classification(failed ? "failed" : unique.isEmpty() ? "valid" : "inconclusive", unique, failed ? 1 : 0);
+    }
+
+    private static void checkIntervals(MessageLedger.Counts counts, MeasurementTimeline.Snapshot timeline,
+            RunConfig config, MessageLedger ledger, List<Reason> reasons) {
+        List<java.util.function.ToLongFunction<MessageLedger.Counts>> additive = List.of(
+                MessageLedger.Counts::scheduled, MessageLedger.Counts::attempted, MessageLedger.Counts::missed,
+                MessageLedger.Counts::accepted, MessageLedger.Counts::rejected, MessageLedger.Counts::failed,
+                MessageLedger.Counts::timedOut, MessageLedger.Counts::pendingAdmission,
+                MessageLedger.Counts::providerArrivals, MessageLedger.Counts::providerResponses,
+                MessageLedger.Counts::receiptsGenerated, MessageLedger.Counts::receiptsForwarded,
+                MessageLedger.Counts::acceptedProviderCompleted, MessageLedger.Counts::acceptedAwaitingProvider,
+                MessageLedger.Counts::acceptedReceiptForwarded, MessageLedger.Counts::acceptedAwaitingReceipt,
+                MessageLedger.Counts::providerObservedWithoutAcceptance, MessageLedger.Counts::duplicateProviderRequests,
+                MessageLedger.Counts::duplicateReceipts);
+        if (additive.stream().anyMatch(metric -> timeline.cohorts().stream().mapToLong(cohort -> metric.applyAsLong(cohort.counts())).sum()
+                != metric.applyAsLong(counts))) {
+            failed(reasons, "COHORT_ACCOUNTING_VIOLATION", "Submission-cohort counters do not reconcile with overall accounting.");
+        }
+        if (timeline.cohorts().isEmpty() || timeline.cohorts().getLast().endOffsetNanos()
+                != java.util.concurrent.TimeUnit.SECONDS.toNanos(config.measurementSeconds())) {
+            failed(reasons, "MEASUREMENT_CONFIGURATION_MISMATCH", "Recorded cohort boundaries differ from the configured measurement duration.");
+        }
+        long planned = BigDecimal.valueOf(config.offeredMessagesPerSecond()).multiply(BigDecimal.valueOf(config.measurementSeconds()))
+                .setScale(0, RoundingMode.CEILING).longValueExact();
+        if (timeline.cohorts().stream().anyMatch(cohort -> cohort.counts().scheduled()
+                > slotsBefore(cohort.endOffsetNanos(), planned, config.offeredMessagesPerSecond())
+                    - slotsBefore(cohort.startOffsetNanos(), planned, config.offeredMessagesPerSecond()))) {
+            failed(reasons, "COHORT_TARGET_MISMATCH", "A submission minute contains more targets than the declared fixed-rate schedule.");
+        }
+        var overallLatencies = ledger.latencies();
+        for (var boundary : MessageLedger.Latency.values()) {
+            long samples = timeline.cohorts().stream().mapToLong(cohort -> cohort.latencies().get(boundary).count()).sum();
+            if (samples != overallLatencies.get(boundary).count()) {
+                failed(reasons, "LATENCY_ACCOUNTING_VIOLATION", "Cohort latency samples do not reconcile for " + boundary + ".");
+            }
+        }
+        if (timeline.outsideWindowEvents() == 0
+                && (timeline.events().stream().mapToLong(MeasurementTimeline.EventInterval::providerArrivals).sum() != counts.providerArrivals()
+                    || timeline.events().stream().mapToLong(MeasurementTimeline.EventInterval::providerResponses).sum() != counts.providerResponses()
+                    || timeline.events().stream().mapToLong(MeasurementTimeline.EventInterval::receiptsGenerated).sum() != counts.receiptsGenerated()
+                    || timeline.events().stream().mapToLong(MeasurementTimeline.EventInterval::receiptsForwarded).sum() != counts.receiptsForwarded())) {
+            failed(reasons, "EVENT_ACCOUNTING_VIOLATION", "Event-time counters do not reconcile with overall accounting.");
+        }
+    }
+
+    private static long slotsBefore(long boundaryNanos, long total, double rate) {
+        double period = 1_000_000_000.0 / rate;
+        long low = 0, high = total;
+        while (low < high) {
+            long middle = low + (high - low) / 2;
+            long offset = middle == 0 ? 0 : (long) Math.ceil(middle * period);
+            if (offset < boundaryNanos) { low = middle + 1; }
+            else { high = middle; }
+        }
+        return low;
     }
 
     private static void checkSamples(String source, List<ResourceEvidence.Sample> samples, ResourceEvidence.Window window, ResultReport.Context context, List<Reason> reasons) {
