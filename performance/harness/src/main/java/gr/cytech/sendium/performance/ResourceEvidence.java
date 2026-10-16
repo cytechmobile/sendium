@@ -149,6 +149,10 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     }
 
     public ObjectNode json(ObjectMapper mapper, Window window, MeasurementTimeline.Snapshot timeline) {
+        return jsonForIntervals(mapper, window, timeline == null ? List.of() : timeline.events());
+    }
+
+    public ObjectNode jsonForIntervals(ObjectMapper mapper, Window window, List<MeasurementTimeline.EventInterval> events) {
         ObjectNode result = mapper.createObjectNode();
         result.set("sendium", mapper.valueToTree(sendium)); result.set("harness", mapper.valueToTree(harness));
         result.set("cpuCredits", mapper.valueToTree(cpuCredits)); result.set("collectionIssues", mapper.valueToTree(collectionIssues));
@@ -160,8 +164,8 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
         overall.set("sendium", mapper.valueToTree(summarize(sendium, window)));
         overall.set("harness", mapper.valueToTree(summarize(harness, window)));
         var intervals = summary.putArray("intervals");
-        if (window != null && timeline != null) {
-            for (var event : timeline.events()) {
+        if (window != null) {
+            for (var event : events) {
                 Window interval = new Window(window.start().plusNanos(event.startOffsetNanos()),
                         window.start().plusNanos(event.startOffsetNanos() + event.durationNanos()));
                 ObjectNode value = intervals.addObject();

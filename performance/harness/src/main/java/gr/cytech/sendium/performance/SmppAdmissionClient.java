@@ -28,6 +28,8 @@ public final class SmppAdmissionClient implements AutoCloseable {
     private final NioEventLoopGroup group;
     private final DefaultSmppClient client;
     private final ExecutorService tasks;
+    private final Semaphore receiptSlots;
+    private final java.util.concurrent.atomic.AtomicInteger receiptAcknowledgements = new java.util.concurrent.atomic.AtomicInteger();
     private final Map<String, CompletableFuture<MessageLedger.Admission>> pending = new ConcurrentHashMap<>();
     private final Map<String, List<Long>> early = new HashMap<>();
     private final EnumMap<Problem, AtomicLong> problems = new EnumMap<>(Problem.class);
@@ -48,6 +50,7 @@ public final class SmppAdmissionClient implements AutoCloseable {
         group = new NioEventLoopGroup(1);
         client = new DefaultSmppClient(group);
         tasks = Executors.newVirtualThreadPerTaskExecutor();
+        receiptSlots = new Semaphore(settings.windowSize());
         for (Problem problem : Problem.values()) { problems.put(problem, new AtomicLong()); }
     }
 
@@ -68,8 +71,24 @@ public final class SmppAdmissionClient implements AutoCloseable {
             @Override public PduResponse firePduRequestReceived(PduRequest request) {
                 if (!(request instanceof DeliverSm receipt)) { return request.createResponse(); }
                 PduResponse response = request.createResponse();
+                if (!receiptSlots.tryAcquire()) { problem(Problem.SATURATION); response.setCommandStatus(SmppConstants.STATUS_THROTTLED); return response; }
+                receiptAcknowledgements.incrementAndGet();
                 response.setCommandStatus(receive(receipt, System.nanoTime()));
-                return response;
+                try {
+                    tasks.submit(() -> {
+                        try {
+                            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(settings.connectTimeoutMillis());
+                            while (session == null && System.nanoTime() < deadline) { Thread.sleep(1); }
+                            if (session != null) { session.sendResponsePdu(response); }
+                            else { problem(Problem.TRANSPORT_FAILURE); }
+                        } catch (Exception exception) { problem(Problem.TRANSPORT_FAILURE); }
+                        finally { receiptAcknowledgements.decrementAndGet(); receiptSlots.release(); }
+                    });
+                } catch (RejectedExecutionException exception) {
+                    receiptAcknowledgements.decrementAndGet(); receiptSlots.release();
+                    problem(Problem.TRANSPORT_FAILURE); response.setCommandStatus(SmppConstants.STATUS_SYSERR); return response;
+                }
+                return null;
             }
         });
     }
@@ -128,7 +147,10 @@ public final class SmppAdmissionClient implements AutoCloseable {
         try {
             synchronized (correlation) {
                 if (outcome == FAILED || outcome == TIMED_OUT) { ambiguousAdmissionObserved = true; }
-                ledger.admission(token, outcome, id);
+                synchronized (ledger) {
+                    if (ledger.isFrozen()) { outcome = PENDING; }
+                    else { ledger.admission(token, outcome, id); }
+                }
                 List<Long> receipts = id == null ? null : early.remove(id);
                 if (receipts != null) {
                     bufferedReceipts -= receipts.size();
@@ -144,6 +166,7 @@ public final class SmppAdmissionClient implements AutoCloseable {
     }
 
     private int receive(DeliverSm receipt, long arrival) {
+        if (ledger.isFrozen()) { return SmppConstants.STATUS_SYSERR; }
         byte[] body = receipt.getShortMessage();
         if (!config.dlrEnabled() || (receipt.getEsmClass() & SmppConstants.ESM_CLASS_MT_MASK)
                 != SmppConstants.ESM_CLASS_MT_SMSC_DELIVERY_RECEIPT
@@ -174,7 +197,11 @@ public final class SmppAdmissionClient implements AutoCloseable {
     }
 
     private int recordReceipt(String token, String id, long arrival) {
-        MessageLedger.ReceiptResult result = ledger.receiveReceiptAt(token, id, arrival);
+        MessageLedger.ReceiptResult result;
+        synchronized (ledger) {
+            if (ledger.isFrozen()) { return SmppConstants.STATUS_SYSERR; }
+            result = ledger.receiveReceiptAt(token, id, arrival);
+        }
         if (result == MessageLedger.ReceiptResult.BEYOND_RETENTION) { problem(Problem.LIMITED_HISTORY); }
         if (result == MessageLedger.ReceiptResult.INVALID) {
             problem(Problem.CORRELATION_FAILURE);
@@ -186,6 +213,7 @@ public final class SmppAdmissionClient implements AutoCloseable {
     /** Invoke only after admission tasks have stopped, before ledger finalization. */
     public void finalizeReceipts() {
         synchronized (correlation) {
+            if (ledger.isFrozen()) { early.clear(); bufferedReceipts = 0; return; }
             if (!pending.isEmpty()) { throw new IllegalStateException("Admission requests still pending"); }
             if (bufferedReceipts > 0) {
                 Problem reason = ledger.retiredEvictions() > 0 ? Problem.LIMITED_HISTORY
@@ -199,8 +227,9 @@ public final class SmppAdmissionClient implements AutoCloseable {
     }
 
     public int pendingRequests() { return pending.size(); }
+    public int pendingReceiptAcknowledgements() { return receiptAcknowledgements.get(); }
     public int bufferedReceipts() { synchronized (correlation) { return bufferedReceipts; } }
-    private void problem(Problem problem) { problems.get(problem).incrementAndGet(); }
+    private void problem(Problem problem) { if (!ledger.isFrozen()) { problems.get(problem).incrementAndGet(); } }
     public Map<Problem, Long> problems() {
         Map<Problem, Long> result = new EnumMap<>(Problem.class);
         problems.forEach((key, value) -> result.put(key, value.get()));

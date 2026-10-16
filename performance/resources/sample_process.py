@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import signal
 
 
 def timestamp():
@@ -68,7 +69,7 @@ def make_sample(current, previous, utc, previous_utc, elapsed, ticks_per_second)
     }
 
 
-def collect(pid, duration, interval, max_samples, output):
+def collect(pid, duration, interval, max_samples, output, stop_requested=lambda: False):
     if pid < 1 or not math.isfinite(duration) or duration <= 0 or not math.isfinite(interval) or interval <= 0:
         raise ValueError("Invalid sampling settings")
     # Baseline plus periodic samples, including one at the requested end.
@@ -89,7 +90,7 @@ def collect(pid, duration, interval, max_samples, output):
         count += 1
         previous, previous_utc, previous_time = current, utc, now
         elapsed = time.monotonic() - start
-        if elapsed >= duration:
+        if elapsed >= duration or stop_requested():
             return count
         if count >= max_samples:
             raise ValueError("Sampling exhausted the configured sample budget")
@@ -108,11 +109,16 @@ def main():
     try:
         if not sys.platform.startswith("linux"):
             raise ValueError("The sampling agent requires Linux /proc")
+        stopping = False
+        def stop(*_):
+            nonlocal stopping
+            stopping = True
+        signal.signal(signal.SIGTERM, stop)
         if args.output == "-":
-            collect(args.pid, args.duration_seconds, args.interval_seconds, args.max_samples, sys.stdout)
+            collect(args.pid, args.duration_seconds, args.interval_seconds, args.max_samples, sys.stdout, lambda: stopping)
         else:
             with Path(args.output).open("x", encoding="utf-8") as output:
-                collect(args.pid, args.duration_seconds, args.interval_seconds, args.max_samples, output)
+                collect(args.pid, args.duration_seconds, args.interval_seconds, args.max_samples, output, lambda: stopping)
         return 0
     except (OSError, ValueError, KeyError, IndexError):
         print("RESOURCE_SAMPLING_FAILED: process unavailable, invalid counters, settings, or output", file=sys.stderr)

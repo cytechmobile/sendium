@@ -182,6 +182,17 @@ identity, worker TPS, and artifact digests. Sanitized configuration must not
 include credentials. Artifact identifiers may be updated by publication after
 execution without changing benchmark measurements.
 
+Runnable reports record exact observed nanoseconds and measurement-start UTC in
+metadata, with `resourceFinalizationVersion=1`. Offline `finalize-report` may
+replace resource evidence/summaries and resource-scoped validity reasons without
+repeating traffic or changing workload counters, windows, latency distributions,
+configuration, provenance, or drain outcomes. Reasons carry `scope=workload` or
+`scope=resources`; workload/setup failures cannot be removed by resource
+enrichment. The command requires an owned new output directory and no AWS access.
+Run output also exposes pending receipt acknowledgements at cutoff. Accounting
+freezes before intentional shutdown, so cancellations cannot turn unfinished
+admissions into observed transport failures outside the measurement window.
+
 ## Validity and execution outcome
 
 - `valid`: completed measurement with no detected harness bottleneck or

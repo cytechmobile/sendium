@@ -131,6 +131,23 @@ class HttpAdaptersTest {
     }
 
     @Test
+    void timeoutCoversAStalledBodyAfterAcceptedHeaders() throws Exception {
+        RunConfig config = config(false, 200, 1);
+        MessageLedger ledger = ledger(config);
+        CountDownLatch release = new CountDownLatch(1);
+        try (Api api = new Api(exchange -> {
+            exchange.sendResponseHeaders(202, 100);
+            exchange.getResponseBody().write('x'); exchange.getResponseBody().flush();
+            release.await(3, TimeUnit.SECONDS); exchange.close();
+        }); HttpAdmissionClient client = new HttpAdmissionClient(config, settings(api.uri(), null), ledger)) {
+            assertEquals(TIMED_OUT, client.submit(true).orElseThrow().completion().get(2, TimeUnit.SECONDS));
+            assertEquals(0, client.pendingRequests());
+            assertEquals(1, ledger.snapshot().timedOut());
+            assertEquals(0, client.problems().get(HttpAdmissionClient.Problem.TRANSPORT_FAILURE));
+        } finally { release.countDown(); }
+    }
+
+    @Test
     void closeCancelsPendingRequestsAndPreservesAmbiguousFailedAccounting() throws Exception {
         RunConfig config = config(false, 3000, 1);
         MessageLedger ledger = ledger(config);

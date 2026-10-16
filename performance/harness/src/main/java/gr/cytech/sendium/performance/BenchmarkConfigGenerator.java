@@ -135,6 +135,7 @@ public final class BenchmarkConfigGenerator {
         Map<String, Object> harness = new LinkedHashMap<>();
         harness.put("schemaVersion", 1);
         harness.put("runIdentity", deployment.runIdentity());
+        harness.put("readinessUri", uri(deployment.sendiumHost(), deployment.httpPort(), "/q/health/ready"));
         harness.put("provider", provider);
         harness.put("ingress", ingress);
         harness.put("callbackReceiver", Map.of("host", "0.0.0.0", "port", deployment.callbackPort(),
@@ -159,6 +160,7 @@ public final class BenchmarkConfigGenerator {
         publicDeployment.withObject("/database").remove(java.util.List.of("password", "username"));
         effective.put("deployment", publicDeployment);
         files.put("public/effective-configuration.json", json(effective));
+        files.put("harness/effective-configuration.json", files.get("public/effective-configuration.json"));
         return new Generated(Map.copyOf(files));
     }
 

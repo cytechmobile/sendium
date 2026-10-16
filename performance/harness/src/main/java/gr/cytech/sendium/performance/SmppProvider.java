@@ -103,13 +103,16 @@ public final class SmppProvider implements AutoCloseable {
             @Override public PduResponse firePduRequestReceived(PduRequest request) {
                 if (!(request instanceof SubmitSm submit)) { return request.createResponse(); }
                 SubmitSmResp response = submit.createResponse();
+                if (ledger.isFrozen()) { response.setCommandStatus(SmppConstants.STATUS_SYSERR); return response; }
                 if (!validSubmission(submit)) {
                     problem(Problem.INVALID_SUBMISSION);
                     response.setCommandStatus(SmppConstants.STATUS_INVOPTPARAMVAL);
                     return response;
                 }
                 String token = new String(submit.getShortMessage(), StandardCharsets.US_ASCII);
-                if (!ledger.acceptProviderArrival(token)) {
+                boolean accepted;
+                synchronized (ledger) { accepted = !ledger.isFrozen() && ledger.acceptProviderArrival(token); }
+                if (!accepted) {
                     problem(Problem.UNKNOWN_CORRELATION);
                     response.setCommandStatus(SmppConstants.STATUS_INVMSGID);
                     return response;
@@ -155,11 +158,11 @@ public final class SmppProvider implements AutoCloseable {
         try {
             Thread.sleep(workload.providerResponseDelayMillis());
             session.sendResponsePdu(response);
-            ledger.event(token, PROVIDER_RESPONSE);
+            synchronized (ledger) { if (ledger.isFrozen()) { return; } ledger.event(token, PROVIDER_RESPONSE); }
             if (workload.dlrEnabled()) {
                 Thread.sleep(workload.providerDlrDelayMillis());
                 DeliverSm receipt = receipt(submit, response.getMessageId());
-                ledger.event(token, RECEIPT_GENERATED);
+                synchronized (ledger) { if (ledger.isFrozen()) { return; } ledger.event(token, RECEIPT_GENERATED); }
                 var future = session.sendRequestPdu(receipt, settings.ioTimeoutMillis(), true);
                 if (!future.await(settings.ioTimeoutMillis()) || !future.isSuccess()) {
                     problem(Problem.IO_FAILURE);
@@ -195,7 +198,7 @@ public final class SmppProvider implements AutoCloseable {
         return new Address(address.getTon(), address.getNpi(), address.getAddress());
     }
 
-    private void problem(Problem problem) { problems.get(problem).incrementAndGet(); }
+    private void problem(Problem problem) { if (!ledger.isFrozen()) { problems.get(problem).incrementAndGet(); } }
 
     public Snapshot snapshot() {
         Map<Problem, Long> counts = new EnumMap<>(Problem.class);

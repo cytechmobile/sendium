@@ -24,7 +24,7 @@
 | 3 | 3.2 | Produce overall and one-minute measurement reports | M | 🟢 done | Added bounded cohort/event minute aggregation, JSON/Markdown reports, drain backlog and latency percentiles. All 74 unit/socket and four packaged integration tests pass; generated reports validate against schema v1. Resource validity remains 3.3. |
 | 3 | 3.3 | Collect resource utilization and classify run validity | M | 🟢 done | Added bounded Linux CPU/RSS/host agents, protected read-only AWS credit collection, resource summaries and validity/exit policy. 86 Java tests, eight Python tests, four packaged scenarios, schema checks and a live Linux sampler check pass. AWS API collection is mocked; live verification remains 6.1. |
 | 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | 🟢 done | Added 19 cross-component boundary/race checks and six independent artifact-semantic tests. Fixed invalid receipt-time acceptance, token aliases, and same-tick finalization. All 105 Java tests, four packaged scenarios, 14 Python tests and generated-report validation pass. |
-| 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | ⚪ not started | Load generated runtime inputs, check application/database/protocol readiness, coordinate adapters/generator/collectors through phases and bounded drain, emit reports on failure, and return classified exit status before AWS integration. |
+| 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | 🟢 done | Added `run` and offline `finalize-report`, readiness/state files, sampler ownership, acknowledgement-aware drain, immutable cutoff and classified reports. 111 Java tests, eight packaged scenarios, 15 Python tests and artifact validation pass; Linux sampler graceful stop verified. |
 | 4 | 4.1 | Define the AWS and workload preset | S | ⚪ not started | Record region, database size, instance architecture, JVM settings, connections/windows, traffic limits, and deployment prerequisites. |
 | 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | ⚪ not started | Persistent artifact storage, GitHub OIDC integration/roles, expiry infrastructure permissions, and outputs; document one-time installation and reuse of an existing OIDC provider. |
 | 4 | 4.3 | Create the private networking CloudFormation template | M | ⚪ not started | VPC, private subnets, restricted security groups, and management/artifact connectivity; include subnet placement required by RDS. Define stack ownership and lifetime. |
@@ -171,6 +171,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Run phases without AWS privileges and enrich resources offline
+
+**Decision:** Add executable `run` and `finalize-report` commands. Run owns only harness services and the optional local sampler; deployment owns Sendium, PostgreSQL, and remote agents. Start listeners before application readiness and expose atomic state. Include pending acknowledgement writes during drain, seal accounting before teardown, and suppress intentional post-cutoff cancellations. Merge generated sanitized effective configuration into reports. Resource finalization replaces only resource evidence/reasons, retaining workload outcomes and failures.
+
+**Why:** Reusable components alone were insufficient for deployment execution. External AWS diagnostics arrive after traffic and must not require provisioning credentials inside the workload/report JVM. Stopping on receipt arrival without awaiting acknowledgement can leave Sendium's database delivery incomplete. Teardown cancellations must not fabricate admission failures outside observation. HTTP timeouts must cover stalled bodies, not just connections/headers.
+
+**Alternatives considered:** Running report code in a provisioning job weakens privilege separation; use an unprivileged publishing job after protected diagnostic retrieval. Re-running traffic to include resource artifacts changes the measurement. A fixed post-receipt delay hides acknowledgement races; track actual pending writes instead. Allowing caller-supplied metadata to omit effective generated settings loses reproducibility, so the runner loads and verifies its sanitized configuration copy.
+
+**Verification:** All 111 Java unit/socket tests and eight packaged Sendium/PostgreSQL integration scenarios pass, including four separate executable-JAR runs covering both ingress modes and DLR settings. CLI tests verify setup failure reports, readiness timeout/listener cleanup, immutable offline enrichment, and post-cutoff cancellation; stalled-body admission timeout is checked separately. Fifteen Python tests pass. Actual CLI reports and synthetic reports pass schema/accounting/window validation. A live Linux check verifies graceful sampler termination with a final CPU interval. Windows functional CLI cases intentionally lack production resource evidence and remain inconclusive; live AWS orchestration/credit collection remains Phase 4/6 work.
 
 ### 2026-10-15 — Verify accounting independently and reject invalid transitions atomically
 
@@ -330,6 +340,7 @@ These are implementation details absent from the issue. Resolve repository-disco
 - Correlation token encoding, bounded history, and histogram precision resolved in Task 1.3. Protocol-ID mapping is implemented with the adapters; interval publication remains Task 3.2.
 - Precise scenario-defined accounting violations and how timeout/unknown admission outcomes reconcile with provider observations.
 - Explicit artifact retention period and log redaction of isolated credentials.
+- Verify release automation updates the opt-in harness module/parent versions before final workflow validation (Tasks 5.1/6.2).
 
 ---
 
@@ -348,3 +359,11 @@ These are implementation details absent from the issue. Resolve repository-disco
 - DLR-disabled traffic does not require a different application build: the standalone PostgreSQL subsystem remains configured while message-level receipt requests are omitted.
 - Successful forwarding deletes tracking rows quickly. Storage operation metrics plus empty final tables provide evidence of the full database-backed path without depending on a transient row observation.
 - A separate packaged JVM and disposable database are sufficient for local functional verification; fixed-rate scheduling, minute reports, resource sampling, and AWS execution remain subsequent work.
+
+### Phase 3 — Measurement, reporting, and executable orchestration
+
+- Cross-component boundary tests found defects that isolated counters/schema checks could not: invalid timestamp acceptance, token aliases, and same-tick finalization.
+- Receipt arrival is a measurement boundary, but an acknowledgement still needs to finish before network teardown; drain must observe both.
+- Sealing accounting before cleanup prevents deliberate cancellation from changing pending admissions into synthetic transport failures.
+- Resource diagnostics can be enriched after traffic without re-execution when their reason scope and observation identity are explicit. Workload failures remain immutable.
+- Separate executable-JAR checks now cover the complete generated configuration/phase/report path before AWS provisioning work begins.

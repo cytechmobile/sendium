@@ -21,6 +21,7 @@ public final class HttpReceiptReceiver implements AutoCloseable {
     private final ThreadPoolExecutor executor;
     private final MessageLedger ledger;
     private final boolean dlrEnabled;
+    private final java.util.concurrent.atomic.AtomicInteger active = new java.util.concurrent.atomic.AtomicInteger();
     private final EnumMap<Problem, AtomicLong> problems = new EnumMap<>(Problem.class);
 
     public HttpReceiptReceiver(InetSocketAddress address, String path, int threads, int queueCapacity,
@@ -45,7 +46,9 @@ public final class HttpReceiptReceiver implements AutoCloseable {
     public int port() { return server.getAddress().getPort(); }
 
     private void handle(HttpExchange exchange, String path) {
+        active.incrementAndGet();
         try (exchange) {
+            if (ledger.isFrozen()) { exchange.sendResponseHeaders(503, -1); return; }
             if (!"GET".equals(exchange.getRequestMethod()) || !path.equals(exchange.getRequestURI().getPath())) {
                 problem(Problem.INVALID_CALLBACK);
                 exchange.sendResponseHeaders(405, -1);
@@ -68,7 +71,11 @@ public final class HttpReceiptReceiver implements AutoCloseable {
                 exchange.sendResponseHeaders(422, -1);
                 return;
             }
-            MessageLedger.ReceiptResult result = ledger.receiveReceipt(query.get("token"), query.get("messageId"));
+            MessageLedger.ReceiptResult result;
+            synchronized (ledger) {
+                if (ledger.isFrozen()) { exchange.sendResponseHeaders(503, -1); return; }
+                result = ledger.receiveReceipt(query.get("token"), query.get("messageId"));
+            }
             if (result == MessageLedger.ReceiptResult.BEYOND_RETENTION) {
                 problem(Problem.LIMITED_HISTORY);
             } else if (result == MessageLedger.ReceiptResult.INVALID) {
@@ -80,7 +87,7 @@ public final class HttpReceiptReceiver implements AutoCloseable {
             exchange.sendResponseHeaders(204, -1);
         } catch (IOException exception) {
             problem(Problem.IO_FAILURE);
-        }
+        } finally { active.decrementAndGet(); }
     }
 
     static Map<String, String> decodeQuery(String raw) {
@@ -98,12 +105,13 @@ public final class HttpReceiptReceiver implements AutoCloseable {
         return result;
     }
 
-    private void problem(Problem problem) { problems.get(problem).incrementAndGet(); }
+    private void problem(Problem problem) { if (!ledger.isFrozen()) { problems.get(problem).incrementAndGet(); } }
     public Map<Problem, Long> problems() {
         Map<Problem, Long> result = new EnumMap<>(Problem.class);
         problems.forEach((key, value) -> result.put(key, value.get()));
         return Map.copyOf(result);
     }
+    public int pendingAcknowledgements() { return active.get() + executor.getQueue().size(); }
 
     @Override public void close() {
         server.stop(0);
