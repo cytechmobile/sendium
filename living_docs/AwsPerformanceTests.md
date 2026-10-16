@@ -27,7 +27,7 @@
 | 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | 🟢 done | Added `run` and offline `finalize-report`, readiness/state files, sampler ownership, acknowledgement-aware drain, immutable cutoff and classified reports. 111 Java tests, eight packaged scenarios, 15 Python tests and artifact validation pass; Linux sampler graceful stop verified. |
 | 4 | 4.1 | Define the AWS and workload preset | S | 🟢 done | Added `performance/presets/aws-private-jvm-v1.json`, deployment mapping/prerequisites, and static compatibility checks. Defines private run-owned networking, JVM/RDS sizing, sample/phase budgets, expiry and artifact retention; live AWS availability remains preflight/6.1 work. |
 | 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | 🟢 done | Added `performance/infrastructure/bootstrap.yaml`: private temporary artifact bucket, optional/reused OIDC, orchestration/diagnostic/service roles, required runtime boundary, expiry role/logs and outputs. CloudFormation lint and seven policy tests pass; actual handler/schedule remains 4.7 and live authorization 6.1. |
-| 4 | 4.3 | Create the private networking CloudFormation template | M | ⚪ not started | VPC, private subnets, restricted security groups, and management/artifact connectivity; include subnet placement required by RDS. Define stack ownership and lifetime. |
+| 4 | 4.3 | Create the private networking CloudFormation template | M | 🟢 done | Added disposable `network.yaml`: two private AZ subnets, role-paired security rules, three interface endpoints and run-scoped S3 gateway endpoint. Both templates lint; all 12 infrastructure tests pass. Parent integration follows in 4.4; live connectivity remains 4.5/6.1. |
 | 4 | 4.4 | Create the per-run benchmark CloudFormation template | M | ⚪ not started | Sendium/harness EC2, instance profiles, private RDS, isolated credentials, run identity/expiry tags, placement, and deployment outputs. |
 | 4 | 4.5 | Implement artifact deployment and execution scripts | M | ⚪ not started | Upload artifacts, render scenario configuration, deploy through Systems Manager, check readiness, run phases, and retrieve results/logs even after scenario failure. |
 | 4 | 4.6 | Implement run-owned stack and temporary artifact cleanup | M | ⚪ not started | Idempotent deletion after success, failure, cancellation, and partial provisioning; delete dependent resources in the correct order and surface cleanup failures. |
@@ -177,6 +177,14 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Isolate each run with endpoint-only networking
+
+**Decision:** Add a disposable network child template with two private subnets in distinct AZs, primary-AZ interface endpoints, a run-prefix-scoped S3 gateway endpoint, and explicitly paired role-to-role TCP rules. Suppress implicit unrestricted group egress. Use parent/child output references rather than cross-stack exports, and propagate run identity/expiry to stacks and taggable resources.
+
+**Rationale:** Matches the versioned private preset while keeping concurrent runs independent and teardown dependency-ordered. Preinstalled SSM and staged runtime bundles remove the need for public package/download connectivity.
+
+**Verification:** Both infrastructure templates pass CloudFormation lint; all 12 offline infrastructure tests pass. Live IAM, routing and SSM verification remain Tasks 4.5/6.1. Parent integration is Task 4.4; independent expiry remains Task 4.7.
 
 ### 2026-10-16 — Bootstrap persistent control-plane roles before run infrastructure
 

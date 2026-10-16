@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Run-owned private Sendium benchmark network; delete after dependent compute/database resources.
+Parameters:
+  Repository:
+    Type: String
+    Default: cytechmobile/sendium
+    AllowedPattern: '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'
+  RunIdentity:
+    Type: String
+    AllowedPattern: 'gh-[0-9]+-[0-9]+'
+  ExpiresAt:
+    Type: String
+    Description: UTC expiry, supplied by the protected controller and copied to stack tags.
+    AllowedPattern: '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+  PrimaryAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+  SecondaryAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+  S3PrefixListId:
+    Type: String
+    Description: Preflight-resolved regional com.amazonaws.REGION.s3 managed prefix list.
+    AllowedPattern: 'pl-[a-f0-9]+'
+  ArtifactBucketName:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+Rules:
+  DistinctAvailabilityZones:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref PrimaryAvailabilityZone, !Ref SecondaryAvailabilityZone]]
+        AssertDescription: RDS requires subnets in two distinct Availability Zones.
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.73.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  PrimarySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Ref PrimaryAvailabilityZone
+      CidrBlock: 10.73.0.0/25
+      MapPublicIpOnLaunch: false
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  SecondarySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Ref SecondaryAvailabilityZone
+      CidrBlock: 10.73.0.128/25
+      MapPublicIpOnLaunch: false
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  PrivateRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  PrimaryRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PrimarySubnet, RouteTableId: !Ref PrivateRoutes}
+  SecondaryRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SecondarySubnet, RouteTableId: !Ref PrivateRoutes}
+  HarnessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Harness role; explicit egress only.
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationPrefixListId: !Ref S3PrefixListId}
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  SendiumSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Sendium role; explicit egress only.
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationPrefixListId: !Ref S3PrefixListId}
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL; no initiated outbound connections.
+      VpcId: !Ref Vpc
+      # A nonempty inert rule suppresses EC2's implicit allow-all egress.
+      SecurityGroupEgress:
+        - {IpProtocol: '-1', CidrIp: 127.0.0.1/32}
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private AWS interface endpoints; responses are stateful.
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - {IpProtocol: '-1', CidrIp: 127.0.0.1/32}
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  HarnessHttpOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref HarnessSecurityGroup, IpProtocol: tcp, FromPort: 8080, ToPort: 8080, DestinationSecurityGroupId: !Ref SendiumSecurityGroup}
+  SendiumHttpIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref SendiumSecurityGroup, IpProtocol: tcp, FromPort: 8080, ToPort: 8080, SourceSecurityGroupId: !Ref HarnessSecurityGroup}
+  HarnessSmppOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref HarnessSecurityGroup, IpProtocol: tcp, FromPort: 27777, ToPort: 27777, DestinationSecurityGroupId: !Ref SendiumSecurityGroup}
+  SendiumSmppIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref SendiumSecurityGroup, IpProtocol: tcp, FromPort: 27777, ToPort: 27777, SourceSecurityGroupId: !Ref HarnessSecurityGroup}
+  SendiumProviderOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref SendiumSecurityGroup, IpProtocol: tcp, FromPort: 27779, ToPort: 27779, DestinationSecurityGroupId: !Ref HarnessSecurityGroup}
+  HarnessProviderIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref HarnessSecurityGroup, IpProtocol: tcp, FromPort: 27779, ToPort: 27779, SourceSecurityGroupId: !Ref SendiumSecurityGroup}
+  SendiumCallbackOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref SendiumSecurityGroup, IpProtocol: tcp, FromPort: 8081, ToPort: 8081, DestinationSecurityGroupId: !Ref HarnessSecurityGroup}
+  HarnessCallbackIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref HarnessSecurityGroup, IpProtocol: tcp, FromPort: 8081, ToPort: 8081, SourceSecurityGroupId: !Ref SendiumSecurityGroup}
+  SendiumDatabaseOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref SendiumSecurityGroup, IpProtocol: tcp, FromPort: 5432, ToPort: 5432, DestinationSecurityGroupId: !Ref DatabaseSecurityGroup}
+  DatabaseIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref DatabaseSecurityGroup, IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref SendiumSecurityGroup}
+  HarnessManagementOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref HarnessSecurityGroup, IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationSecurityGroupId: !Ref EndpointSecurityGroup}
+  HarnessManagementIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref EndpointSecurityGroup, IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !Ref HarnessSecurityGroup}
+  SendiumManagementOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref SendiumSecurityGroup, IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationSecurityGroupId: !Ref EndpointSecurityGroup}
+  SendiumManagementIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref EndpointSecurityGroup, IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !Ref SendiumSecurityGroup}
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrimarySubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrimarySubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  SecretsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrimarySubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds: [!Ref PrivateRoutes]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/*'
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  PrimarySubnetId:
+    Value: !Ref PrimarySubnet
+  SecondarySubnetId:
+    Value: !Ref SecondarySubnet
+  PrimaryAvailabilityZone:
+    Value: !Ref PrimaryAvailabilityZone
+  HarnessSecurityGroupId:
+    Value: !Ref HarnessSecurityGroup
+  SendiumSecurityGroupId:
+    Value: !Ref SendiumSecurityGroup
+  DatabaseSecurityGroupId:
+    Value: !Ref DatabaseSecurityGroup
