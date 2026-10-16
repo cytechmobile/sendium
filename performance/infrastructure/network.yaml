@@ -32,7 +32,7 @@ Resources:
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.73.0.0/24
+      CidrBlock: 10.70.0.0/24
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
@@ -45,7 +45,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Ref PrimaryAvailabilityZone
-      CidrBlock: 10.73.0.0/25
+      CidrBlock: 10.70.0.0/26
       MapPublicIpOnLaunch: false
       Tags:
         - {Key: 'sendium:managed-by', Value: performance-tests}
@@ -57,7 +57,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Ref SecondaryAvailabilityZone
-      CidrBlock: 10.73.0.128/25
+      CidrBlock: 10.70.0.64/26
       MapPublicIpOnLaunch: false
       Tags:
         - {Key: 'sendium:managed-by', Value: performance-tests}

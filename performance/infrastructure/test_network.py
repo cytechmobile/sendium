@@ -1,5 +1,6 @@
 """Offline network isolation checks; live routing/IAM verification remains required."""
 
+import json
 from pathlib import Path
 import unittest
 
@@ -20,6 +21,12 @@ def ref(value):
 
 
 class NetworkTest(unittest.TestCase):
+    def test_preset_cidrs(self):
+        preset = json.loads((Path(__file__).parents[1] / "presets/aws-private-jvm-v1.json").read_text())
+        self.assertEqual(resources("VPC")["Vpc"]["CidrBlock"], preset["network"]["vpcCidr"])
+        self.assertEqual([spec["CidrBlock"] for spec in resources("Subnet").values()],
+                         preset["network"]["privateSubnetCidrs"])
+
     def test_private_topology_and_database_placement(self):
         self.assertFalse(ERRORS)
         allowed = {"VPC", "Subnet", "RouteTable", "SubnetRouteTableAssociation",

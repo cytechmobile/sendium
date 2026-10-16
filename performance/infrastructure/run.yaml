@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Disposable private Sendium benchmark; create-only, with run-owned network, EC2 and PostgreSQL.
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: sendium-perf
+    MinLength: 3
+    MaxLength: 24
+    AllowedPattern: '[a-z][a-z0-9]*(-[a-z0-9]+)*'
+  Repository:
+    Type: String
+    Default: cytechmobile/sendium
+    AllowedPattern: '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'
+  RunIdentity:
+    Type: String
+    MaxLength: 27
+    AllowedPattern: 'gh-[0-9]+-[0-9]+'
+  ExpiresAt:
+    Type: String
+    AllowedPattern: '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+  ArtifactBucketName:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+  RuntimeBoundaryArn:
+    Type: String
+    AllowedPattern: 'arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+'
+  PrimaryAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+  SecondaryAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+  S3PrefixListId:
+    Type: String
+    AllowedPattern: 'pl-[a-f0-9]+'
+  SendiumImageId:
+    Type: AWS::EC2::Image::Id
+  HarnessImageId:
+    Type: AWS::EC2::Image::Id
+  SendiumInstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedPattern: '[a-z0-9]+[a-z0-9-]*\.[a-z0-9]+'
+  HarnessInstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedPattern: '[a-z0-9]+[a-z0-9-]*\.[a-z0-9]+'
+  SendiumRootDeviceName:
+    Type: String
+    Description: Exact RootDeviceName from the resolved AMI.
+    AllowedPattern: '/dev/[a-zA-Z0-9]+'
+  HarnessRootDeviceName:
+    Type: String
+    AllowedPattern: '/dev/[a-zA-Z0-9]+'
+  SendiumRootVolumeGiB:
+    Type: Number
+    MinValue: 1
+    Description: Root EBS minimum from the resolved AMI block-device mapping.
+  HarnessRootVolumeGiB:
+    Type: Number
+    MinValue: 1
+  DatabaseInstanceType:
+    Type: String
+    Default: db.t4g.small
+    AllowedPattern: 'db\.[a-z0-9]+[a-z0-9-]*\.[a-z0-9]+'
+  DatabaseEngineVersion:
+    Type: String
+    Description: Exact available PostgreSQL 17 minor resolved by preflight.
+    AllowedPattern: '17\.[0-9]+(\.[0-9]+)?'
+Conditions:
+  SendiumBurstable: !Or
+    - !Equals [!Select [0, !Split ['.', !Ref SendiumInstanceType]], t2]
+    - !Equals [!Select [0, !Split ['.', !Ref SendiumInstanceType]], t3]
+    - !Equals [!Select [0, !Split ['.', !Ref SendiumInstanceType]], t3a]
+    - !Equals [!Select [0, !Split ['.', !Ref SendiumInstanceType]], t4g]
+  HarnessBurstable: !Or
+    - !Equals [!Select [0, !Split ['.', !Ref HarnessInstanceType]], t2]
+    - !Equals [!Select [0, !Split ['.', !Ref HarnessInstanceType]], t3]
+    - !Equals [!Select [0, !Split ['.', !Ref HarnessInstanceType]], t3a]
+    - !Equals [!Select [0, !Split ['.', !Ref HarnessInstanceType]], t4g]
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactBucketName}.s3.${AWS::Region}.${AWS::URLSuffix}/runs/${RunIdentity}/templates/network.yaml'
+      TimeoutInMinutes: 45
+      Parameters:
+        Repository: !Ref Repository
+        RunIdentity: !Ref RunIdentity
+        ExpiresAt: !Ref ExpiresAt
+        ArtifactBucketName: !Ref ArtifactBucketName
+        PrimaryAvailabilityZone: !Ref PrimaryAvailabilityZone
+        SecondaryAvailabilityZone: !Ref SecondaryAvailabilityZone
+        S3PrefixListId: !Ref S3PrefixListId
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  DatabaseCredentials:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Name: !Sub '${ResourcePrefix}/runs/${RunIdentity}/database'
+      Description: Isolated benchmark PostgreSQL credentials; never publish secret values.
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"sendium_perf"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  DatabaseSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${ResourcePrefix}-run-${RunIdentity}'
+      DBSubnetGroupDescription: Two private AZs; database placed in primary AZ.
+      SubnetIds: [!GetAtt Network.Outputs.PrimarySubnetId, !GetAtt Network.Outputs.SecondarySubnetId]
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  DatabaseParameters:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      DBParameterGroupName: !Sub '${ResourcePrefix}-run-${RunIdentity}'
+      Description: Require TLS for the disposable PostgreSQL benchmark.
+      Family: postgres17
+      Parameters: {rds.force_ssl: '1'}
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub '${ResourcePrefix}-run-${RunIdentity}'
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseInstanceType
+      DBName: sendium_benchmark
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:password}}'
+      Port: 5432
+      DBSubnetGroupName: !Ref DatabaseSubnets
+      DBParameterGroupName: !Ref DatabaseParameters
+      VPCSecurityGroups: [!GetAtt Network.Outputs.DatabaseSecurityGroupId]
+      AvailabilityZone: !Ref PrimaryAvailabilityZone
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp3
+      AllocatedStorage: '20'
+      StorageEncrypted: true
+      BackupRetentionPeriod: 0
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      AutoMinorVersionUpgrade: false
+      AllowMajorVersionUpgrade: false
+      EnablePerformanceInsights: false
+      MonitoringInterval: 0
+      CopyTagsToSnapshot: false
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  SendiumRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-run-${RunIdentity}-sendium'
+      PermissionsBoundary: !Ref RuntimeBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunNode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManagedInstanceControlChannels
+                Effect: Allow
+                Action: [ssm:UpdateInstanceInformation, ssmmessages:CreateControlChannel, ssmmessages:CreateDataChannel, ssmmessages:OpenControlChannel, ssmmessages:OpenDataChannel]
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Sid: ReadShellDocument
+                Effect: Allow
+                Action: [ssm:GetDocument, ssm:DescribeDocument]
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Sid: ReadNodeInputs
+                Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/common/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/sendium/*'
+              - Sid: WriteNodeEvidence
+                Effect: Allow
+                Action: [s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/outputs/sendium/*'
+              - Sid: PublishGeneratedHarnessConfiguration
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/harness/generated/*'
+              - Sid: ReadOwnDatabaseCredentials
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseCredentials
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  HarnessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-run-${RunIdentity}-harness'
+      PermissionsBoundary: !Ref RuntimeBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunNode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManagedInstanceControlChannels
+                Effect: Allow
+                Action: [ssm:UpdateInstanceInformation, ssmmessages:CreateControlChannel, ssmmessages:CreateDataChannel, ssmmessages:OpenControlChannel, ssmmessages:OpenDataChannel]
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Sid: ReadShellDocument
+                Effect: Allow
+                Action: [ssm:GetDocument, ssm:DescribeDocument]
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Sid: ReadNodeInputs
+                Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/common/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/harness/*'
+              - Sid: WriteNodeEvidence
+                Effect: Allow
+                Action: [s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/outputs/harness/*'
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+  SendiumProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ResourcePrefix}-run-${RunIdentity}-sendium'
+      Roles: [!Ref SendiumRole]
+  HarnessProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ResourcePrefix}-run-${RunIdentity}-harness'
+      Roles: [!Ref HarnessRole]
+  Sendium:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref SendiumImageId
+      InstanceType: !Ref SendiumInstanceType
+      IamInstanceProfile: !Ref SendiumProfile
+      AvailabilityZone: !Ref PrimaryAvailabilityZone
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: false
+          DeleteOnTermination: true
+          SubnetId: !GetAtt Network.Outputs.PrimarySubnetId
+          GroupSet: [!GetAtt Network.Outputs.SendiumSecurityGroupId]
+      MetadataOptions: {HttpEndpoint: enabled, HttpTokens: required, HttpPutResponseHopLimit: 1, InstanceMetadataTags: disabled}
+      CreditSpecification: !If [SendiumBurstable, {CPUCredits: standard}, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: !Ref SendiumRootDeviceName
+          Ebs: {VolumeSize: !Ref SendiumRootVolumeGiB, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+        - {Key: 'sendium:role', Value: sendium}
+  Harness:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref HarnessImageId
+      InstanceType: !Ref HarnessInstanceType
+      IamInstanceProfile: !Ref HarnessProfile
+      AvailabilityZone: !Ref PrimaryAvailabilityZone
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: false
+          DeleteOnTermination: true
+          SubnetId: !GetAtt Network.Outputs.PrimarySubnetId
+          GroupSet: [!GetAtt Network.Outputs.HarnessSecurityGroupId]
+      MetadataOptions: {HttpEndpoint: enabled, HttpTokens: required, HttpPutResponseHopLimit: 1, InstanceMetadataTags: disabled}
+      CreditSpecification: !If [HarnessBurstable, {CPUCredits: standard}, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: !Ref HarnessRootDeviceName
+          Ebs: {VolumeSize: !Ref HarnessRootVolumeGiB, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-tests}
+        - {Key: 'sendium:repository', Value: !Ref Repository}
+        - {Key: 'sendium:run-identity', Value: !Ref RunIdentity}
+        - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
+        - {Key: 'sendium:role', Value: harness}
+Outputs:
+  RunIdentity:
+    Value: !Ref RunIdentity
+  ExpiresAt:
+    Value: !Ref ExpiresAt
+  NetworkStackId:
+    Value: !Ref Network
+  VpcId:
+    Value: !GetAtt Network.Outputs.VpcId
+  PrimarySubnetId:
+    Value: !GetAtt Network.Outputs.PrimarySubnetId
+  SecondarySubnetId:
+    Value: !GetAtt Network.Outputs.SecondarySubnetId
+  PrimaryAvailabilityZone:
+    Value: !Ref PrimaryAvailabilityZone
+  SendiumInstanceId:
+    Value: !Ref Sendium
+  SendiumPrivateAddress:
+    Value: !GetAtt Sendium.PrivateIp
+  HarnessInstanceId:
+    Value: !Ref Harness
+  HarnessPrivateAddress:
+    Value: !GetAtt Harness.PrivateIp
+  DatabaseIdentifier:
+    Value: !Ref Database
+  DatabaseAddress:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabasePort:
+    Value: !GetAtt Database.Endpoint.Port
+  DatabaseName:
+    Value: sendium_benchmark
+  DatabaseCredentialsArn:
+    Value: !Ref DatabaseCredentials
+  ArtifactRunPrefix:
+    Value: !Sub 'runs/${RunIdentity}/'

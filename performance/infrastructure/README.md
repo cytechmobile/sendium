@@ -131,7 +131,7 @@ in private files/S3 inputs, not command arguments or downloadable Actions artifa
 
 ```sh
 python -m pip install -r performance/infrastructure/requirements-dev.txt
-cfn-lint --template performance/infrastructure/bootstrap.yaml performance/infrastructure/network.yaml
+cfn-lint --template performance/infrastructure/bootstrap.yaml performance/infrastructure/network.yaml performance/infrastructure/run.yaml
 python -m unittest discover -s performance/infrastructure -p 'test_*.py'
 ```
 
@@ -180,7 +180,7 @@ the benchmark resources still use its subnets/security groups.
   no additional bootstrap permissions are needed. Live service authorization still
   requires AWS validation.
 
-The isolated VPC uses `10.73.0.0/24`, split into two `/25` private subnets with
+The isolated VPC uses `10.70.0.0/24`, with two `/26` private subnets matching the preset and
 public-IP assignment disabled. Overlapping CIDRs across independent runs are
 intentional: these VPCs have no peering/transit connections. A shared private route
 table has only the VPC local route and the S3 gateway endpoint route. There is no
@@ -229,3 +229,97 @@ traffic flows, absence of implicit broad egress, endpoint placement, run-scoped 
 access, ownership tags, and the output/deletion contract. CloudFormation lint also
 checks references and dependency cycles. Live SSM, RDS and artifact connectivity
 remain part of Tasks 4.5/6.1.
+
+## Per-run benchmark stack
+
+`run.yaml` owns the network child, two private EC2s, separate runtime IAM
+roles/profiles, PostgreSQL subnet/parameter groups, a private RDS instance, and a
+generated database secret. Create a fresh root stack named
+`<ResourcePrefix>-run-<RunIdentity>` using bootstrap's CloudFormation execution
+role and `CAPABILITY_NAMED_IAM`. Apply the four required stack tags. These are
+create/run/delete stacks; the bootstrap orchestration policy intentionally does
+not grant stack updates. Do not reuse names for simultaneous attempts.
+
+### Resolved input contract
+
+| Parameters | Source / requirements |
+|---|---|
+| `ResourcePrefix`, `Repository`, `RuntimeBoundaryArn`, `ArtifactBucketName` | Exact matching bootstrap configuration/outputs; never select a different permission boundary. |
+| `RunIdentity`, `ExpiresAt` | Protected controller; same identity/expiry as root tags and uploaded artifact prefix. Identity is limited to 27 characters so IAM role names fit even with a 24-character resource prefix. |
+| `PrimaryAvailabilityZone`, `SecondaryAvailabilityZone`, `S3PrefixListId` | Protected regional preflight, as described for `network.yaml`. |
+| `SendiumImageId`, `HarnessImageId` | Exact preflight-resolved AL2023 AMIs compatible with each selected instance's architecture, with SSM Agent and required OS tools present. |
+| `SendiumInstanceType`, `HarnessInstanceType` | Default `t4g.small` each; preflight verifies memory, architecture, offerings and capacity assumptions. |
+| `SendiumRootDeviceName`, `HarnessRootDeviceName` | Exact AMI `RootDeviceName`; no padded/hardcoded disk default. |
+| `SendiumRootVolumeGiB`, `HarnessRootVolumeGiB` | Corresponding root EBS mapping's minimum `VolumeSize`, generally 8 GiB; validate integer values and sufficient space for staged files. |
+| `DatabaseInstanceType` | Default `db.t4g.small`; validate PostgreSQL 17/gp3 support in the chosen AZ. |
+| `DatabaseEngineVersion` | Exact available PostgreSQL 17 minor; template requires an explicit value and `postgres17` parameter family. |
+
+The resource prefix must also be valid for RDS identifiers (single hyphen
+separators). Reject unsupported additional AMI disks or other launch-time mappings
+in preflight: this template overrides only the resolved root mapping. Record all
+resolved AMI, type, storage, engine and artifact identities in the run manifest.
+Upload the reviewed network template to the exact run key
+`runs/<RunIdentity>/templates/network.yaml` before creating the parent; its URL is
+constructed by the template. Enforce checksummed, immutable deployment inputs in
+the controller rather than overwriting a template during provisioning.
+
+### Runtime and storage
+
+Both EC2s use the primary private subnet and their designated security groups,
+IMDSv2 with hop limit 1, no SSH key, no public IP and no bootstrap download script.
+Provisioning creates idle nodes; Task 4.5 stages and starts the application through
+SSM. Each root disk is encrypted gp3 and deleted on termination; ownership tags
+propagate to its volume. Known burstable families (`t2`, `t3`, `t3a`, `t4g`) use
+Standard credits. Non-burstable overrides omit `CreditSpecification`. Preflight
+must reject an unknown burstable family until its handling is defined and record
+the observed mode rather than assuming this conditional proves effective state.
+
+RDS is Single-AZ, in the primary AZ, with 20 GiB encrypted gp3, no storage
+autoscaling, no automatic minor/major upgrades, no backups, enhanced monitoring or
+Performance Insights, and no deletion protection. The parameter group requires
+TLS. Deployment must stage the RDS CA bundle and use `sslmode=verify-full`; the
+server parameter alone does not verify the client's peer. Both deletion and
+replacement explicitly delete the database without a final snapshot. The database
+name is `sendium_benchmark`, and its generated 32-character alphanumeric password
+and `sendium_perf` username live in a run-named Secrets Manager secret. Dynamic
+references supply RDS credentials; no credential values appear in stack outputs,
+user data, or template parameters. Secret deletion is explicit and disposable.
+
+Runtime role policies remain below the bootstrap boundary:
+
+| Node | Reads | Writes |
+|---|---|---|
+| Both | Own `inputs/<node>/*`, shared `inputs/common/*`, managed SSM shell document | Own `outputs/<node>/*` |
+| Sendium only | Exact database secret | `inputs/harness/generated/*` |
+
+All object paths are beneath `runs/<RunIdentity>/` in the bootstrap bucket. The
+shared input prefix is for non-secret dependencies/scripts such as runtime
+archives and CA certificates. Neither node can overwrite shared inputs, templates,
+or the other node's evidence, delete objects, provision resources, or issue SSM
+commands. Region-scoped SSM/SSM Messages control-channel operations allow agent
+registration and command receipt. The default AWS-managed Secrets Manager key
+avoids introducing a customer-managed runtime decryption grant.
+
+The Sendium deployment stage generates the existing paired configuration bundles
+with the database secret locally, keeps the Sendium bundle private, and publishes
+only the generated harness bundle beneath `inputs/harness/generated/`. This is a
+deliberate one-way handoff for matching ingress/provider credentials. The harness
+has no database network access or secret permission. Generated private bundles
+must not enter downloadable report artifacts; upload sanitized settings instead.
+
+### Outputs and lifecycle
+
+Outputs include run identity/expiry, network stack/VPC/subnet IDs, primary AZ,
+instance IDs and private addresses, database identifier/address/port/name, database
+secret **ARN**, and the artifact run prefix. These identifiers let the protected
+controller deploy via SSM and render inputs without retrieving secret values in
+GitHub Actions. Successful stack creation is infrastructure readiness only;
+SSM registration, staged runtime checks, application/database/provider readiness
+and measurements belong to Task 4.5.
+
+References keep the network child alive until its EC2/RDS dependents are deleted,
+and the database alive before its generated secret can be removed. Temporary S3
+objects remain outside the run stack for explicit cleanup/lifecycle expiration.
+Deletion recovery for partial provisioning is Task 4.6. A stack's expiry timestamp
+does not perform deletion; require the operational Task 4.7 expiry handler before
+allowing workflow execution. This template has only offline validation so far.
