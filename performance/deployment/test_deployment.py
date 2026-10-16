@@ -79,7 +79,8 @@ class DeploymentTests(unittest.TestCase):
         tag_list = [{"Key": key, "Value": value} for key, value in tags.items()]
         role = "arn:aws:iam::123456789012:role/sendium-perf-cloudformation"
         boot_values = {"ArtifactBucketName": state["bucket"], "RunStackPrefix": "sendium-perf-run-",
-                       "RepositoryTag": state["repository"], "ExpiryHandlerInstalled": "true", "CloudFormationExecutionRoleArn": role}
+                       "RepositoryTag": state["repository"], "ExpiryHandlerInstalled": "true", "CloudFormationExecutionRoleArn": role,
+                       "RunResourceTtlMinutes": "240"}
         boot = {"StackStatus": "CREATE_COMPLETE", "Outputs": [{"OutputKey": key, "OutputValue": value} for key, value in boot_values.items()]}
         root = {"StackStatus": "CREATE_COMPLETE", "RoleARN": role, "Tags": tag_list,
                 "Outputs": [{"OutputKey": key, "OutputValue": value} for key, value in result.items()]}
@@ -97,13 +98,13 @@ class DeploymentTests(unittest.TestCase):
                         "AvailabilityZone": "eu-west-1a", "Engine": "postgres", "EngineVersion": "17.6", "DBInstanceClass": "db.t4g.small",
                         "AllocatedStorage": 20, "StorageType": "gp3"}]}}
         aws = MemoryAws()
-        with patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
+        with patch.object(deploy, "verify_expiry"), patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
             inspected, actual, timeout = deploy.inspect_run(aws, state)
         self.assertEqual(inspected["resolvedDatabase"]["EngineVersion"], "17.6")
         self.assertEqual(len(actual), 2)
         self.assertGreater(timeout, 840)
         instances[0]["PublicIpAddress"] = "203.0.113.1"
-        with patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
+        with patch.object(deploy, "verify_expiry"), patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
             with self.assertRaises(deploy.DeploymentError):
                 deploy.inspect_run(aws, state)
 
@@ -137,6 +138,10 @@ class DeploymentTests(unittest.TestCase):
             self.assertNotIn(str(directory), json.dumps(result))
             self.assertTrue(all(key.startswith("runs/gh-12345-1/") for key in aws.uploads))
             self.assertEqual(result["artifacts"]["application"]["key"], "runs/gh-12345-1/inputs/sendium/application")
+            self.assertEqual(aws.uploads[0], "runs/gh-12345-1/control/run.json")
+            marker = json.loads(aws.objects[plan["bucket"], aws.uploads[0]])
+            self.assertEqual(marker["expiresAt"], result["expiresAt"])
+            self.assertNotIn("provenance", marker)
             # Inputs cannot be overwritten, even if a retry has identical bytes.
             with self.assertRaises(AwsError):
                 aws.put(plan["bucket"], result["artifacts"]["application"]["key"], artifact, immutable=True)

@@ -85,13 +85,33 @@ def allowed(role, action):
 
 
 class BootstrapTests(unittest.TestCase):
-    def test_template_decodes_and_creates_no_benchmark_compute_or_fake_expiry_handler(self):
+    def test_template_decodes_and_expiry_installation_is_conditional(self):
         self.assertFalse(ERRORS)
         types = {resource["Type"] for resource in TEMPLATE["Resources"].values()}
         self.assertNotIn("AWS::EC2::Instance", types)
         self.assertNotIn("AWS::RDS::DBInstance", types)
-        self.assertNotIn("AWS::Lambda::Function", types)  # Handler/schedule are Task 4.7.
-        self.assertEqual("false", TEMPLATE["Outputs"]["ExpiryHandlerInstalled"]["Value"])
+        self.assertIn("AWS::Lambda::Function", types)
+        for name in ("ExpiryFunction", "ExpiryAsync", "ExpirySchedule", "ExpirySchedulePermission"):
+            self.assertEqual(TEMPLATE["Resources"][name]["Condition"], "InstallExpiry")
+        self.assertEqual({"Fn::If": ["InstallExpiry", "true", "false"]}, TEMPLATE["Outputs"]["ExpiryHandlerInstalled"]["Value"])
+        function = TEMPLATE["Resources"]["ExpiryFunction"]["Properties"]
+        self.assertEqual(function["Handler"], "expiry.handler")
+        self.assertEqual(function["Timeout"], 840)
+        self.assertEqual(function["Runtime"], "python3.13")
+        preset = json.loads((Path(__file__).parents[1] / "presets/aws-private-jvm-v1.json").read_text())
+        self.assertEqual(TEMPLATE["Parameters"]["RunResourceTtlMinutes"]["Default"], preset["lifecycle"]["resourceTtlMinutes"])
+        self.assertLess(function["Timeout"], preset["lifecycle"]["expiryScheduleMinutes"] * 60)
+        self.assertEqual(TEMPLATE["Resources"]["ExpirySchedule"]["Properties"]["ScheduleExpression"], "rate(15 minutes)")
+        self.assertEqual(TEMPLATE["Resources"]["ExpirySchedulePermission"]["Properties"]["SourceAccount"], {"Ref": "AWS::AccountId"})
+
+    def test_expiry_role_reads_only_control_markers_and_cannot_modify_its_implementation(self):
+        readers = allowed("ExpiryRole", "s3:GetObject")
+        self.assertEqual(len(readers), 1)
+        self.assertTrue(readers[0]["Resource"].endswith("/runs/*/control/run.json"))
+        for action in ("ssm:SendCommand", "iam:PassRole", "lambda:UpdateFunctionCode", "s3:PutObject", "s3:DeleteBucket"):
+            self.assertFalse(allowed("ExpiryRole", action))
+        self.assertTrue(allowed("ExpiryRole", "s3:AbortMultipartUpload"))
+        self.assertFalse(allowed("GitHubOrchestrator", "lambda:UpdateFunctionCode"))
 
     def test_oidc_trust_requires_exact_repository_environment_and_audience(self):
         for name in ("GitHubOrchestrator", "GitHubDiagnostics"):

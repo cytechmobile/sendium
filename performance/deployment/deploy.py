@@ -1,7 +1,7 @@
 """Protected artifact/SSM controller. Never execute application or harness code here."""
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -13,6 +13,7 @@ import tempfile
 import time
 
 from aws_cli import AwsCli, AwsError
+from check_expiry import verify_expiry
 
 
 HERE = Path(__file__).resolve().parent
@@ -104,6 +105,8 @@ def check_bootstrap(description, plan, operational=False):
 def stage(aws, plan, preset, directory):
     effective = validate_plan(plan, preset)
     boot = check_bootstrap(stack(aws, plan["bootstrapStack"]), plan)
+    require(int(boot.get("RunResourceTtlMinutes", effective["lifecycle"]["resourceTtlMinutes"])) == effective["lifecycle"]["resourceTtlMinutes"],
+            "Bootstrap and preset run TTL differ")
     bucket = boot["ArtifactBucketName"]
     prefix = "runs/" + plan["runIdentity"] + "/"
     descriptors = {}
@@ -112,6 +115,14 @@ def stage(aws, plan, preset, directory):
         descriptors[name] = {"key": prefix + key, "sha256": sha256(path), "size": Path(path).stat().st_size}
         aws.put(bucket, prefix + key, path, immutable=True)
 
+    created = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry = created + timedelta(minutes=effective["lifecycle"]["resourceTtlMinutes"])
+    marker = {key: plan[key] for key in ("schemaVersion", "region", "runIdentity", "runStack", "bootstrapStack", "repository")}
+    marker.update(createdAt=created.isoformat().replace("+00:00", "Z"), expiresAt=expiry.isoformat().replace("+00:00", "Z"))
+    marker_path = Path(directory) / "run-marker.json"
+    write_new(marker_path, marker)
+    # Publish recovery identity before large inputs: partial staging is independently expirable.
+    upload("control", marker_path, "control/run.json")
     for name, artifact in plan["artifacts"].items():
         location = {"application": "sendium", "harness": "common", "sendiumJre": "sendium",
                     "harnessJre": "harness", "rdsCa": "common"}[name]
@@ -127,11 +138,17 @@ def stage(aws, plan, preset, directory):
     upload("preset", effective_path, "inputs/common/preset.json")
     # No local artifact paths or credentials are needed after staging.
     return {key: plan[key] for key in ("schemaVersion", "region", "runIdentity", "runStack", "bootstrapStack", "repository", "provenance")} | {
-        "bucket": bucket, "artifacts": descriptors, "preset": effective}
+        "bucket": bucket, "artifacts": descriptors, "preset": effective,
+        "createdAt": marker["createdAt"], "expiresAt": marker["expiresAt"]}
 
 
 def inspect_run(aws, staged):
     boot = check_bootstrap(stack(aws, staged["bootstrapStack"]), staged, operational=True)
+    try:
+        verify_expiry(aws, boot, staged["bootstrapStack"])
+    except (RuntimeError, ValueError, KeyError):
+        raise DeploymentError("Independent expiry function/schedule verification failed") from None
+    require(int(boot["RunResourceTtlMinutes"]) == staged["preset"]["lifecycle"]["resourceTtlMinutes"], "Bootstrap and preset run TTL differ")
     require(staged["bucket"] == boot["ArtifactBucketName"], "Artifact bucket differs from bootstrap")
     description = stack(aws, staged["runStack"])
     require(description["StackStatus"] == "CREATE_COMPLETE", "Run stack is not create-complete")
@@ -145,6 +162,7 @@ def inspect_run(aws, staged):
     require(result["RunIdentity"] == staged["runIdentity"] and result["ArtifactRunPrefix"] == "runs/" + staged["runIdentity"] + "/",
             "Run outputs differ from artifact identity")
     require(result["ExpiresAt"] == tags.get("sendium:expires-at"), "Stack expiry output/tag mismatch")
+    require(staged.get("expiresAt", result["ExpiresAt"]) == result["ExpiresAt"], "Stack and staging expiry differ")
     expiry = datetime.fromisoformat(tags["sendium:expires-at"].replace("Z", "+00:00"))
     workload = staged["preset"]["workload"]
     timeout = sum(workload[key] for key in ("warmupSeconds", "measurementSeconds", "drainTimeoutSeconds")) + staged["preset"]["measurement"]["readinessTimeoutSeconds"] + 120

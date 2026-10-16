@@ -187,14 +187,33 @@ class Cleaner:
             self.pause(0.1)  # Re-list the first page after mutation; never skip a shifted continuation page.
 
     def delete_objects(self):
+        skip_marker = False
+        marker = self.result["prefix"] + "control/run.json"
         while True:
-            page = self.call("s3api", "list-objects-v2", bucket=self.bucket, prefix=self.result["prefix"], max_keys=1000)
+            parameters = {"bucket": self.bucket, "prefix": self.result["prefix"], "max_keys": 1000}
+            if skip_marker:
+                parameters["start_after"] = marker
+            page = self.call("s3api", "list-objects-v2", **parameters)
             entries = page.get("Contents", [])
             require(len(entries) <= 1000, "OBJECT_PAGE_EXCEEDS_BUDGET")
             self.check_keys(entries)
             if not entries:
                 require(not page.get("IsTruncated"), "EMPTY_TRUNCATED_OBJECT_PAGE")
+                if skip_marker:
+                    skip_marker = False
+                    continue  # Recheck the full prefix before removing its recovery marker.
                 return
+            # Retain the expiry identity until all other data/uploads are confirmed removed.
+            non_marker = [entry for entry in entries if entry["Key"] != marker]
+            if non_marker:
+                entries = non_marker
+            else:
+                if page.get("IsTruncated"):
+                    skip_marker = True
+                    self.pause(0.1)
+                    continue  # S3 may return a short page containing only the retained marker.
+                if self.result["issues"]:
+                    return
             request = {"Objects": [{"Key": entry["Key"]} for entry in entries], "Quiet": False}
             response = self.call("s3api", "delete-objects", bucket=self.bucket, delete=request)
             self.result["objectDeleteRequests"] += len(entries)

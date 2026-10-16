@@ -59,12 +59,17 @@ python performance/deployment/deploy.py stage \
   --output staged.json
 ```
 
-The controller verifies the bootstrap repository/namespace, uploads run-scoped
+The controller verifies the bootstrap repository/namespace and matching TTL,
+writes an immutable `control/run.json` expiry marker before large inputs, then uploads run-scoped
 artifacts, trusted node/transport/sampler scripts, the reviewed network template,
 and the effective preset. All input writes use `If-None-Match: *`: a duplicate run
 cannot silently replace bytes already selected for execution. Local paths are
 removed from `staged.json`; exact keys, sizes and digests remain. Use a new workflow
 attempt/identity after partial staging or an execution attempt.
+
+Use the exact `expiresAt` emitted in `staged.json` for the root stack parameter and
+tag. It is also in the recovery marker, so abandoned staging can expire without a
+stack. Do not extend the deadline by recomputing it after artifact upload.
 
 Create `run.yaml` with the resolved parameters and tags described in
 [`../infrastructure/README.md`](../infrastructure/README.md). Its network child URL
@@ -86,7 +91,9 @@ supported architecture/memory, IMDSv2, encrypted gp3/delete-on-termination root
 disks, and private/available primary-AZ PostgreSQL 17 with minimum storage and no
 backups. Observed instance/AMI/root-volume/database details enter the public
 execution context. An `ExpiryHandlerInstalled=false` bootstrap intentionally
-blocks execution until Task 4.7 is operational; offline staging can run earlier.
+blocks execution until [independent expiry is installed](EXPIRY.md); offline
+staging can run earlier. Preflight also verifies live function/code/role/TTL,
+enabled schedule/target and invocation permission, rather than trusting the flag.
 
 The controller then:
 
@@ -135,7 +142,7 @@ of sustainable sending capacity.
 
 SIGINT/SIGTERM trigger best-effort stop/retrieval. Hard runner/host loss cannot
 guarantee this path. Use the cleanup command below for stack/artifact deletion;
-independent abandoned-run expiry is Task 4.7. The execution command does not
+independent abandoned-run expiry uses the [installed sweeper](EXPIRY.md). The execution command does not
 delete the stack or artifacts.
 
 ## 3. Retrieve again and finalize without AWS privileges
@@ -236,7 +243,7 @@ the reported cause, and rerun the **same plan/identity** with a new outcome path
 If stack deletion fails/times out, its S3 inputs/evidence are retained. If only S3
 cleanup fails, the outcome distinguishes the deleted stack from remaining data.
 The one-day S3 lifecycle remains a fallback for temporary objects/incomplete
-uploads; independent abandoned-stack expiry is implemented in Task 4.7.
+uploads; the [independent sweeper](EXPIRY.md) recovers abandoned expired runs.
 
 Task 5.3 wires this command into final workflow cleanup after success, failure or
 cancellation, preserving cleanup outcomes even when another job failed. Keep the
