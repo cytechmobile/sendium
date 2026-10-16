@@ -131,7 +131,7 @@ in private files/S3 inputs, not command arguments or downloadable Actions artifa
 
 ```sh
 python -m pip install -r performance/infrastructure/requirements-dev.txt
-cfn-lint --template performance/infrastructure/bootstrap.yaml
+cfn-lint --template performance/infrastructure/bootstrap.yaml performance/infrastructure/network.yaml
 python -m unittest discover -s performance/infrastructure -p 'test_*.py'
 ```
 
@@ -152,3 +152,80 @@ physical IDs before deleting the stack. Empty/delete the retained bucket when no
 artifacts are needed. Delete a retained provider only after confirming no other
 repository/role uses it; an externally supplied provider was never stack-owned.
 Run-prefix lifecycle expiration continues independently of run-job cancellation.
+
+## Per-run private network
+
+`network.yaml` is a disposable child of the forthcoming per-run benchmark stack,
+not shared bootstrap infrastructure. Upload it beneath the run's `templates/`
+prefix. The parent must reference its outputs so CloudFormation deletes dependent
+EC2/RDS resources before the network. Do not retain this child or delete it while
+the benchmark resources still use its subnets/security groups.
+
+### Inputs and ownership
+
+- Pass `Repository` exactly as configured in bootstrap, `RunIdentity` as
+  `gh-<runId>-<attempt>`, and `ExpiresAt` as a UTC timestamp. Apply the same four
+  ownership/expiry tags shown above to both parent and child stacks. Resource tags
+  are explicit; resources without tag support remain owned through CloudFormation.
+- Resolve `PrimaryAvailabilityZone` from common EC2/RDS offerings and
+  `SecondaryAvailabilityZone` from a different AZ in the selected region. A template
+  rule rejects equal AZs. Place both EC2s and the Single-AZ RDS instance in the
+  primary AZ; supply both subnets to the RDS subnet group.
+- Pass bootstrap's artifact bucket as `ArtifactBucketName`. Resolve
+  `S3PrefixListId` from the regional AWS-managed `com.amazonaws.<region>.s3`
+  prefix list; its syntax alone does not establish its service/region identity.
+  The protected preflight must check that identity and endpoint availability.
+- All taggable resources carry the bootstrap service role's required ownership
+  tags. The template uses its existing network create/mutate/delete permissions;
+  no additional bootstrap permissions are needed. Live service authorization still
+  requires AWS validation.
+
+The isolated VPC uses `10.73.0.0/24`, split into two `/25` private subnets with
+public-IP assignment disabled. Overlapping CIDRs across independent runs are
+intentional: these VPCs have no peering/transit connections. A shared private route
+table has only the VPC local route and the S3 gateway endpoint route. There is no
+internet gateway, NAT, public address, IPv6 route, or SSH ingress.
+
+### Connectivity and outputs
+
+| Initiator | Destination | TCP ports |
+|---|---|---|
+| Harness | Sendium | 8080, 27777 |
+| Sendium | Harness | 27779, 8081 |
+| Sendium | PostgreSQL | 5432 |
+| Both EC2 roles | Interface endpoints | 443 |
+| Both EC2 roles | Regional S3 managed prefix list | 443 |
+
+Each group-to-group connection has matching egress and ingress rules. Security
+groups are stateful, so responses need no reverse connection permission. Database
+and endpoint groups have an inert loopback-only egress rule to suppress EC2's
+implicit allow-all outbound rule. Attach only the designated groups to benchmark
+resources; do not attach the VPC's automatically created default security group.
+VPC resolver DNS and Amazon Time Sync use AWS link-local facilities, rather than
+internet egress.
+
+The `ssm`, `ssmmessages`, and `secretsmanager` interface endpoints use private DNS
+and primary-AZ ENIs. Interface endpoint service policies retain AWS defaults;
+runtime IAM policies and their permissions boundary constrain API access. S3's
+endpoint policy permits only object read/write/multipart abort under
+`runs/<RunIdentity>/*` in the bootstrap bucket; it does not itself grant identity
+permissions. No bucket listing is required for exact-key deployment/output copies.
+
+Use a preinstalled, compatible SSM Agent with `ssmmessages` support and
+`AWS-RunShellScript`. This network does not support SSM Agent updates, patching,
+Distributor, public package repositories, or public runtime downloads. Those
+operations would require additional destinations and permissions. Stage the JVM,
+application, harness, and other required runtime files in the run artifact prefix.
+
+Outputs are `VpcId`, `PrimarySubnetId`, `SecondarySubnetId`,
+`PrimaryAvailabilityZone`, `HarnessSecurityGroupId`, `SendiumSecurityGroupId`, and
+`DatabaseSecurityGroupId`. Keep these parent/child references run-local; there are
+no cross-stack exports that can block concurrent-run cleanup. Expiry tags describe
+ownership/lifetime but do not schedule deletion: the independent handler remains
+Task 4.7.
+
+Offline network tests check private topology, distinct-AZ placement, exact paired
+traffic flows, absence of implicit broad egress, endpoint placement, run-scoped S3
+access, ownership tags, and the output/deletion contract. CloudFormation lint also
+checks references and dependency cycles. Live SSM, RDS and artifact connectivity
+remain part of Tasks 4.5/6.1.
