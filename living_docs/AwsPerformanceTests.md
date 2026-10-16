@@ -32,7 +32,7 @@
 | 4 | 4.5 | Implement artifact deployment and execution scripts | M | 🟢 done | Added immutable/checksummed staging, owned-resource preflight, SSM/systemd node control, local secret/config generation, sampling, redacted logs and allowlisted failure-aware retrieval. 15 offline checks and three real Linux/JVM/PostgreSQL scenarios pass. AWS resolution/stack creation integrates in 5.2; live service validation remains 6.1. |
 | 4 | 4.6 | Implement run-owned stack and temporary artifact cleanup | M | 🟢 done | Added `cleanup.py`: verified root-ARN deletion, bounded partial/busy/failed-stack recovery, confirmed absence before exact run-prefix object/multipart purge, repeatable retries and explicit outcomes. 24 cleanup/transport checks (39 deployment total), 22 infrastructure checks and three-template lint pass. Workflow wiring follows in 5.3; local rehearsal 5.5 precedes AWS validation 6.1. |
 | 4 | 4.7 | Implement independent expiry of abandoned benchmark runs | M | 🟢 done | Added packaged 15-minute Lambda/shared cleanup SDK adapter, first-write expiry markers retained until final cleanup, expired-root/orphan recovery and read-only live configuration gating. Bootstrap conditionally installs function/schedule/permission with a checked package hash. 21 expiry/integration checks (60 deployment total), isolated ZIP import, 23 infrastructure checks and three-template lint pass. Local rehearsal 5.5 remains required before AWS validation 6.1. |
-| 5 | 5.1 | Create the manual GitHub Actions performance-test workflow | M | ⚪ not started | Create `.github/workflows/performance-tests.yml`: manual inputs, validation, exact selected commit, architecture-compatible unprivileged builds, and artifact identities. Resolve input-count constraints without losing configurable settings. |
+| 5 | 5.1 | Create the manual GitHub Actions performance-test workflow | M | 🟢 done | Added manual-only workflow with 11 inputs (documented limit 25), captured application/control/workflow SHAs, separate unprivileged native x86_64/ARM64 builds, checked manifests and independent aggregation. Added explicit opt-in parent release updates. Actionlint, 16 Linux preparation checks and 111 harness tests pass. AWS jobs follow in 5.2. |
 | 5 | 5.2 | Add protected CloudFormation and SSM execution jobs | M | ⚪ not started | Maintainer-controlled environment/OIDC, resolve supported AMI/JRE/engine/AZ inputs, verify operational expiry, deploy stacks, and invoke the staged SSM controller with per-run isolation; benchmark execution receives no provisioning credentials. |
 | 5 | 5.3 | Publish workflow reports and add cleanup jobs | M | ⚪ not started | Overall and one-minute summary results, versioned JSON, diagnostic logs, explicit artifact retention, failure-result retrieval, and cleanup paths. |
 | 5 | 5.4 | Verify workflow permissions and failure outcomes | M | ⚪ not started | Builds have no AWS provisioning access; validate input handling, protected environment usage, setup/accounting failures, overload reporting, and cancellation behavior. |
@@ -129,7 +129,7 @@ The default network is per-run with two private subnets, endpoints for SSM/SSM M
 
 Create `.github/workflows/performance-tests.yml` with `workflow_dispatch`. Separate unprivileged build jobs from protected AWS provisioning/control jobs. Record the dispatch commit rather than resolving a moving branch later. Validate inputs before provisioning, carry artifact identities through deployment, retrieve diagnostics on failures, and publish overall plus one-minute results through the summary and downloadable artifact.
 
-The input layout must respect GitHub's supported dispatch-input count while retaining all settings required by the issue. Grouping the three phase durations into one validated timing input is a candidate if the supported limit requires it; confirm the current platform limit during Task 5.1. Document the final syntax and defaults.
+GitHub's current documented dispatch-input limit is 25 (verified 2026-10-16). Task 5.1 uses 11 separate inputs, including individual warm-up/measurement/drain fields; no grouping is necessary. `performance/workflow/README.md` records final syntax/defaults, exact source capture, both architecture builds, credential separation and artifact identities. Protected execution/reporting is integrated in Tasks 5.2/5.3.
 
 Use run identity including the run attempt where necessary to prevent collisions during reruns. Cleanup jobs provide the immediate path; independently scheduled expiry provides recovery if cancellation or runner loss prevents those jobs from completing.
 
@@ -200,6 +200,14 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Prepare exact-revision builds through a manual unprivileged workflow
+
+**Decision:** Add `.github/workflows/performance-tests.yml` with 11 individual inputs, using the current documented 25-input allowance. Normalize settings against the existing preset/schema/budgets. Pin application builds to the dispatch SHA, snapshot the maintained default branch once for a separately recorded harness/controller revision, and record the workflow revision. Build application and harness in separate native x86_64/ARM64 jobs with Java 25, read-only repository access, no OIDC/environment/cloud secrets, non-persisted checkout credentials and no shared build cache. Independently recheck fixed-path artifacts, exact source/run/architecture identities, size and digest before publishing consolidated build inputs. Keep preparation summaries distinct from benchmark findings. Register the opt-in harness parent POM explicitly with the existing generic release updater and avoid version-hardcoded artifact selection.
+
+**Rationale:** Avoid moving-branch races, preserve architecture-compatible native dependencies without guessing an EC2 family, and prevent selected application builds from sharing a runner with harness compilation or AWS credentials. Required settings fit the current platform limit without opaque grouped input syntax. Protected AWS resolution/execution and reporting/cleanup remain separate review steps.
+
+**Verification:** Workflow passes actionlint. All 16 preparation checks pass on Linux; Windows passes with its POSIX symlink check skipped. The workflow's harness build command passes all 111 Java tests and packages successfully. Checks cover input bounds/types, complete archives, revision/attempt/architecture isolation, digest/manifest tampering, permissions/runners/retention and parent-version update registration. Actual hosted dispatch remains Task 5.4; no AWS resources deployed. Task 5.5 still precedes AWS validation.
 
 ### 2026-10-16 — Install independent scheduled expiry with immutable recovery metadata
 
@@ -440,7 +448,7 @@ These are implementation details absent from the issue. Resolve repository-disco
 - Available AWS account, region, OIDC role, protected GitHub environment, and any account-specific restrictions needed for an actual AWS validation run.
 - Confirm actual regional AMI/JRE/database resolution and availability against the selected account before execution (Tasks 4.5/6.1).
 - Diagnostic artifact assembly/redaction and repository retention-policy compatibility require workflow verification (Tasks 5.3/5.4); the preset requests 30 days.
-- Verify release automation updates the opt-in harness module/parent versions before final workflow validation (Tasks 5.1/6.2).
+- Task 5.1 explicitly registers the opt-in harness parent with the generic release updater and checks version alignment; confirm the generated release-PR update during final maintainer/release validation in 6.2.
 
 ---
 
