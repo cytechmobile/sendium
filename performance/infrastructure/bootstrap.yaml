@@ -392,6 +392,10 @@ Resources:
                 Action: s3:ListBucket
                 Resource: !GetAtt Artifacts.Arn
                 Condition: {StringLike: {'s3:prefix': ['runs/*']}}
+              - Sid: InspectTemporaryBucketCleanupState
+                Effect: Allow
+                Action: [s3:GetBucketVersioning, s3:ListBucketMultipartUploads]
+                Resource: !GetAtt Artifacts.Arn
 
   GitHubDiagnostics:
     Type: AWS::IAM::Role

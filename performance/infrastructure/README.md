@@ -153,6 +153,14 @@ artifacts are needed. Delete a retained provider only after confirming no other
 repository/role uses it; an externally supplied provider was never stack-owned.
 Run-prefix lifecycle expiration continues independently of run-job cancellation.
 
+The [run cleanup command](../deployment/README.md#4-clean-up-a-completed-failed-or-cancelled-run)
+validates root ownership, waits for CloudFormation deletion, then clears that run's
+temporary object prefix and incomplete multipart uploads. Use it before bootstrap
+teardown, including for partial/failed run provisioning. Its bucket-versioning and
+multipart-list permissions are scoped to this bootstrap's exact artifact bucket;
+delete/abort actions remain limited to run objects. Cleanup reports blocked or
+partial deletion explicitly and can be rerun with the same identity.
+
 ## Per-run private network
 
 `network.yaml` is a disposable child of the `run.yaml` per-run benchmark stack,
@@ -320,6 +328,6 @@ and measurements belong to Task 4.5.
 References keep the network child alive until its EC2/RDS dependents are deleted,
 and the database alive before its generated secret can be removed. Temporary S3
 objects remain outside the run stack for explicit cleanup/lifecycle expiration.
-Deletion recovery for partial provisioning is Task 4.6. A stack's expiry timestamp
+Deletion recovery for partial provisioning uses the deployment cleanup helper. A stack's expiry timestamp
 does not perform deletion; require the operational Task 4.7 expiry handler before
 allowing workflow execution. This template has only offline validation so far.
