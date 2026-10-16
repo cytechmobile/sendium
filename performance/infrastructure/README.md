@@ -1,6 +1,6 @@
 # AWS performance infrastructure
 
-## Bootstrap (Task 4.2)
+## Bootstrap (Tasks 4.2 and 4.7)
 
 `bootstrap.yaml` creates persistent control-plane resources:
 
@@ -10,10 +10,11 @@
 - Account-level GitHub OIDC provider, or reuse of an existing provider ARN.
 - Environment-bound GitHub orchestration and read-only diagnostic roles.
 - A CloudFormation service role for run infrastructure and a permissions
-  boundary required on the future EC2 runtime roles.
-- An expiry Lambda execution role and 14-day log group. **The handler and
-  EventBridge schedule are installed in Task 4.7. This bootstrap alone does not
-  reap abandoned runs.** Complete that step before enabling AWS benchmark runs.
+  boundary required on the EC2 runtime roles.
+- An expiry role and 14-day log group, plus a conditionally installed Lambda,
+  retry configuration, enabled EventBridge schedule and invocation permission.
+  Initial bootstrap without its package explicitly reports expiry uninstalled.
+  Complete [expiry installation](../deployment/EXPIRY.md) before executing runs.
 
 Benchmark networking, `t4g.small` EC2 instances, and `db.t4g.small` RDS are the
 separate run templates in Tasks 4.3/4.4. Their sizing/storage contract is
@@ -22,7 +23,7 @@ separate run templates in Tasks 4.3/4.4. Their sizing/storage contract is
 ### Install once
 
 Use the intended AWS account/region and a maintainer's bootstrap identity with
-permission to create IAM/OIDC, S3, and log resources. The restricted orchestration
+permission to create IAM/OIDC, S3, logs, Lambda and EventBridge resources. The restricted orchestration
 role intentionally cannot install or update its own bootstrap stack. No AWS
 resources are created by repository validation commands.
 
@@ -66,8 +67,10 @@ configure the GitHub environment.
 | `DiagnosticsRoleArn` | Protected post-run EC2/CloudWatch reads and output retrieval |
 | `CloudFormationExecutionRoleArn` | `CreateStack --role-arn`; persists for nested-stack deletion/expiry |
 | `RuntimeBoundaryArn` | Mandatory boundary on app/harness roles in the run template |
-| `ExpiryRoleArn`, `ExpiryFunctionName`, `ExpiryLogGroupName` | Task 4.7's persistent expiry implementation |
-| `ExpiryHandlerInstalled` | `false` until Task 4.7 installs/enables actual expiry; run preflight must require it |
+| `ExpiryRoleArn`, `ExpiryFunctionName`, `ExpiryLogGroupName` | Persistent expiry and diagnostics |
+| `ExpiryHandlerInstalled` | `false` for initial bootstrap, `true` with installed package; preflight also checks live configuration |
+| `ExpiryFunctionArn`, `ExpiryScheduleArn`, `ExpiryScheduleName`, `ExpiryExpectedCodeSha256` | Exact installed implementation/target identity |
+| `RunResourceTtlMinutes` | Installed lifetime, matching preset/staging metadata |
 | `OidcProviderArn` | Reuse and account-level inventory |
 | `RunStackPrefix`, `RuntimeRolePrefix`, `RunSecretPrefix` | Namespaced run resources |
 | `RepositoryTag`, `GitHubEnvironmentName` | Ownership/access configuration |
@@ -118,8 +121,8 @@ The diagnostic role can describe EC2/type/credit metadata, query CloudWatch metr
 statistics, and read `runs/*/outputs/*`; it cannot provision, delete, control
 instances, or retrieve database secrets. The expiry role lists/describes run
 stacks and deletes only matching-prefix stacks with both ownership tags. Its
-future handler must additionally check root-stack identity and expiry, handle
-partial/failed stacks, and scope S3 prefix cleanup to that run.
+handler also checks root identity/expiry and scopes cleanup to that run. It can
+read only control markers, not runtime bundles, database secrets or reports.
 
 **Do not execute application builds, the load JVM, or offline report code under
 the provisioning role.** Use unprivileged build/publishing jobs and runtime-owned
@@ -145,7 +148,7 @@ rollback/deletion and expiry are verified in Tasks 4.5/6.1.
 ### Teardown
 
 First stop/clean every run stack while its service/expiry roles still exist.
-Then remove the completed expiry implementation and bootstrap through maintainer
+Then disable the schedule and remove the expiry implementation/bootstrap through maintainer
 administration. Do not delete a boundary still used by runtime roles. S3, its TLS
 bucket policy, and a newly created OIDC provider have explicit `Retain` policies: inventory their
 physical IDs before deleting the stack. Empty/delete the retained bucket when no
@@ -229,8 +232,7 @@ Outputs are `VpcId`, `PrimarySubnetId`, `SecondarySubnetId`,
 `PrimaryAvailabilityZone`, `HarnessSecurityGroupId`, `SendiumSecurityGroupId`, and
 `DatabaseSecurityGroupId`. Keep these parent/child references run-local; there are
 no cross-stack exports that can block concurrent-run cleanup. Expiry tags describe
-ownership/lifetime but do not schedule deletion: the independent handler remains
-Task 4.7.
+ownership/lifetime; the installed independent handler enforces expiry separately.
 
 Offline network tests check private topology, distinct-AZ placement, exact paired
 traffic flows, absence of implicit broad egress, endpoint placement, run-scoped S3
@@ -253,7 +255,7 @@ not grant stack updates. Do not reuse names for simultaneous attempts.
 | Parameters | Source / requirements |
 |---|---|
 | `ResourcePrefix`, `Repository`, `RuntimeBoundaryArn`, `ArtifactBucketName` | Exact matching bootstrap configuration/outputs; never select a different permission boundary. |
-| `RunIdentity`, `ExpiresAt` | Protected controller; same identity/expiry as root tags and uploaded artifact prefix. Identity is limited to 27 characters so IAM role names fit even with a 24-character resource prefix. |
+| `RunIdentity`, `ExpiresAt` | Protected controller; use the exact identity and `expiresAt` from `staged.json` for parameters/root tags. Identity is limited to 27 characters so IAM role names fit even with a 24-character resource prefix. |
 | `PrimaryAvailabilityZone`, `SecondaryAvailabilityZone`, `S3PrefixListId` | Protected regional preflight, as described for `network.yaml`. |
 | `SendiumImageId`, `HarnessImageId` | Exact preflight-resolved AL2023 AMIs compatible with each selected instance's architecture, with SSM Agent and required OS tools present. |
 | `SendiumInstanceType`, `HarnessInstanceType` | Default `t4g.small` each; preflight verifies memory, architecture, offerings and capacity assumptions. |
@@ -329,5 +331,5 @@ References keep the network child alive until its EC2/RDS dependents are deleted
 and the database alive before its generated secret can be removed. Temporary S3
 objects remain outside the run stack for explicit cleanup/lifecycle expiration.
 Deletion recovery for partial provisioning uses the deployment cleanup helper. A stack's expiry timestamp
-does not perform deletion; require the operational Task 4.7 expiry handler before
-allowing workflow execution. This template has only offline validation so far.
+does not itself perform deletion; execution requires the installed expiry handler
+and matching live configuration. This template has only offline validation so far.

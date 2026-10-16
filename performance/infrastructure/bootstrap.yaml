@@ -8,6 +8,21 @@ Parameters:
     MinLength: 3
     MaxLength: 24
     AllowedPattern: '[a-z][a-z0-9-]*[a-z0-9]'
+  ExpiryCodeKey:
+    Type: String
+    Default: ''
+    Description: Immutable bootstrap/expiry/SHA256.zip key; upload after the initial bootstrap, then update this stack.
+    AllowedPattern: '^$|^bootstrap/expiry/[a-f0-9]{64}\.zip$'
+  ExpiryCodeSha256:
+    Type: String
+    Default: ''
+    Description: Base64 SHA-256 of the deployment ZIP, from package_expiry.py.
+    AllowedPattern: '^$|^[A-Za-z0-9+/]{43}=$'
+  RunResourceTtlMinutes:
+    Type: Number
+    Default: 240
+    MinValue: 60
+    MaxValue: 1440
   RepositoryOwner:
     Type: String
     Default: cytechmobile
@@ -40,6 +55,15 @@ Parameters:
 
 Conditions:
   CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+  InstallExpiry: !Not [!Equals [!Ref ExpiryCodeKey, '']]
+
+Rules:
+  CompleteExpiryPackage:
+    Assertions:
+      - Assert: !Or
+          - !And [!Equals [!Ref ExpiryCodeKey, ''], !Equals [!Ref ExpiryCodeSha256, '']]
+          - !And [!Not [!Equals [!Ref ExpiryCodeKey, '']], !Not [!Equals [!Ref ExpiryCodeSha256, '']]]
+        AssertDescription: Supply both expiry package key and checksum, or neither for initial bootstrap.
 
 Resources:
   Artifacts:
@@ -349,6 +373,16 @@ Resources:
                 Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Ref AWS::StackId
+              - Sid: InspectExpiryFunction
+                Effect: Allow
+                Action: [lambda:GetFunctionConfiguration, lambda:GetPolicy, lambda:GetFunctionEventInvokeConfig, lambda:GetFunctionConcurrency]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}-expiry'
+                  - !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}-expiry:$LATEST'
+              - Sid: InspectExpirySchedule
+                Effect: Allow
+                Action: [events:DescribeRule, events:ListTargetsByRule]
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${ResourcePrefix}-expiry'
               - Sid: DeleteOwnedRunStacks
                 Effect: Allow
                 Action: cloudformation:DeleteStack
@@ -441,6 +475,9 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
+              - Effect: Allow
                 Action: cloudformation:ListStacks
                 Resource: '*'
                 Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
@@ -459,7 +496,13 @@ Resources:
                 Resource: !GetAtt Artifacts.Arn
                 Condition: {StringLike: {'s3:prefix': ['runs/*']}}
               - Effect: Allow
-                Action: s3:DeleteObject
+                Action: [s3:GetBucketVersioning, s3:ListBucketMultipartUploads]
+                Resource: !GetAtt Artifacts.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Artifacts.Arn}/runs/*/control/run.json'
+              - Effect: Allow
+                Action: [s3:DeleteObject, s3:AbortMultipartUpload]
                 Resource: !Sub '${Artifacts.Arn}/runs/*'
               - Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
@@ -469,6 +512,58 @@ Resources:
     Properties:
       LogGroupName: !Sub '/aws/lambda/${ResourcePrefix}-expiry'
       RetentionInDays: 14
+
+  ExpiryFunction:
+    Type: AWS::Lambda::Function
+    Condition: InstallExpiry
+    DependsOn: ExpiryLogs
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}-expiry'
+      Description: Expire owned Sendium benchmark roots and abandoned run artifact prefixes.
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: expiry.handler
+      Role: !GetAtt ExpiryRole.Arn
+      MemorySize: 256
+      Timeout: 840
+      Code: {S3Bucket: !Ref Artifacts, S3Key: !Ref ExpiryCodeKey}
+      Environment:
+        Variables:
+          BOOTSTRAP_STACK: !Ref AWS::StackName
+          REPOSITORY: !Sub '${RepositoryOwner}/${RepositoryName}'
+          ARTIFACT_BUCKET: !Ref Artifacts
+          RUN_TTL_MINUTES: !Ref RunResourceTtlMinutes
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-bootstrap}
+  ExpiryAsync:
+    Type: AWS::Lambda::EventInvokeConfig
+    Condition: InstallExpiry
+    Properties:
+      FunctionName: !Ref ExpiryFunction
+      Qualifier: '$LATEST'
+      MaximumRetryAttempts: 0
+      MaximumEventAgeInSeconds: 900
+  ExpirySchedule:
+    Type: AWS::Events::Rule
+    Condition: InstallExpiry
+    Properties:
+      Name: !Sub '${ResourcePrefix}-expiry'
+      Description: Independent 15-minute recovery of expired benchmark runs.
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Id: Expiry
+          Arn: !GetAtt ExpiryFunction.Arn
+          RetryPolicy: {MaximumRetryAttempts: 0, MaximumEventAgeInSeconds: 900}
+  ExpirySchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: InstallExpiry
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ExpiryFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ExpirySchedule.Arn
+      SourceAccount: !Ref AWS::AccountId
 
 Outputs:
   ArtifactBucketName:
@@ -486,8 +581,20 @@ Outputs:
   ExpiryFunctionName:
     Value: !Sub '${ResourcePrefix}-expiry'
   ExpiryHandlerInstalled:
-    Description: Task 4.7 installs and enables the actual handler and schedule.
-    Value: 'false'
+    Description: Package is configured; execution also verifies live function/schedule/policy state.
+    Value: !If [InstallExpiry, 'true', 'false']
+  ExpiryExpectedCodeSha256:
+    Value: !Ref ExpiryCodeSha256
+  ExpiryFunctionArn:
+    Condition: InstallExpiry
+    Value: !GetAtt ExpiryFunction.Arn
+  ExpiryScheduleArn:
+    Condition: InstallExpiry
+    Value: !GetAtt ExpirySchedule.Arn
+  ExpiryScheduleName:
+    Value: !Sub '${ResourcePrefix}-expiry'
+  RunResourceTtlMinutes:
+    Value: !Ref RunResourceTtlMinutes
   ExpiryLogGroupName:
     Value: !Ref ExpiryLogs
   OidcProviderArn:
