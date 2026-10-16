@@ -23,7 +23,7 @@
 | 3 | 3.1 | Schedule fixed-rate traffic with bounded outstanding requests | M | 🟢 done | Added absolute-time open-loop scheduling shared by both adapters, scheduling/capacity misses, intended timestamps, rate/saturation statistics, and stop/join control. All 63 unit/socket and four packaged integration tests pass. |
 | 3 | 3.2 | Produce overall and one-minute measurement reports | M | 🟢 done | Added bounded cohort/event minute aggregation, JSON/Markdown reports, drain backlog and latency percentiles. All 74 unit/socket and four packaged integration tests pass; generated reports validate against schema v1. Resource validity remains 3.3. |
 | 3 | 3.3 | Collect resource utilization and classify run validity | M | 🟢 done | Added bounded Linux CPU/RSS/host agents, protected read-only AWS credit collection, resource summaries and validity/exit policy. 86 Java tests, eight Python tests, four packaged scenarios, schema checks and a live Linux sampler check pass. AWS API collection is mocked; live verification remains 6.1. |
-| 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | ⚪ not started | Warm-up exclusion, measurement outcomes during drain, minute boundaries, bounded bookkeeping, duplicate detection, timeout reconciliation, missed load, expected overload, and unfinished work. |
+| 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | 🟢 done | Added 19 cross-component boundary/race checks and six independent artifact-semantic tests. Fixed invalid receipt-time acceptance, token aliases, and same-tick finalization. All 105 Java tests, four packaged scenarios, 14 Python tests and generated-report validation pass. |
 | 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | ⚪ not started | Load generated runtime inputs, check application/database/protocol readiness, coordinate adapters/generator/collectors through phases and bounded drain, emit reports on failure, and return classified exit status before AWS integration. |
 | 4 | 4.1 | Define the AWS and workload preset | S | ⚪ not started | Record region, database size, instance architecture, JVM settings, connections/windows, traffic limits, and deployment prerequisites. |
 | 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | ⚪ not started | Persistent artifact storage, GitHub OIDC integration/roles, expiry infrastructure permissions, and outputs; document one-time installation and reuse of an existing OIDC provider. |
@@ -171,6 +171,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-15 — Verify accounting independently and reject invalid transitions atomically
+
+**Decision:** Add cross-component race/boundary verification and an independent Python semantic validator for result artifacts. Validate receipt/admission timestamps before state mutation, use canonical issued token spelling, and preserve same-tick updates within half-open observation windows. Reconcile overall/cohort/event counters and latency samples, including declared minute-level target capacity, before claiming valid measurements.
+
+**Why:** New tests reproduced invalid receipt timestamps acknowledged as valid, malformed token aliases treated as expired history, and early same-tick finalization losing or misattributing already-recorded events. Atomic retained-entry lookup avoids forgetting known identity/duplicates between repeated expiry checks in one operation. Overall totals alone cannot reveal incorrect minute distribution or drain-inflated throughput.
+
+**Alternatives considered:** Weakening boundary assertions would hide attribution errors. Moving absolute deadlines would change the configured workload; only early exclusive close advances by a single nanosecond when required to contain a previously observed update. Treating all numeric token spellings as interchangeable masks malformed correlation data. Reusing only producer logic to validate artifacts would miss shared aggregation defects.
+
+**Verification:** All 105 Java unit/socket tests and four packaged Sendium/PostgreSQL scenarios pass. Nineteen new Java checks cover accepted/timed-out admission orderings, warm-up completions during drain, exact drain cutoff, invalid time/identity mutation, token history aliases, same-tick close, minute distribution, and failure precedence. Six independent semantic-validator tests plus eight resource-helper tests pass. Generated reports pass schema v1 and accounting/window validation, including coherent artifacts from failed runs. Task 3.5 remains the next step for runnable orchestration.
 
 ### 2026-10-15 — Classify resource evidence without performance utilization thresholds
 

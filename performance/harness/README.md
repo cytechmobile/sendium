@@ -431,3 +431,37 @@ python performance/contracts/validate.py --results-directory performance/harness
 The current CLI exposes validation/config generation; a dedicated pending Task
 3.5 wires readiness, adapters, phases, collectors, reporting, and exit status
 into a runnable benchmark command before AWS deployment integration.
+
+## Accounting and boundary verification
+
+`MeasurementAccountingVerificationTest` combines ledger, interval, report, and
+validity checks with controlled monotonic time. It exercises every admission
+position around the ordered provider/receipt events for both accepted and timed-out
+submissions. Timeout remains an ambiguous admission outcome even when provider
+processing and a forwarded receipt are observed; it is never silently accepted.
+Warm-up completions during drain remain excluded from measurement statistics.
+
+The ledger rejects invalid receipt/admission times before committing their state,
+and retained-token checks are atomic within one operation. Canonical token spelling
+distinguishes malformed aliases from genuine events beyond retained history.
+Duplicate receipts remain idempotently acknowledged but fail scenario accounting.
+An explicit rejection contradicting observed provider processing also fails,
+including when another diagnostic marks harness saturation inconclusive.
+
+Early observation close includes already-recorded same-tick updates by advancing
+the exclusive end one nanosecond if needed, within the absolute configured bounds.
+Events exactly at the maximum drain deadline are outside that window; the report
+keeps its pre-boundary unfinished count and discloses later observations.
+
+Before publishing, `RunValidity` reconciles additive cohort counters and latency
+sample counts with overall totals, checks declared minute target capacity, and
+reconciles event counts when no out-of-window updates were recorded. A correct
+overall submission count cannot hide an incorrectly attributed burst in one minute.
+The Python contract validator independently checks rendered JSON equations,
+windows, rates, distributions, and failure precedence, rather than relying solely
+on the Java aggregation logic.
+
+```sh
+python -m unittest discover -s performance/contracts -p 'test_*.py'
+python performance/contracts/validate.py --results-directory performance/harness/target/report-fixtures
+```
