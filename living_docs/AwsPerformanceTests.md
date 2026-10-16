@@ -25,7 +25,7 @@
 | 3 | 3.3 | Collect resource utilization and classify run validity | M | 🟢 done | Added bounded Linux CPU/RSS/host agents, protected read-only AWS credit collection, resource summaries and validity/exit policy. 86 Java tests, eight Python tests, four packaged scenarios, schema checks and a live Linux sampler check pass. AWS API collection is mocked; live verification remains 6.1. |
 | 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | 🟢 done | Added 19 cross-component boundary/race checks and six independent artifact-semantic tests. Fixed invalid receipt-time acceptance, token aliases, and same-tick finalization. All 105 Java tests, four packaged scenarios, 14 Python tests and generated-report validation pass. |
 | 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | 🟢 done | Added `run` and offline `finalize-report`, readiness/state files, sampler ownership, acknowledgement-aware drain, immutable cutoff and classified reports. 111 Java tests, eight packaged scenarios, 15 Python tests and artifact validation pass; Linux sampler graceful stop verified. |
-| 4 | 4.1 | Define the AWS and workload preset | S | ⚪ not started | Record region, database size, instance architecture, JVM settings, connections/windows, traffic limits, and deployment prerequisites. |
+| 4 | 4.1 | Define the AWS and workload preset | S | 🟢 done | Added `performance/presets/aws-private-jvm-v1.json`, deployment mapping/prerequisites, and static compatibility checks. Defines private run-owned networking, JVM/RDS sizing, sample/phase budgets, expiry and artifact retention; live AWS availability remains preflight/6.1 work. |
 | 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | ⚪ not started | Persistent artifact storage, GitHub OIDC integration/roles, expiry infrastructure permissions, and outputs; document one-time installation and reuse of an existing OIDC provider. |
 | 4 | 4.3 | Create the private networking CloudFormation template | M | ⚪ not started | VPC, private subnets, restricted security groups, and management/artifact connectivity; include subnet placement required by RDS. Define stack ownership and lifetime. |
 | 4 | 4.4 | Create the per-run benchmark CloudFormation template | M | ⚪ not started | Sendium/harness EC2, instance profiles, private RDS, isolated credentials, run identity/expiry tags, placement, and deployment outputs. |
@@ -111,12 +111,18 @@ Cleanup must cover success, failure, and cancellation. An independent expiry mec
 Use CloudFormation for AWS setup, with separate reviewable templates for:
 
 1. **Bootstrap infrastructure:** persistent artifact storage, GitHub OIDC integration and provisioning roles, and the independently scheduled expiry mechanism. Installation is a documented maintainer operation, not part of application builds. Support accounts with an existing GitHub OIDC provider.
-2. **Private networking:** VPC, subnets, security groups, and connectivity for Systems Manager, artifacts, and required runtime services. RDS requires suitable subnet coverage even when EC2 instances share one Availability Zone. Explicitly document whether this stack is reusable or run-owned before implementation.
+2. **Private networking:** VPC, subnets, security groups, and connectivity for Systems Manager, artifacts, and required runtime services. RDS requires suitable subnet coverage even when EC2 instances share one Availability Zone. ~~Stack lifetime remains to be selected.~~ Task 4.1 selects a run-owned network nested under the run parent stack.
 3. **Per-run infrastructure:** application and harness EC2 instances, instance profiles, private RDS PostgreSQL, isolated credentials, run/expiry tags, and outputs consumed by deployment scripts.
 
 Bootstrap resources survive individual runs. Benchmark resources and temporary artifacts have run-specific ownership and bounded lifetimes. Cleanup and expiry must handle partially created or failed stacks, not only successfully completed benchmarks. Persistent infrastructure teardown is documented separately from run cleanup.
 
 Provisioning credentials stay with protected workflow orchestration. Application and harness builds do not receive them; EC2 execution roles provide only the runtime access required for deployment, diagnostics, and measurement. Instance metadata and credential exposure must be considered when deploying selected-branch application code.
+
+### Default AWS/workload preset
+
+`performance/presets/aws-private-jvm-v1.json` and its README define the input contract for Tasks 4.2–4.5. Region comes explicitly from the protected environment's `AWS_REGION`. ~~The initial proposal used `c7i.large`/1 GiB for Sendium, `m7i.xlarge`/2 GiB for the harness, and `db.m7g.large`.~~ The user selected low-cost temporary defaults: **`t4g.small` for both EC2s, 512 MiB heap per JVM, and private Single-AZ PostgreSQL 17 on `db.t4g.small` with 20 GiB gp3**, the minimum new PostgreSQL SSD allocation. EC2 root disks use the resolved AMI root-device minimum (typically 8 GiB), not a padded fixed allocation. Default offered rate and worker TPS are 100. The default EC2s are ARM64; separately resolved x86_64/arm64 overrides remain supported. Private AL2023 AMIs and checksummed Temurin Java 25 archives are staged before execution. Exact image/runtime/database versions, resolved disk sizes, and preset digest must be recorded per run.
+
+The default network is per-run with two private subnets, endpoints for SSM/SSM Messages/Secrets Manager, and S3 gateway access; no public IP, NAT, or internet gateway. Both EC2s and requested RDS placement use the first selected AZ; the database subnet group spans both AZs. RDS uses verified TLS, encrypted storage, no automatic upgrade/storage resizing, and explicit delete policies without snapshots. Independent expiry uses an EventBridge-scheduled Lambda. Resource TTL is four hours, expiry checks every 15 minutes, fallback S3 expiration one day, and public workflow artifacts 30 days. Maximum phase durations fit sample, histogram, job, cleanup, and expiry budgets. These are setup/resource bounds, not measured-performance gates. Templates/resolution and live account verification remain later tasks.
 
 ### GitHub Actions workflow deliverables
 
@@ -171,6 +177,24 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Use small Graviton defaults and minimum temporary storage
+
+**Decision:** Replace the initial larger defaults with `t4g.small` Sendium and harness instances and `db.t4g.small` RDS. Set both JVM heaps to 512 MiB and memory compatibility minima to 2048 MiB. Resolve each EC2 root disk from the selected AMI root-device mapping rather than reserving 20 GiB. Keep RDS at 20 GiB gp3, the API minimum for a new PostgreSQL general-purpose SSD instance, with autoscaling/backups/snapshots disabled.
+
+**Why:** The user explicitly requested small, low-cost instances and the least possible storage for short-lived tests. The previous heap/memory limits would reject or overcommit the selected 2 GiB EC2s. Region/AMI-specific root sizes must be resolved instead of assuming every image fits a hardcoded 8 GiB.
+
+**Alternatives considered:** The prior non-burstable defaults reserved more compute/memory than requested. A smaller RDS SSD allocation is unsupported by the CreateDBInstance API; legacy magnetic storage is no longer offered for new instances. Fixed larger EC2 root volumes are unnecessary for this temporary preset. Actual CPU-credit state remains part of burstable-instance diagnostics; RDS credit behavior is service-managed.
+
+### 2026-10-16 — Define one explicit private JVM preset before infrastructure templates
+
+**Decision:** Add versioned machine-readable `aws-private-jvm-v1` settings and deployment documentation. Use a run-owned endpoint-only VPC, non-burstable EC2 defaults with fixed heaps, separately resolved supported architectures, private PostgreSQL 17 sizing/TLS, and explicit workload/collection/lifetime bounds. Resolve rolling AMI/JRE/minor selectors once before provisioning and record exact identities/digests; optional pins support stricter repeat runs. Use Standard mode for selected burstable types and record actual state. Choose scheduled Lambda expiry and 30-day GitHub artifact retention.
+
+**Why:** Templates and workflow jobs need one reproducible contract rather than scattered hidden defaults. Per-run networking avoids shared mutable state and idle endpoint resources. Region/account identity cannot be inferred safely from repository code, so the environment supplies them explicitly. Fixed JVM budgets need declared memory compatibility; sample/phase maxima must fit job/expiry timing. Database upgrades/storage changes must not silently alter a measured run.
+
+**Alternatives considered:** Reusing persistent networking reduces provisioning time but adds shared setup/lifetime dependencies. NAT/public internet can fetch dependencies directly but is unnecessary when immutable artifacts are staged through S3. Hardcoding a region or guessing unavailable engine/instance replacements risks testing a different configuration. An entirely frozen image/runtime catalog is optional through pins; the default records exact resolved versions rather than claiming cross-run binary identity.
+
+**Verification:** `performance/contracts/validate.py --preset performance/presets/aws-private-jvm-v1.json` passes workload-schema, subnet/connectivity, heap/window, sampling/histogram, and lifecycle compatibility checks. The existing six independent contract tests also pass. No Java/application behavior changed in this task. Instance/engine availability, quota, resolved runtime artifacts, and actual IAM/network behavior require protected preflight and later AWS validation; this task creates no AWS resources.
 
 ### 2026-10-16 — Run phases without AWS privileges and enrich resources offline
 
@@ -332,14 +356,9 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 
 These are implementation details absent from the issue. Resolve repository-discoverable details through inspection before asking the user.
 
-- Harness module placement and packaging resolved in Task 1.2; runtime protocol wiring remains tracked in Phase 2.
-- Networking stack lifetime and ownership; whether to support existing networking as well as the dedicated CloudFormation network.
 - Available AWS account, region, OIDC role, protected GitHub environment, and any account-specific restrictions needed for an actual AWS validation run.
-- Independent expiry mechanism and how its persistent bootstrap infrastructure is installed and operated.
-- Exact preset values: RDS size, instance architecture/AMI/JDK, connection windows, JVM settings, request limits, and bounded accounting capacity.
-- Correlation token encoding, bounded history, and histogram precision resolved in Task 1.3. Protocol-ID mapping is implemented with the adapters; interval publication remains Task 3.2.
-- Precise scenario-defined accounting violations and how timeout/unknown admission outcomes reconcile with provider observations.
-- Explicit artifact retention period and log redaction of isolated credentials.
+- Confirm actual regional AMI/JRE/database resolution and availability against the selected account before execution (Tasks 4.5/6.1).
+- Diagnostic artifact assembly/redaction and repository retention-policy compatibility require workflow verification (Tasks 5.3/5.4); the preset requests 30 days.
 - Verify release automation updates the opt-in harness module/parent versions before final workflow validation (Tasks 5.1/6.2).
 
 ---

@@ -31,6 +31,8 @@ a performance failure.
 The executable also provides `run` and offline `finalize-report` commands.
 See [EXECUTION.md](EXECUTION.md) for manifests, startup order, sampling, outcomes,
 and local end-to-end verification.
+The versioned [AWS/workload preset](../presets/README.md) defines sizing,
+networking, runtime, and lifecycle inputs for the infrastructure integration.
 
 ## Bounded accounting and latency collection
 

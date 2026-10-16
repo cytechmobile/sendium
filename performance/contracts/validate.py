@@ -8,6 +8,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from semantics import validate_results
+from preset_validation import validate_preset
 
 
 ROOT = Path(__file__).resolve().parent
@@ -88,7 +89,11 @@ print("Both schemas valid; resolved workload, setup-failure output, and invalid 
 
 parser = argparse.ArgumentParser(description="Validate performance contracts and generated results")
 parser.add_argument("--results-directory", type=Path)
+parser.add_argument("--preset", type=Path, action="append", default=[])
 arguments = parser.parse_args()
+for path in arguments.preset:
+    validate_preset(json.loads(path.read_text(encoding="utf-8")), config_validator)
+    print(f"Validated preset compatibility and lifecycle budgets: {path.name}")
 if arguments.results_directory is not None:
     results = sorted(arguments.results_directory.rglob("results.json"))
     if not results:
