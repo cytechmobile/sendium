@@ -26,7 +26,7 @@
 | 3 | 3.4 | Verify measurement attribution and accounting failure behavior | M | 🟢 done | Added 19 cross-component boundary/race checks and six independent artifact-semantic tests. Fixed invalid receipt-time acceptance, token aliases, and same-tick finalization. All 105 Java tests, four packaged scenarios, 14 Python tests and generated-report validation pass. |
 | 3 | 3.5 | Wire a runnable benchmark command and phase/report orchestration | M | 🟢 done | Added `run` and offline `finalize-report`, readiness/state files, sampler ownership, acknowledgement-aware drain, immutable cutoff and classified reports. 111 Java tests, eight packaged scenarios, 15 Python tests and artifact validation pass; Linux sampler graceful stop verified. |
 | 4 | 4.1 | Define the AWS and workload preset | S | 🟢 done | Added `performance/presets/aws-private-jvm-v1.json`, deployment mapping/prerequisites, and static compatibility checks. Defines private run-owned networking, JVM/RDS sizing, sample/phase budgets, expiry and artifact retention; live AWS availability remains preflight/6.1 work. |
-| 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | ⚪ not started | Persistent artifact storage, GitHub OIDC integration/roles, expiry infrastructure permissions, and outputs; document one-time installation and reuse of an existing OIDC provider. |
+| 4 | 4.2 | Create the AWS bootstrap CloudFormation template | M | 🟢 done | Added `performance/infrastructure/bootstrap.yaml`: private temporary artifact bucket, optional/reused OIDC, orchestration/diagnostic/service roles, required runtime boundary, expiry role/logs and outputs. CloudFormation lint and seven policy tests pass; actual handler/schedule remains 4.7 and live authorization 6.1. |
 | 4 | 4.3 | Create the private networking CloudFormation template | M | ⚪ not started | VPC, private subnets, restricted security groups, and management/artifact connectivity; include subnet placement required by RDS. Define stack ownership and lifetime. |
 | 4 | 4.4 | Create the per-run benchmark CloudFormation template | M | ⚪ not started | Sendium/harness EC2, instance profiles, private RDS, isolated credentials, run identity/expiry tags, placement, and deployment outputs. |
 | 4 | 4.5 | Implement artifact deployment and execution scripts | M | ⚪ not started | Upload artifacts, render scenario configuration, deploy through Systems Manager, check readiness, run phases, and retrieve results/logs even after scenario failure. |
@@ -177,6 +177,16 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Bootstrap persistent control-plane roles before run infrastructure
+
+**Decision:** Add a standalone bootstrap template with private encrypted temporary S3 storage, conditional GitHub OIDC creation/reuse, exact environment-bound web-identity trust, delegated CloudFormation provisioning, read-only diagnostics, and a required runtime permission boundary. Scope control/deletion to run prefixes and repository ownership tags; root creation also requires run identity and expiry. Prepare the expiry role/log group and explicitly output `ExpiryHandlerInstalled=false` until Task 4.7 supplies the real handler/schedule. Retain artifact storage/TLS policy and newly created account-level OIDC on bootstrap teardown.
+
+**Why:** Infrastructure and workload code need distinct credentials and ownership contracts. Runtime roles must not read account-wide Parameter Store values or inherit provisioning access. Independent cleanup requires persistent permissions after a job disappears, but a placeholder function would falsely imply operational expiry. Shared OIDC and retained artifact resources need explicit installation/teardown ownership rather than accidental deletion.
+
+**Alternatives considered:** Direct EC2/RDS privileges on the GitHub role bypass a stable service-role boundary. Reusing broad managed instance permissions introduces unnecessary runtime API access; the boundary allows control channels and the managed shell document instead. Static AWS keys are unnecessary with OIDC. Installing a no-op scheduled cleanup handler would hide the remaining expiry work. Running the configuration/report JVM under the provisioning role conflicts with privilege separation; node-side configuration and unprivileged offline publishing remain the integration contract.
+
+**Verification:** CloudFormation lint passes and seven offline policy checks pass, covering exact positive/negative OIDC claims and provider reuse, provisioner/runtime/diagnostic separation, mandatory boundaries, owner/tag/expiry requirements, private encrypted retained storage, and IAM policy-size limits at maximum parameter lengths. Installation commands, outputs, naming constraints and teardown are documented in `performance/infrastructure/README.md`. No AWS deployment was performed; live resource/provider authorization, encryption, SSM access and rollback/deletion behavior remain Tasks 4.5/6.1.
 
 ### 2026-10-16 — Use small Graviton defaults and minimum temporary storage
 

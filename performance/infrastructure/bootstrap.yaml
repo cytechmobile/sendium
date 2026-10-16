@@ -1,0 +1,502 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Persistent bootstrap for manually triggered Sendium performance runs. No benchmark compute is created.
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: sendium-perf
+    MinLength: 3
+    MaxLength: 24
+    AllowedPattern: '[a-z][a-z0-9-]*[a-z0-9]'
+  RepositoryOwner:
+    Type: String
+    Default: cytechmobile
+    MaxLength: 39
+    AllowedPattern: '[A-Za-z0-9-]+'
+  RepositoryName:
+    Type: String
+    Default: sendium
+    MaxLength: 100
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+  GitHubEnvironment:
+    Type: String
+    Default: sendium-performance
+    MaxLength: 100
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: Existing account-level token.actions.githubusercontent.com provider ARN; leave blank only if none exists.
+    AllowedPattern: '^$|^arn:[a-z0-9-]+:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+  OidcAudience:
+    Type: String
+    Default: sts.amazonaws.com
+    AllowedValues: [sts.amazonaws.com, sts.amazonaws.com.cn]
+  TemporaryArtifactExpirationDays:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 7
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+
+Resources:
+  Artifacts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireTemporaryRunObjects
+            Status: Enabled
+            Prefix: runs/
+            ExpirationInDays: !Ref TemporaryArtifactExpirationDays
+            AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-bootstrap}
+        - Key: 'sendium:repository'
+          Value: !Sub '${RepositoryOwner}/${RepositoryName}'
+  ArtifactsPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref Artifacts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RequireTls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt Artifacts.Arn, !Sub '${Artifacts.Arn}/*']
+            Condition: {Bool: {'aws:SecureTransport': 'false'}}
+  GitHubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [!Ref OidcAudience]
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-bootstrap}
+
+  RuntimeBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ResourcePrefix}-runtime-boundary'
+      Description: Ceiling for run EC2 roles; inline policies further restrict each instance to its own run.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ManagedInstanceControlChannels
+            Effect: Allow
+            Action:
+              - ssm:UpdateInstanceInformation
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+            Resource: '*'
+            Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+          - Sid: RunObjectsOnly
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+            Resource: !Sub '${Artifacts.Arn}/runs/*'
+          - Sid: ReadManagedShellDocument
+            Effect: Allow
+            Action: [ssm:GetDocument, ssm:DescribeDocument]
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+          - Sid: RunObjectListing
+            Effect: Allow
+            Action: [s3:ListBucket]
+            Resource: !GetAtt Artifacts.Arn
+            Condition: {StringLike: {'s3:prefix': ['runs/*']}}
+          - Sid: RunDatabaseSecretsOnly
+            Effect: Allow
+            Action: [secretsmanager:GetSecretValue]
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ResourcePrefix}/runs/*'
+          - Sid: ServiceMediatedSecretDecryption
+            Effect: Allow
+            Action: kms:Decrypt
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub 'secretsmanager.${AWS::Region}.${AWS::URLSuffix}'
+
+  CloudFormationExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-cloudformation'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudformation.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunInfrastructure
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenyPublicInstanceAddresses
+                Effect: Deny
+                Action: ec2:RunInstances
+                Resource: '*'
+                Condition: {Bool: {'ec2:AssociatePublicIpAddress': 'true'}}
+              - Sid: DescribeRegionalInfrastructure
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - rds:Describe*
+                  - rds:ListTagsForResource
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Sid: CreateTaggedNetworkResources
+                Effect: Allow
+                Action: [ec2:CreateVpc, ec2:CreateSubnet, ec2:CreateRouteTable, ec2:CreateSecurityGroup, ec2:CreateVpcEndpoint]
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: ManageOwnedNetworkResources
+                Effect: Allow
+                Action:
+                  - ec2:DeleteVpc
+                  - ec2:ModifyVpcAttribute
+                  - ec2:DeleteSubnet
+                  - ec2:ModifySubnetAttribute
+                  - ec2:DeleteRouteTable
+                  - ec2:AssociateRouteTable
+                  - ec2:DisassociateRouteTable
+                  - ec2:DeleteSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:DeleteVpcEndpoints
+                  - ec2:ModifyVpcEndpoint
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:*/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: TagOnCreate
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:*/*'
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: [CreateVpc, CreateSubnet, CreateRouteTable, CreateSecurityGroup, CreateVpcEndpoint, RunInstances]
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: LaunchIntoOwnedNetwork
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: LaunchImageAndNewInstanceResources
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}::image/ami-*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/snap-*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+              - Sid: ManageOwnedInstances
+                Effect: Allow
+                Action: [ec2:TerminateInstances, ec2:ModifyInstanceAttribute, ec2:ModifyInstanceCreditSpecification]
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: RunDatabaseResources
+                Effect: Allow
+                Action:
+                  - rds:CreateDBInstance
+                  - rds:DeleteDBInstance
+                  - rds:ModifyDBInstance
+                  - rds:CreateDBSubnetGroup
+                  - rds:DeleteDBSubnetGroup
+                  - rds:ModifyDBSubnetGroup
+                  - rds:CreateDBParameterGroup
+                  - rds:DeleteDBParameterGroup
+                  - rds:ModifyDBParameterGroup
+                  - rds:ResetDBParameterGroup
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${ResourcePrefix}-run-*'
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:${ResourcePrefix}-run-*'
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:pg:${ResourcePrefix}-run-*'
+              - Sid: DatabaseServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS'
+                Condition: {StringEquals: {'iam:AWSServiceName': rds.amazonaws.com}}
+              - Sid: RunSecrets
+                Effect: Allow
+                Action: [secretsmanager:CreateSecret, secretsmanager:DeleteSecret, secretsmanager:DescribeSecret, secretsmanager:GetSecretValue, secretsmanager:PutSecretValue, secretsmanager:UpdateSecret, secretsmanager:TagResource, secretsmanager:UntagResource]
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ResourcePrefix}/runs/*'
+              - Sid: GenerateIsolatedPasswords
+                Effect: Allow
+                Action: secretsmanager:GetRandomPassword
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Sid: ServiceMediatedEncryption
+                Effect: Allow
+                Action: [kms:DescribeKey, kms:CreateGrant, kms:Decrypt, kms:GenerateDataKey]
+                Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+                Condition:
+                  StringEquals:
+                    kms:CallerAccount: !Ref AWS::AccountId
+                    kms:ViaService:
+                      - !Sub 'ec2.${AWS::Region}.${AWS::URLSuffix}'
+                      - !Sub 'rds.${AWS::Region}.${AWS::URLSuffix}'
+                      - !Sub 'secretsmanager.${AWS::Region}.${AWS::URLSuffix}'
+              - Sid: CreateBoundedRuntimeRoles
+                Effect: Allow
+                Action: [iam:CreateRole, iam:PutRolePermissionsBoundary]
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourcePrefix}-run-*'
+                Condition: {ArnEquals: {'iam:PermissionsBoundary': !Ref RuntimeBoundary}}
+              - Sid: ManageRuntimeRolePoliciesAndProfiles
+                Effect: Allow
+                Action: [iam:GetRole, iam:DeleteRole, iam:UpdateAssumeRolePolicy, iam:PutRolePolicy, iam:GetRolePolicy, iam:DeleteRolePolicy, iam:ListRolePolicies, iam:ListAttachedRolePolicies, iam:ListInstanceProfilesForRole, iam:TagRole, iam:UntagRole, iam:CreateInstanceProfile, iam:GetInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile, iam:TagInstanceProfile, iam:UntagInstanceProfile]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourcePrefix}-run-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${ResourcePrefix}-run-*'
+              - Sid: PassRuntimeRolesOnlyToEc2
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourcePrefix}-run-*'
+                Condition: {StringEquals: {'iam:PassedToService': ec2.amazonaws.com}}
+              - Sid: ReadNestedTemplates
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Artifacts.Arn}/runs/*/templates/*'
+              - Sid: NestedRunStacks
+                Effect: Allow
+                Action: [cloudformation:CreateStack, cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:DescribeStackResources, cloudformation:ListStackResources, cloudformation:GetTemplate, cloudformation:DeleteStack]
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+              - Sid: PassServiceRoleForNestedStacks
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourcePrefix}-cloudformation'
+                Condition: {StringEquals: {'iam:PassedToService': cloudformation.amazonaws.com}}
+
+  GitHubOrchestrator:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-orchestrator'
+      MaxSessionDuration: 10800
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: !Ref OidcAudience
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: RunControl
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreateRunStacksWithServiceRole
+                Effect: Allow
+                Action: cloudformation:CreateStack
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+                Condition:
+                  ArnEquals: {cloudformation:RoleArn: !GetAtt CloudFormationExecution.Arn}
+                  StringEquals:
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+                  StringLike:
+                    aws:RequestTag/sendium:run-identity: gh-*
+                  'Null':
+                    aws:RequestTag/sendium:expires-at: 'false'
+              - Sid: InspectRunStacks
+                Effect: Allow
+                Action: [cloudformation:DescribeStacks, cloudformation:DescribeStackEvents, cloudformation:DescribeStackResources, cloudformation:ListStackResources, cloudformation:GetTemplate]
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+              - Sid: ReadBootstrapOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
+              - Sid: DeleteOwnedRunStacks
+                Effect: Allow
+                Action: cloudformation:DeleteStack
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: PassCloudFormationServiceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CloudFormationExecution.Arn
+                Condition: {StringEquals: {'iam:PassedToService': cloudformation.amazonaws.com}}
+              - Sid: RegionalPreflight
+                Effect: Allow
+                Action: [ec2:DescribeAvailabilityZones, ec2:DescribeInstanceTypes, ec2:DescribeInstanceTypeOfferings, ec2:DescribeImages, ec2:DescribePrefixLists, ec2:DescribeManagedPrefixLists, ec2:DescribeInstances, ec2:DescribeInstanceStatus, ec2:DescribeVolumes, rds:DescribeDBEngineVersions, rds:DescribeOrderableDBInstanceOptions, rds:DescribeDBInstances, ssm:DescribeInstanceInformation, ssm:GetCommandInvocation, ssm:ListCommandInvocations]
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Sid: ResolvePublicAmiParameters
+                Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters]
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::parameter/aws/service/ami-amazon-linux-latest/*'
+              - Sid: RunShellDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Sid: ControlOwnedInstances
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/sendium:managed-by: performance-tests
+                    ssm:resourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: TemporaryObjects
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub '${Artifacts.Arn}/runs/*'
+              - Sid: TemporaryObjectListing
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Artifacts.Arn
+                Condition: {StringLike: {'s3:prefix': ['runs/*']}}
+
+  GitHubDiagnostics:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-diagnostics'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: !Ref OidcAudience
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: ReadRunEvidence
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ec2:DescribeInstances, ec2:DescribeInstanceTypes, ec2:DescribeInstanceCreditSpecifications, cloudwatch:GetMetricStatistics]
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Artifacts.Arn}/runs/*/outputs/*'
+
+  ExpiryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-expiry'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ExpireOwnedRuns
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:ListStacks
+                Resource: '*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+              - Effect: Allow
+                Action: cloudformation:DeleteStack
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: !GetAtt Artifacts.Arn
+                Condition: {StringLike: {'s3:prefix': ['runs/*']}}
+              - Effect: Allow
+                Action: s3:DeleteObject
+                Resource: !Sub '${Artifacts.Arn}/runs/*'
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${ExpiryLogs.Arn}'
+  ExpiryLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ResourcePrefix}-expiry'
+      RetentionInDays: 14
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref Artifacts
+  OrchestratorRoleArn:
+    Value: !GetAtt GitHubOrchestrator.Arn
+  DiagnosticsRoleArn:
+    Value: !GetAtt GitHubDiagnostics.Arn
+  CloudFormationExecutionRoleArn:
+    Value: !GetAtt CloudFormationExecution.Arn
+  RuntimeBoundaryArn:
+    Value: !Ref RuntimeBoundary
+  ExpiryRoleArn:
+    Value: !GetAtt ExpiryRole.Arn
+  ExpiryFunctionName:
+    Value: !Sub '${ResourcePrefix}-expiry'
+  ExpiryHandlerInstalled:
+    Description: Task 4.7 installs and enables the actual handler and schedule.
+    Value: 'false'
+  ExpiryLogGroupName:
+    Value: !Ref ExpiryLogs
+  OidcProviderArn:
+    Value: !If [CreateOidcProvider, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+  RunStackPrefix:
+    Value: !Sub '${ResourcePrefix}-run-'
+  RuntimeRolePrefix:
+    Value: !Sub '${ResourcePrefix}-run-'
+  RunSecretPrefix:
+    Value: !Sub '${ResourcePrefix}/runs/'
+  RepositoryTag:
+    Value: !Sub '${RepositoryOwner}/${RepositoryName}'
+  GitHubEnvironmentName:
+    Value: !Ref GitHubEnvironment
+  TemporaryArtifactRetentionDays:
+    Value: !Ref TemporaryArtifactExpirationDays
