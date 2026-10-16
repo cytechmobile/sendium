@@ -155,7 +155,7 @@ Run-prefix lifecycle expiration continues independently of run-job cancellation.
 
 ## Per-run private network
 
-`network.yaml` is a disposable child of the forthcoming per-run benchmark stack,
+`network.yaml` is a disposable child of the `run.yaml` per-run benchmark stack,
 not shared bootstrap infrastructure. Upload it beneath the run's `templates/`
 prefix. The parent must reference its outputs so CloudFormation deletes dependent
 EC2/RDS resources before the network. Do not retain this child or delete it while
@@ -267,8 +267,8 @@ the controller rather than overwriting a template during provisioning.
 
 Both EC2s use the primary private subnet and their designated security groups,
 IMDSv2 with hop limit 1, no SSH key, no public IP and no bootstrap download script.
-Provisioning creates idle nodes; Task 4.5 stages and starts the application through
-SSM. Each root disk is encrypted gp3 and deleted on termination; ownership tags
+Provisioning creates idle nodes; the [deployment controller](../deployment/README.md)
+stages and starts the application through SSM. Each root disk is encrypted gp3 and deleted on termination; ownership tags
 propagate to its volume. Known burstable families (`t2`, `t3`, `t3a`, `t4g`) use
 Standard credits. Non-burstable overrides omit `CreditSpecification`. Preflight
 must reject an unknown burstable family until its handling is defined and record

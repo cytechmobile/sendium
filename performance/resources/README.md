@@ -52,8 +52,8 @@ half-open window. Raw samples remain available in `results.json`.
 
 ## Read-only AWS CPU-credit collector
 
-Run under the protected GitHub environment's OIDC-authenticated orchestration
-role, not the application/harness instance role:
+Run under the protected GitHub environment's OIDC-authenticated read-only
+diagnostics role, not the application/harness instance role:
 
 ```sh
 python3 performance/resources/collect_cpu_credits.py \
