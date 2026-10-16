@@ -30,13 +30,14 @@
 | 4 | 4.3 | Create the private networking CloudFormation template | M | 🟢 done | Added disposable `network.yaml`: two private AZ subnets, role-paired security rules, three interface endpoints and run-scoped S3 gateway endpoint. Both templates lint; all 12 infrastructure tests pass. Parent integration follows in 4.4; live connectivity remains 4.5/6.1. |
 | 4 | 4.4 | Create the per-run benchmark CloudFormation template | M | 🟢 done | Added `run.yaml`: network child, separate private EC2s/profiles, bounded per-node IAM, generated database secret, TLS-enforced private PostgreSQL and deployment outputs. Aligned network CIDRs to preset. Three templates lint; 21 infrastructure checks and preset validation pass. Live provisioning remains 4.5/6.1. |
 | 4 | 4.5 | Implement artifact deployment and execution scripts | M | 🟢 done | Added immutable/checksummed staging, owned-resource preflight, SSM/systemd node control, local secret/config generation, sampling, redacted logs and allowlisted failure-aware retrieval. 15 offline checks and three real Linux/JVM/PostgreSQL scenarios pass. AWS resolution/stack creation integrates in 5.2; live service validation remains 6.1. |
-| 4 | 4.6 | Implement run-owned stack and temporary artifact cleanup | M | ⚪ not started | Idempotent deletion after success, failure, cancellation, and partial provisioning; delete dependent resources in the correct order and surface cleanup failures. |
+| 4 | 4.6 | Implement run-owned stack and temporary artifact cleanup | M | 🟢 done | Added `cleanup.py`: verified root-ARN deletion, bounded partial/busy/failed-stack recovery, confirmed absence before exact run-prefix object/multipart purge, repeatable retries and explicit outcomes. 24 cleanup/transport checks (39 deployment total), 22 infrastructure checks and three-template lint pass. Workflow wiring follows in 5.3; local rehearsal 5.5 precedes AWS validation 6.1. |
 | 4 | 4.7 | Implement independent expiry of abandoned benchmark runs | M | ⚪ not started | Scheduled expiry outside GitHub Actions; recover tagged expired stacks and temporary artifacts with narrowly scoped permissions; install through bootstrap CloudFormation. |
 | 5 | 5.1 | Create the manual GitHub Actions performance-test workflow | M | ⚪ not started | Create `.github/workflows/performance-tests.yml`: manual inputs, validation, exact selected commit, architecture-compatible unprivileged builds, and artifact identities. Resolve input-count constraints without losing configurable settings. |
 | 5 | 5.2 | Add protected CloudFormation and SSM execution jobs | M | ⚪ not started | Maintainer-controlled environment/OIDC, resolve supported AMI/JRE/engine/AZ inputs, verify operational expiry, deploy stacks, and invoke the staged SSM controller with per-run isolation; benchmark execution receives no provisioning credentials. |
 | 5 | 5.3 | Publish workflow reports and add cleanup jobs | M | ⚪ not started | Overall and one-minute summary results, versioned JSON, diagnostic logs, explicit artifact retention, failure-result retrieval, and cleanup paths. |
 | 5 | 5.4 | Verify workflow permissions and failure outcomes | M | ⚪ not started | Builds have no AWS provisioning access; validate input handling, protected environment usage, setup/accounting failures, overload reporting, and cancellation behavior. |
-| 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | ⚪ not started | Both protocols, delivery reports on/off, actual resource measurements; provisioning/scenario failure, cancellation, partial creation, abandoned execution, and independent expiry. Requires configured AWS prerequisites. |
+| 5 | 5.5 | Validate the complete deployment in an AWS-like local environment | L | ⚪ not started | Required before 6.1. Separate Linux Sendium/harness nodes, PostgreSQL 17 with verified TLS, private connectivity, production deployment/lifecycle code through local transport, all four protocol/DLR combinations, failure diagnostics, concurrent-run isolation and repeatable cleanup. Detailed acceptance criteria below. |
+| 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | ⚪ not started | Requires successful local rehearsal in 5.5 and configured AWS prerequisites. Both protocols, delivery reports on/off, actual resource measurements; provisioning/scenario failure, cancellation, partial creation, abandoned execution, and independent expiry. |
 | 6 | 6.2 | Document AWS installation and maintainer benchmark operations | M | ⚪ not started | Bootstrap and networking installation, GitHub environment/role setup, preset selection, manual execution, results, retention, cost/lifetime boundaries, teardown, and recovery. |
 | 6 | 6.3 | Write the as-built architecture companion document | S | ⚪ not started | Describe implemented components, trust boundaries, data flow, stack ownership, and resource lifecycle with diagrams. |
 
@@ -132,6 +133,28 @@ The input layout must respect GitHub's supported dispatch-input count while reta
 
 Use run identity including the run attempt where necessary to prevent collisions during reruns. Cleanup jobs provide the immediate path; independently scheduled expiry provides recovery if cancellation or runner loss prevents those jobs from completing.
 
+### Local deployment rehearsal — Task 5.5
+
+Task 5.5 is a required dependency of the first AWS validation in Task 6.1. Extend the existing packaged-JVM and node checks into a reproducible local environment that exercises the complete deployment and lifecycle with an AWS-like topology.
+
+**Scope:**
+
+- Run Sendium and the harness on separate Linux container nodes with actual Java 25, the production deployment scripts, and the agreed memory/heap limits.
+- Run PostgreSQL 17 separately, require TLS, and verify its certificate from Sendium.
+- Reproduce private role-to-role connectivity: harness ↔ Sendium, Sendium → PostgreSQL, and controlled artifact/management access.
+- Reuse production controller/node code through a local transport adapter for staging, checksums, configuration generation, readiness, phases, sampling, report retrieval and cleanup. Evaluate LocalStack for supported S3/control-plane operations; do not assume it reproduces EC2, RDS or SSM completely.
+
+**Acceptance criteria:**
+
+1. HTTP and SMPP each complete with DLR enabled and disabled.
+2. Reports pass the versioned schemas and independent accounting/measurement-semantic validation.
+3. Unavailable PostgreSQL, invalid TLS certificates, application crashes, interrupted execution and partial deployment preserve useful available diagnostics and explicit failure outcomes.
+4. Cleanup is repeatable and removes the local run's resources/artifacts without affecting another concurrent run.
+5. Private credentials and runtime configuration never appear in downloadable outputs.
+6. A documented command starts the environment and runs the rehearsal, including teardown and failure-case verification.
+
+Record which services are real, substituted or unsupported. Actual IAM authorization, VPC endpoints, managed RDS behavior, AWS SSM/systemd integration and ARM64 execution remain explicit Task 6.1 checks; successful local rehearsal establishes readiness to begin those checks.
+
 ### Acceptance-criteria coverage
 
 | Issue requirement | Implementation tasks | Verification |
@@ -177,6 +200,20 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-16 — Delete verified root stacks before purging temporary run artifacts
+
+**Decision:** Add a standard-library cleanup command accepting either the original plan or staged manifest. Resolve the bootstrap bucket/namespace/role; validate root identity, account/region, ownership tags and attached role; pin deletion to the stack ARN. Observe in-progress deletion, wait out busy creation/rollback and retry failed deletion up to three accepted requests within a shared deadline. Confirm deletion before aborting multipart uploads and removing only the exact run prefix, then verify it is empty. Preserve partial failure/timeout/interruption outcomes and permit idempotent retries. Add only bucket-scoped versioning/multipart-list reads to the orchestration role; retain existing run-scoped delete/abort permissions.
+
+**Rationale:** CloudFormation preserves resource dependency ordering, partial provisioning can be cleaned without application readiness or local build files, and diagnostic/template inputs survive unconfirmed stack deletion. Distinguish exact absence from authorization errors, detect same-name replacement, and avoid pagination skips after mutations. Independent expiry remains Task 4.7; final workflow cleanup wiring remains Task 5.3.
+
+**Verification:** All 24 cleanup/transport checks pass (39 deployment checks including existing execution checks), all 22 infrastructure checks pass, and the three templates pass CloudFormation lint. Checks cover isolation, repeated/concurrent cleanup, missing/partial/failed stacks, bounded recovery, multi-page S3 objects/uploads, partial failures, interruption and large request payloads. No AWS resources deployed; Task 5.5 remains the required complete local rehearsal before live AWS lifecycle validation in 6.1.
+
+### 2026-10-16 — Require an AWS-like local rehearsal before AWS validation
+
+**Decision:** At the user's request, add Task 5.5 after workflow verification and make it a prerequisite of Task 6.1. Use separate Linux application/harness nodes, PostgreSQL 17 with verified TLS, private connectivity and production deployment/lifecycle code through a local transport. Cover all four protocol/DLR combinations, failure diagnostics, credential isolation, concurrent runs and repeatable cleanup, with a documented rehearsal command.
+
+**Rationale:** Existing local checks validate important components, but a complete topology/lifecycle rehearsal should catch integration problems before spending time on AWS provisioning. Evaluate LocalStack's supported operations and record substitution boundaries; retain real AWS service/permission validation in Task 6.1.
 
 ### 2026-10-16 — Stage immutable inputs and supervise private-node execution
 

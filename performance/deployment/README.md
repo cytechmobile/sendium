@@ -134,8 +134,9 @@ evidence are merged offline. A successful stack or controller exit is not a clai
 of sustainable sending capacity.
 
 SIGINT/SIGTERM trigger best-effort stop/retrieval. Hard runner/host loss cannot
-guarantee this path. Stack/artifact cleanup is Task 4.6; independent abandoned-run
-expiry is Task 4.7. This execution command does not delete the stack or artifacts.
+guarantee this path. Use the cleanup command below for stack/artifact deletion;
+independent abandoned-run expiry is Task 4.7. The execution command does not
+delete the stack or artifacts.
 
 ## 3. Retrieve again and finalize without AWS privileges
 
@@ -168,6 +169,79 @@ unprivileged publishing job invokes `finalize-report` as documented in
 and independent accounting semantics. Task 5.3 wires these job/artifact boundaries;
 the protected controller never invokes finalization code.
 
+## 4. Clean up a completed, failed or cancelled run
+
+Retrieve and preserve available reports first, then run cleanup under bootstrap's
+orchestration role after provisioning/execution producers have stopped:
+
+```sh
+python performance/deployment/cleanup.py \
+  --run staged.json --output cleanup-outcome.json --timeout-seconds 1800
+```
+
+The **original `plan.json` also works**, even if staging failed before `staged.json`
+was written or no stack was created. Cleanup needs only region, bootstrap/root
+stack names, repository and run identity; it does not require local build
+artifacts, preset/schema packages, execution outputs, a healthy application, or
+the installed expiry flag. The output file must be new and its parent must exist.
+Apply the updated bootstrap policy before using this helper: cleanup additionally
+reads bucket versioning and lists multipart uploads on the exact artifact bucket.
+Object delete/abort permissions remain limited to `runs/*`; no bucket deletion or
+object-version deletion permission is added.
+
+Cleanup follows this order:
+
+1. Resolve the exact bucket, run namespace and CloudFormation service role from
+   the specified bootstrap. Validate the requested root stack's name, account,
+   region, managed-by/repository/run-identity tags and attached role. A nested
+   stack is never treated as a cleanup root.
+2. Request deletion by the verified stack **ARN**, reusing its attached service
+   role. CloudFormation handles dependency ordering: EC2/RDS dependents before
+   the network child, and the database before its secret. Creating/rolling-back
+   stacks may be deleted directly or observed until a busy operation settles.
+   Existing deletion is observed; `DELETE_FAILED` is retried with at most three
+   accepted delete requests. No force deletion, retained-resource flags, or
+   ad-hoc EC2/RDS/IAM deletion is used.
+3. Confirm deletion/absence before any S3 cleanup. Generic AWS/authentication
+   errors are not interpreted as absence. Exact missing-stack responses are
+   confirmed twice; after observing a stack ARN, recheck the name to detect a
+   replacement. A still-present or unverified stack keeps its temporary artifacts.
+4. Abort incomplete multipart uploads and delete completed objects only beneath
+   `runs/<RunIdentity>/`. Re-list the first page after each mutation rather than
+   following continuation markers that can skip shifted entries. Validate every
+   returned key against the exact prefix; preserve other attempts/runs. Large
+   batch requests use temporary JSON parameter files to avoid OS argument limits.
+5. Verify that neither objects nor multipart uploads remain. The bootstrap's
+   retained, unversioned bucket stays installed. An already absent bucket/prefix
+   is clean; an enabled/suspended versioning configuration is reported as
+   unsupported rather than declaring delete markers to be erased artifacts.
+
+All polling, retries and CLI requests share a total deadline of at most 1,800
+seconds. Stop signals record an interrupted outcome where possible; accepted
+CloudFormation deletion continues server-side even if the client exits. A second
+cleanup invocation can resume it. A duplicate cleanup can observe another
+invocation's completed stack/object/upload deletion safely. Always use a new run
+attempt for new provisioning; cleanup does not provide a lock against a producer
+reusing the same identity while deletion is in progress.
+
+`cleanup-outcome.json` includes `stackDeleted`, `artifactsDeleted`, the observed
+stack ARN/status, acknowledged deletion counters, issue codes and `exitCode`.
+Exit **0** requires both stack and artifacts confirmed gone with no recorded
+issues. Exit **1** records timeout, interruption, ownership/configuration mismatch,
+AWS rejection, partial object deletion or an unconfirmed resource/artifact state.
+Known AWS error codes are retained; raw stderr and credentials are not published.
+
+For a failed cleanup, inspect the outcome and CloudFormation stack events, resolve
+the reported cause, and rerun the **same plan/identity** with a new outcome path.
+If stack deletion fails/times out, its S3 inputs/evidence are retained. If only S3
+cleanup fails, the outcome distinguishes the deleted stack from remaining data.
+The one-day S3 lifecycle remains a fallback for temporary objects/incomplete
+uploads; independent abandoned-stack expiry is implemented in Task 4.7.
+
+Task 5.3 wires this command into final workflow cleanup after success, failure or
+cancellation, preserving cleanup outcomes even when another job failed. Keep the
+bootstrap service/control roles installed until all run cleanup has completed.
+
 ## Verification
 
 ```sh
@@ -179,6 +253,14 @@ preflight, missing expiry, private metadata separation, SSM payloads, scenario
 failure stop/retrieval, unavailable evidence, inherited credentials/options,
 bounded extraction and changed downloads. Existing infrastructure policy tests
 also verify that node object/secret grants fit the runtime boundary.
+
+Cleanup/transport checks additionally cover absent and partially created stacks,
+busy operations, failed/repeated/concurrent deletion, same-name replacement,
+ownership/role/account isolation, authentication failures, bounded timeouts,
+multi-page object/upload deletion, partial failures and retry, interrupted cleanup,
+wrong-prefix responses, versioning drift, outcome-file behavior and large batches.
+These use a stateful AWS substitute; the complete local rehearsal is Task 5.5,
+followed by real AWS lifecycle/authorization validation in Task 6.1.
 
 Opt-in Linux verification uses built application/harness artifacts and a disposable
 PostgreSQL 17 container. It substitutes a local object/secret transport, but runs

@@ -160,6 +160,15 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual("Retain", TEMPLATE["Resources"]["GitHubOidc"]["DeletionPolicy"])
         self.assertEqual("CreateOidcProvider", TEMPLATE["Resources"]["GitHubOidc"]["Condition"])
 
+    def test_cleanup_metadata_reads_are_limited_to_the_bootstrap_bucket(self):
+        for action in ("s3:GetBucketVersioning", "s3:ListBucketMultipartUploads"):
+            grants = allowed("GitHubOrchestrator", action)
+            self.assertEqual(len(grants), 1)
+            self.assertEqual(grants[0]["Resource"], "arn:aws:s3:::" + "b" * 63)
+            self.assertFalse(allowed("GitHubDiagnostics", action))
+        self.assertFalse(allowed("GitHubOrchestrator", "s3:DeleteBucket"))
+        self.assertFalse(allowed("GitHubOrchestrator", "s3:DeleteObjectVersion"))
+
     def test_policy_documents_fit_iam_limits_at_maximum_parameter_lengths(self):
         for name, resource in TEMPLATE["Resources"].items():
             if resource["Type"] == "AWS::IAM::Role":
