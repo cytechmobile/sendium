@@ -199,6 +199,24 @@ class SmppAdmissionClientTest {
     }
 
     @Test
+    void closingAfterWindowFreezePreservesPendingAdmissionAndDoesNotInventTransportErrors() throws Exception {
+        RunConfig config = config(false, 3000, 1);
+        MessageLedger ledger = ledger(config);
+        CountDownLatch received = new CountDownLatch(1);
+        try (Gateway gateway = new Gateway((server, request) -> { received.countDown(); return null; });
+                SmppAdmissionClient client = new SmppAdmissionClient(config, settings(gateway.port), ledger)) {
+            client.connect();
+            var submission = client.submit(true).orElseThrow();
+            assertTrue(received.await(3, TimeUnit.SECONDS));
+            ledger.freeze(); client.close();
+            assertEquals(PENDING, submission.completion().get(3, TimeUnit.SECONDS));
+            assertEquals(1, ledger.snapshot().pendingAdmission());
+            assertEquals(0, ledger.snapshot().failed());
+            assertEquals(0, client.problems().get(SmppAdmissionClient.Problem.TRANSPORT_FAILURE));
+        }
+    }
+
+    @Test
     void closeResolvesPendingAdmissionAndReleasesNetworkResources() throws Exception {
         RunConfig config = config(false, 3000, 1);
         MessageLedger ledger = ledger(config);

@@ -52,7 +52,7 @@ public final class MessageLedger {
     private MeasurementTimeline timeline;
     private long sequence, violations, outstanding, peakOutstanding, peakTracked, retiredEvictions;
     private long eventsBeyondRetention;
-    private boolean frozen;
+    private volatile boolean frozen;
 
     public MessageLedger(RunConfig config, String runToken, LongSupplier clock, long retentionNanos) {
         if (!runToken.matches("[A-Za-z0-9-]{1,32}") || retentionNanos < 0) {
@@ -375,7 +375,7 @@ public final class MessageLedger {
     public synchronized long eventsBeyondRetention() { return eventsBeyondRetention; }
     public synchronized long outstandingRequests() { return outstanding; }
     public synchronized long retentionNanos() { return retentionNanos; }
-    public synchronized boolean isFrozen() { return frozen; }
+    public boolean isFrozen() { return frozen; }
     public synchronized void freeze() { prune(); if (timeline != null) { timeline.finish(clock.getAsLong()); } frozen = true; }
     private void ensureOpen() { if (frozen) { throw new IllegalStateException("Accounting is finalized"); } }
 }

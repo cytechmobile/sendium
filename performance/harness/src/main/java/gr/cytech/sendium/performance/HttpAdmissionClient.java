@@ -54,8 +54,10 @@ public final class HttpAdmissionClient implements AutoCloseable {
             HttpRequest request = HttpRequest.newBuilder(uri(token))
                     .timeout(Duration.ofMillis(config.admissionTimeoutMillis())).GET().build();
             ledger.markDispatched(token);
-            var future = client.sendAsync(request, HttpResponse.BodyHandlers.limiting(
+            var transport = client.sendAsync(request, HttpResponse.BodyHandlers.limiting(
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8), 4096));
+            var future = transport.copy().orTimeout(config.admissionTimeoutMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            future.whenComplete((response, error) -> { if (error != null) { transport.cancel(true); } });
             pending.put(token, future);
             var completion = future.handle((response, error) -> {
                 try {
@@ -66,7 +68,7 @@ public final class HttpAdmissionClient implements AutoCloseable {
                         while ((cause instanceof java.util.concurrent.CompletionException
                                 || cause instanceof java.util.concurrent.ExecutionException)
                                 && cause.getCause() != null) { cause = cause.getCause(); }
-                        outcome = cause instanceof HttpTimeoutException ? TIMED_OUT : FAILED;
+                        outcome = cause instanceof HttpTimeoutException || cause instanceof java.util.concurrent.TimeoutException ? TIMED_OUT : FAILED;
                         if (outcome == FAILED) { problem(Problem.TRANSPORT_FAILURE); }
                     } else if (response.statusCode() == 202 && canonicalUuid(response.body().strip())) {
                         outcome = ACCEPTED;
@@ -85,7 +87,10 @@ public final class HttpAdmissionClient implements AutoCloseable {
                         outcome = FAILED;
                         problem(Problem.UNEXPECTED_STATUS);
                     }
-                    ledger.admission(token, outcome, gatewayId);
+                    synchronized (ledger) {
+                        if (ledger.isFrozen()) { return PENDING; }
+                        ledger.admission(token, outcome, gatewayId);
+                    }
                     return outcome;
                 } finally {
                     pending.remove(token);
@@ -118,7 +123,7 @@ public final class HttpAdmissionClient implements AutoCloseable {
         catch (IllegalArgumentException exception) { return false; }
     }
 
-    private void problem(Problem problem) { problems.get(problem).incrementAndGet(); }
+    private void problem(Problem problem) { if (!ledger.isFrozen()) { problems.get(problem).incrementAndGet(); } }
 
     public Map<Problem, Long> problems() {
         Map<Problem, Long> result = new EnumMap<>(Problem.class);

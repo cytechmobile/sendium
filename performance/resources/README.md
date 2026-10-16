@@ -3,8 +3,8 @@
 These standard-library Python helpers collect evidence without giving the load
 JVM AWS credentials. `sample_process.py` runs on each private Linux EC2 instance;
 `collect_cpu_credits.py` runs in protected workflow orchestration after measurement.
-Task 3.5 wires orchestration and Task 4.5 deploys/controls the agents through
-Systems Manager. No public monitoring endpoint is required.
+The harness CLI wires local orchestration; Task 4.5 deploys/controls remote agents
+through Systems Manager. No public monitoring endpoint is required.
 
 ## Linux process and host sampler
 
@@ -26,6 +26,8 @@ to stdout. The explicit sample budget includes baseline and final samples;
 settings exceeding it fail rather than collecting an unbounded history. Defaults
 are one-second sampling and 4096 samples per source. Run directories own generated
 files; do not commit them.
+SIGTERM requests a graceful stop after the next complete interval, allowing the
+runner to retain a final CPU observation rather than truncate its window.
 
 | Field | Meaning |
 |-------|---------|

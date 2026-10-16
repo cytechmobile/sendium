@@ -112,6 +112,65 @@ class PackagedSendiumIT {
 
     private interface Submission { CompletableFuture<MessageLedger.Admission> send(); }
 
+    @ParameterizedTest(name = "packaged CLI: {0}, delivery reports={1}")
+    @CsvSource({"http,true", "http,false", "smpp,true", "smpp,false"})
+    void executableCommandRunsAllPhasesAndPublishesReports(String mode, boolean dlr) throws Exception {
+        String identity = "cli-" + mode + "-" + UUID.randomUUID().toString().substring(0, 8);
+        String databaseName = "benchmark_" + UUID.randomUUID().toString().replace("-", "");
+        try (var connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()); var statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE " + databaseName);
+        }
+        String jdbc = "jdbc:postgresql://" + POSTGRES.getHost() + ":" + POSTGRES.getMappedPort(5432) + "/" + databaseName;
+        int[] ports = freePorts();
+        var config = new RunConfig(1, mode, 2, 100, 1, 2, 10, dlr, 10, 500, 5000, 10, 100);
+        var deployment = new BenchmarkDeployment(identity, "cli-integration", "127.0.0.1", "127.0.0.1", ports[0], ports[1], ports[2], ports[3],
+                10, 10, 10, 100, 5000, 10000, 5000, 1, 2, 20,
+                new BenchmarkDeployment.Database(jdbc, POSTGRES.getUsername(), POSTGRES.getPassword(), 0, 10, 5000, 300));
+        Path run = outputs.resolve(identity);
+        var generator = new BenchmarkConfigGenerator(); generator.write(run, generator.generate(config, deployment));
+        var appContext = MAPPER.createObjectNode(); appContext.putArray("jvmArguments"); appContext.putObject("connections").put("outgoingTransceivers", 1); appContext.put("dlrStorage", "postgresql");
+        var infrastructure = MAPPER.createObjectNode(); infrastructure.put("preset", "cli-integration").put("region", "local");
+        infrastructure.putObject("sendium"); infrastructure.putObject("harness"); infrastructure.putObject("database").put("engine", "postgresql");
+        var context = new ResultReport.Context(new ResultReport.Provenance("integration-fixture", "a".repeat(40), "b".repeat(40), null, identity, List.of()),
+                appContext, infrastructure, List.of("lifecycle.jsonl"));
+        Path execution = run.resolve("execution.json");
+        MAPPER.writeValue(execution.toFile(), new ExecutionSettings(1, 30, 30, 256, context, null, null));
+        Path output = run.resolve("report");
+        Path java = Path.of(System.getProperty("java.home"), "bin", System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java");
+        Path harnessJar = Path.of("target", "sendium-performance-harness-0.5.2-SNAPSHOT.jar").toAbsolutePath();
+        Process harness = new ProcessBuilder(java.toString(), "-jar", harnessJar.toString(), "run", run.resolve("harness").toString(), execution.toString(), output.toString())
+                .redirectErrorStream(true).redirectOutput(run.resolve("harness.log").toFile()).start();
+        Process application = null;
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            boolean listening = false;
+            while (harness.isAlive() && System.nanoTime() < deadline) {
+                if (Files.exists(output.resolve("state.json"))) {
+                    listening = MAPPER.readTree(output.resolve("state.json").toFile()).path("listenersReady").asBoolean();
+                    if (listening) { break; }
+                }
+                Thread.sleep(20);
+            }
+            assertTrue(listening, "CLI did not become ready; inspect " + run.resolve("harness.log"));
+            application = startApplication(run.resolve("sendium"), run.resolve("sendium.log"));
+            assertTrue(harness.waitFor(45, TimeUnit.SECONDS), "CLI did not finish");
+            assertEquals(0, harness.exitValue(), "CLI failed; inspect " + output.resolve("results.json"));
+            var report = MAPPER.readTree(output.resolve("results.json").toFile());
+            assertNotEquals("failed", report.at("/validity/status").asText());
+            assertEquals(4, report.at("/overall/counts/scheduled").asLong());
+            assertEquals(4, report.at("/overall/counts/accepted").asLong());
+            assertEquals(4, report.at("/overall/counts/providerResponses").asLong());
+            assertEquals(dlr ? 4 : 0, report.at("/overall/counts/receiptsForwarded").asLong());
+            assertEquals(0, report.at("/drain/unfinishedAccepted").asLong());
+            assertEquals(2, report.at("/measurementMetadata/generatorPhases").size());
+            assertEquals("100", report.at("/configuration/application/effectiveConfiguration/workerProperties/outSms.instance.provider.tps").asText());
+            String providerPassword = MAPPER.readTree(run.resolve("harness/runtime-settings.json").toFile()).at("/provider/password").asText();
+            assertFalse(Files.readString(output.resolve("results.json")).contains(providerPassword));
+            assertTrue(Files.isRegularFile(output.resolve("summary.md")));
+            try (HttpClient http = HttpClient.newHttpClient()) { verifyDatabase(http, URI.create("http://127.0.0.1:" + ports[0]), jdbc, dlr, 6); }
+        } finally { stopApplication(harness); if (application != null) { stopApplication(application); } }
+    }
+
     private static void verifyTraffic(RunConfig config, MessageLedger ledger, SmppProvider provider,
             Submission warmup, Submission measurement) throws Exception {
         // Small functional cohorts exercise the same adapters; fixed-rate phases are Task 3.1.
@@ -169,17 +228,21 @@ class PackagedSendiumIT {
     }
 
     private static void verifyDatabase(HttpClient http, URI base, String jdbc, boolean dlr) throws Exception {
+        verifyDatabase(http, base, jdbc, dlr, 5);
+    }
+
+    private static void verifyDatabase(HttpClient http, URI base, String jdbc, boolean dlr, int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         String metrics;
         do {
             metrics = get(http, base.resolve("/q/metrics")).body();
-            if (metricCount(metrics, "record_provider_accepted") == (dlr ? 5 : 0)
-                    && metricCount(metrics, "complete_delivery") >= (dlr ? 5 : 0)) { break; }
+            if (metricCount(metrics, "record_provider_accepted") == (dlr ? expected : 0)
+                    && metricCount(metrics, "complete_delivery") >= (dlr ? expected : 0)) { break; }
             Thread.sleep(50);
         } while (System.nanoTime() < deadline);
-        assertEquals(dlr ? 5 : 0, metricCount(metrics, "record_provider_accepted"));
-        assertEquals(dlr ? 5 : 0, metricCount(metrics, "resolve"));
-        assertTrue(metricCount(metrics, "complete_delivery") >= (dlr ? 5 : 0));
+        assertEquals(dlr ? expected : 0, metricCount(metrics, "record_provider_accepted"));
+        assertEquals(dlr ? expected : 0, metricCount(metrics, "resolve"));
+        assertTrue(metricCount(metrics, "complete_delivery") >= (dlr ? expected : 0));
         assertFalse(metrics.lines().anyMatch(line -> line.startsWith("sendium_dlr_storage_operation_seconds_count")
                 && line.contains("outcome=\"error\"") && Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1)) > 0));
         try (var connection = DriverManager.getConnection(jdbc, POSTGRES.getUsername(), POSTGRES.getPassword());

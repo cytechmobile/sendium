@@ -70,6 +70,16 @@ class SamplingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sampler.collect(7, 100, 1, 2, io.StringIO())
 
+    def test_stop_request_keeps_a_final_complete_interval(self):
+        values = [0]
+        output = io.StringIO()
+        with patch.object(sampler.time, "monotonic", lambda: values[0]), \
+                patch.object(sampler.time, "sleep", lambda delay: values.__setitem__(0, values[0] + delay)), \
+                patch.object(sampler.os, "sysconf", return_value=100, create=True), \
+                patch.object(sampler, "read_state", side_effect=[self.state(), self.state(ticks=200, host=1200, busy=600)]):
+            self.assertEqual(2, sampler.collect(7, 100, 1, 101, output, lambda: values[0] >= 1))
+        self.assertIsNotNone(json.loads(output.getvalue().splitlines()[-1])["cpuPercent"])
+
 
 class FakeAws:
     def __init__(self, missing=False, fail=False):

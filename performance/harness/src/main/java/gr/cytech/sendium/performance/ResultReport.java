@@ -151,6 +151,42 @@ public final class ResultReport {
         return value;
     }
 
+    /** Offline resource enrichment: immutable workload measurements/reasons are never recomputed. */
+    public Report finalizeResources(ObjectNode initial, ResourceEvidence evidence) throws Exception {
+        if (initial.path("schemaVersion").asInt() != 1
+                || initial.at("/measurementMetadata/resourceFinalizationVersion").asInt() != 1) {
+            throw new IllegalArgumentException("Report does not support resource finalization");
+        }
+        ObjectNode result = initial.deepCopy();
+        var metadata = result.withObject("/measurementMetadata");
+        long duration = metadata.path("observedDurationNanos").asLong();
+        ResourceEvidence.Window window = metadata.path("measurementStartUtc").isTextual()
+                ? new ResourceEvidence.Window(java.time.Instant.parse(metadata.path("measurementStartUtc").asText()),
+                    java.time.Instant.parse(metadata.path("measurementStartUtc").asText()).plusNanos(duration)) : null;
+        var configuration = result.path("configuration");
+        Context context = new Context(mapper.treeToValue(result.path("provenance"), Provenance.class),
+                (ObjectNode) configuration.path("application"), (ObjectNode) configuration.path("infrastructure"),
+                mapper.convertValue(result.path("diagnostics"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() { }));
+        List<MeasurementTimeline.EventInterval> intervals = new java.util.ArrayList<>();
+        for (var interval : result.path("eventIntervals")) {
+            intervals.add(new MeasurementTimeline.EventInterval(interval.path("phase").asText(),
+                    Math.round(interval.path("startOffsetSeconds").asDouble() * 1_000_000_000),
+                    Math.round(interval.path("durationSeconds").asDouble() * 1_000_000_000),
+                    interval.path("providerArrivals").asLong(), interval.path("providerResponses").asLong(),
+                    interval.path("receiptsGenerated").asLong(), interval.path("receiptsForwarded").asLong(),
+                    mapper.treeToValue(interval.path("outstanding"), MeasurementTimeline.Backlog.class)));
+        }
+        List<RunValidity.Reason> retained = new java.util.ArrayList<>();
+        for (var reason : result.path("validity").path("reasons")) {
+            if (!reason.path("scope").asText().equals("resources")) { retained.add(mapper.treeToValue(reason, RunValidity.Reason.class)); }
+        }
+        retained.addAll(RunValidity.resourceReasons(context, duration, evidence, window));
+        result.set("resources", evidence.jsonForIntervals(mapper, window, intervals));
+        result.set("validity", mapper.valueToTree(RunValidity.classify(retained)));
+        metadata.put("resourcesFinalized", true);
+        return new Report(result, markdown(result));
+    }
+
     public void write(Path directory, Report report) throws Exception {
         Files.createDirectories(directory);
         // A publication mistake must not silently replace an earlier run's results.
@@ -176,7 +212,7 @@ public final class ResultReport {
     private static String number(com.fasterxml.jackson.databind.JsonNode node) { return node.isNull() || node.isMissingNode() ? "n/a" : String.format(Locale.ROOT, "%.3f", node.asDouble()); }
     private static String text(String text) { return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "\\|").replace("\r", " ").replace("\n", " ").replace("`", "'"); }
 
-    private static String markdown(ObjectNode root) {
+    static String markdown(ObjectNode root) {
         StringBuilder out = new StringBuilder("# Sendium performance results\n\n");
         var provenance = root.path("provenance");
         out.append("**Status:** ").append(root.path("validity").path("status").asText()).append("\n\n")
@@ -230,7 +266,8 @@ public final class ResultReport {
         out.append("\n## Drain\n\nDuration: ").append(number(root.path("drain").path("durationSeconds"))).append(" seconds; timeout: ")
                 .append(root.path("drain").path("timeoutReached").asBoolean()).append("; unfinished accepted: ")
                 .append(root.path("drain").path("unfinishedAccepted").asLong()).append("; unfinished across all phases at finalization: ")
-                .append(root.path("drain").path("unfinishedAllPhases").asLong()).append(".\n\n")
+                .append(root.path("drain").path("unfinishedAllPhases").asLong()).append("; pending receipt acknowledgements: ")
+                .append(root.path("drain").has("pendingReceiptAcknowledgements") ? root.path("drain").path("pendingReceiptAcknowledgements").asLong() : "n/a").append(".\n\n")
                 .append("## Resources\n\nProcess CPU: 100% is one logical core. Host CPU: 100% is aggregate host capacity.\n\n")
                 .append("| Source | Process CPU avg % | Process CPU max % | Host CPU avg % | Peak RSS MiB | Peak host used MiB | CPU coverage s |\n|---|---:|---:|---:|---:|---:|---:|\n");
         for (String source : List.of("sendium", "harness")) {

@@ -10,11 +10,13 @@ import java.util.function.Function;
 /** Correctness and evidence classification, never a throughput or CPU-utilization performance gate. */
 public final class RunValidity {
     public enum Severity { FAILED, INCONCLUSIVE }
-    public record Reason(String code, String message, Severity severity) {
+    public record Reason(String code, String message, Severity severity, String scope) {
+        public Reason(String code, String message, Severity severity) { this(code, message, severity, "workload"); }
         public Reason {
             if (code == null || code.isBlank() || message == null || message.isBlank() || severity == null) {
                 throw new IllegalArgumentException("Invalid validity reason");
             }
+            if (!List.of("workload", "resources").contains(scope)) { throw new IllegalArgumentException("Invalid reason scope"); }
         }
     }
     public record Classification(String status, List<Reason> reasons, int exitCode) { }
@@ -58,11 +60,18 @@ public final class RunValidity {
             inconclusive(reasons, "LATENCY_OVERFLOW", "Some latency samples exceeded the histogram range.");
         }
         if (ledger.eventsBeyondRetention() > 0) { inconclusive(reasons, "LIMITED_HISTORY", "Events arrived beyond retained correlation history."); }
+        reasons.addAll(resourceReasons(context, timeline == null ? 0 : timeline.durationNanos(), evidence, window));
+        return classify(reasons);
+    }
+
+    public static List<Reason> resourceReasons(ResultReport.Context context, long observedNanos,
+            ResourceEvidence evidence, ResourceEvidence.Window window) {
+        List<Reason> reasons = new ArrayList<>();
         for (String issue : evidence.collectionIssues()) { inconclusive(reasons, "RESOURCE_COLLECTION_ISSUE", issue); }
         if (window == null) {
             inconclusive(reasons, "RESOURCE_WINDOW_MISSING", "The UTC measurement resource window is unavailable.");
         } else {
-            if (timeline != null && window.nanos() != timeline.durationNanos()) {
+            if (window.nanos() != observedNanos) {
                 failed(reasons, "RESOURCE_WINDOW_MISMATCH", "Resource and workload observation durations disagree.");
             }
             checkSamples("sendium", evidence.sendium(), window, context, reasons);
@@ -71,6 +80,10 @@ public final class RunValidity {
                 checkCredits(evidence, context, window, reasons);
             }
         }
+        return reasons.stream().map(reason -> new Reason(reason.code(), reason.message(), reason.severity(), "resources")).toList();
+    }
+
+    public static Classification classify(List<Reason> reasons) {
         List<Reason> unique = reasons.stream().distinct().toList();
         boolean failed = unique.stream().anyMatch(reason -> reason.severity() == Severity.FAILED);
         return new Classification(failed ? "failed" : unique.isEmpty() ? "valid" : "inconclusive", unique, failed ? 1 : 0);

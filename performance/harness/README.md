@@ -28,9 +28,9 @@ before reporting. `close` releases resources, including on setup failure or
 interruption. An incomplete bounded drain is reported rather than treated as
 a performance failure.
 
-Task 1.2 supplies configuration validation, packaging, and lifecycle control.
-It does not yet execute a real protocol scenario or produce benchmark results;
-protocol adapters and reporting are subsequent tracked tasks.
+The executable also provides `run` and offline `finalize-report` commands.
+See [EXECUTION.md](EXECUTION.md) for manifests, startup order, sampling, outcomes,
+and local end-to-end verification.
 
 ## Bounded accounting and latency collection
 
@@ -55,8 +55,8 @@ Timeout/failed admission stays unresolved until finalization, even when observed
 at the provider; no acknowledgement is inferred. Snapshots distinguish accepted
 provider/receipt completions from total observed events. `freeze()` prevents later
 callbacks from changing published accounting; stop/quiesce adapters before it.
-Minute aggregation and event-time throughput publication are delivered in Task
-3.2; this ledger currently supplies overall counters and distributions.
+The ledger supplies overall and minute-cohort counters/distributions, plus
+separate event-time throughput and backlog windows.
 
 `LatencyHistogram` uses HdrHistogram with three significant digits, microsecond
 resolution, a fixed one-hour maximum, and millisecond output. Overflow is counted,
@@ -96,8 +96,8 @@ Use `start()`, `awaitBound(timeout)`, and `snapshot()` for lifecycle integration
 Drain must keep the provider running and include `snapshot().pending()` so
 outstanding receipt acknowledgements are not lost. Quiesce/close it before
 freezing the ledger. `close()` cancels delayed work and releases executor and
-network resources idempotently. The simulator is currently a reusable component;
-full scenario/CLI wiring follows with the ingress adapters.
+network resources idempotently. `BenchmarkRunner` wires the simulator and ingress
+adapters into the executable lifecycle.
 
 Cloudhopper uses the same managed version and JitPack repository as
 `sendium-core`. Deployment credentials are redacted from the settings' string
@@ -162,8 +162,8 @@ bounded to 4096 characters and reject duplicate fields. `close()` stops receptio
 and workers before freezing accounting.
 
 These adapters are tested over real local HTTP sockets against a controlled API
-endpoint. Packaged Sendium/PostgreSQL integration remains Task 2.5; workload
-scheduling and workflow execution remain later tracked tasks.
+endpoint and against packaged Sendium/PostgreSQL. Workload scheduling is integrated;
+AWS deployment/workflow execution remains Phase 4/5 work.
 
 ## SMPP submission and forwarded receipts
 
@@ -208,7 +208,7 @@ releases network resources, and finalizes buffered receipts once requests stop.
 Close adapters before freezing the ledger.
 
 Tests use real SMPP sockets against the provider simulator and controlled gateway
-behaviors. Actual Sendium/PostgreSQL scenario verification remains Task 2.5.
+behaviors, and the packaged CLI is verified against actual Sendium/PostgreSQL.
 
 ## Generate isolated runtime configuration
 
@@ -241,6 +241,7 @@ Generated files:
   harness/
     run-config.json                # Fully resolved workload
     runtime-settings.json          # Private provider/ingress credentials and endpoints
+    effective-configuration.json    # Sanitized settings consumed by the runner
   public/
     effective-configuration.json   # Sanitized settings for later result publication
 ```
@@ -298,18 +299,20 @@ ports. The tests consume generated configuration directly, start the provider
 and appropriate ingress adapters, require readiness to identify PostgreSQL, and
 verify the upstream bind before submitting traffic.
 
-Each case sends two warm-up messages and three measurement messages. Assertions
-verify admission, provider completion, receipt forwarding when requested, zero
+Adapter cases send two warm-up messages and three measurement messages. Packaged
+CLI cases exercise fixed-rate phases with two warm-up and four measurement
+messages. Assertions verify admission, provider completion, receipt forwarding when requested, zero
 accounting violations/harness diagnostics, and exclusion of warm-up messages
 from measurement counts. Storage metrics must show provider acceptance,
 resolution, and successful downstream completion for all five DLR-enabled
-messages, with no storage errors and no remaining message/correlation rows.
+adapter messages (six for CLI cases), with no storage errors and no remaining
+message/correlation rows.
 DLR-disabled cases keep PostgreSQL available but require no tracking writes or
 generated/forwarded receipts.
 
-These are bounded functional checks, not fixed-rate performance runs or
-throughput gates. Lifecycle scheduling, interval reports, and resource sampling
-remain Phase 3 work. The integration runner stops application processes in
+These are bounded functional checks with short fixed-rate phases, not capacity
+findings or throughput gates. AWS execution and remote resource collection
+remain Phase 4/6 work. The integration runner stops application processes in
 `finally` blocks and stops the disposable database after the suite.
 
 Generated runtime inputs and local diagnostic logs/accounting snapshots remain
@@ -428,9 +431,9 @@ python -m pip install -r performance/contracts/requirements-dev.txt
 python performance/contracts/validate.py --results-directory performance/harness/target/report-fixtures
 ```
 
-The current CLI exposes validation/config generation; a dedicated pending Task
-3.5 wires readiness, adapters, phases, collectors, reporting, and exit status
-into a runnable benchmark command before AWS deployment integration.
+The runnable CLI coordinates readiness, adapters, phases, collectors, reporting,
+and exit status. [EXECUTION.md](EXECUTION.md) documents `run` and offline resource
+finalization before AWS deployment integration.
 
 ## Accounting and boundary verification
 
