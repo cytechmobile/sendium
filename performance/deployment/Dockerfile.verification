@@ -1,0 +1,4 @@
+FROM container-registry.oracle.com/graalvm/jdk:25
+RUN microdnf install -y python3 && microdnf clean all
+ENV PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python3", "/workspace/performance/deployment/verify_nodes.py"]
