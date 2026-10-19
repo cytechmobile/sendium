@@ -86,7 +86,7 @@ class DeploymentTests(unittest.TestCase):
                 "Outputs": [{"OutputKey": key, "OutputValue": value} for key, value in result.items()]}
         instances = [{"InstanceId": result[node + "InstanceId"], "State": {"Name": "running"},
                       "PrivateIpAddress": result[node + "PrivateAddress"], "SubnetId": result["PrimarySubnetId"],
-                      "InstanceType": "t4g.small", "Architecture": "arm64", "Tags": tag_list,
+                      "InstanceType": "t4g.small", "Architecture": "arm64", "Tags": tag_list + [{"Key": "sendium:role", "Value": node.lower()}],
                       "RootDeviceName": "/dev/xvda", "BlockDeviceMappings": [{"DeviceName": "/dev/xvda",
                            "Ebs": {"DeleteOnTermination": True, "VolumeId": "vol-12345678"}}],
                       "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 1}} for node in ("Sendium", "Harness")]
@@ -103,6 +103,17 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(inspected["resolvedDatabase"]["EngineVersion"], "17.6")
         self.assertEqual(len(actual), 2)
         self.assertGreater(timeout, 840)
+        source_tag = next(tag for tag in instances[0]["Tags"] if tag["Key"] == "sendium:role")
+        source_tag["Value"] = "harness"
+        with patch.object(deploy, "verify_expiry"), patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
+            with self.assertRaisesRegex(deploy.DeploymentError, "ownership/source"):
+                deploy.inspect_run(aws, state)
+        source_tag["Value"] = "sendium"
+        instances[0]["InstanceType"] = "m7i.large"
+        with patch.object(deploy, "verify_expiry"), patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
+            with self.assertRaisesRegex(deploy.DeploymentError, "Requested instance"):
+                deploy.inspect_run(aws, state)
+        instances[0]["InstanceType"] = "t4g.small"
         instances[0]["PublicIpAddress"] = "203.0.113.1"
         with patch.object(deploy, "verify_expiry"), patch.object(deploy, "stack", side_effect=[boot, root]), patch.object(aws, "call", side_effect=lambda service, operation, **_: responses[operation]):
             with self.assertRaises(deploy.DeploymentError):

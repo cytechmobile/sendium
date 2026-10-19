@@ -26,6 +26,12 @@ class DeploymentError(RuntimeError):
     pass
 
 
+def check_poll_error(error):
+    if error.code not in {"InvocationDoesNotExist", "NoSuchKey", "404", "NotFound", "Throttling", "ThrottlingException",
+                          "TooManyRequestsException", "RequestLimitExceeded", "SlowDown", "RequestTimeout"}:
+        raise DeploymentError("Control-plane polling failed") from None
+
+
 def require(condition, message):
     if not condition:
         raise DeploymentError(message)
@@ -183,7 +189,9 @@ def inspect_run(aws, staged):
         require(instance["PrivateIpAddress"] == result[node + "PrivateAddress"] and instance["SubnetId"] == result["PrimarySubnetId"],
                 "Instance placement mismatch")
         instance_tags = {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
-        require(all(instance_tags.get(key) == value for key, value in expected.items()), "Instance ownership mismatch")
+        require(all(instance_tags.get(key) == value for key, value in expected.items())
+                and instance_tags.get("sendium:role") == node.lower(), "Instance ownership/source mismatch")
+        require(instance["InstanceType"] == staged["preset"]["aws"]["instanceDefaults"][node.lower()], "Requested instance type mismatch")
         require(types[instance["InstanceType"]]["MemoryInfo"]["SizeInMiB"] >= staged["preset"]["aws"]["minimumMemoryMiB"][node.lower()],
                 "Insufficient instance memory")
         burstable = types[instance["InstanceType"]]["BurstablePerformanceSupported"]
@@ -303,7 +311,8 @@ class Controller:
             try:
                 invocation = self.aws.call("ssm", "get-command-invocation", command_id=command_id,
                                            instance_id=self.result[source.title() + "InstanceId"])
-            except AwsError:
+            except AwsError as error:
+                check_poll_error(error)
                 self.sleep(2)
                 continue  # SSM invocation propagation can lag SendCommand.
             status = invocation["Status"]
@@ -316,7 +325,11 @@ class Controller:
 
     def node_status(self, source):
         path = self.directory / (source + "-status.json")
-        self.aws.get(self.staged["bucket"], "runs/" + self.staged["runIdentity"] + "/outputs/" + source + "/node-status.json", path)
+        key = "runs/" + self.staged["runIdentity"] + "/outputs/" + source + "/node-status.json"
+        listing = self.aws.call("s3api", "list-objects-v2", bucket=self.staged["bucket"], prefix=key, max_keys=1)
+        if not any(item.get("Key") == key for item in listing.get("Contents", [])):
+            raise AwsError("Node status not published yet", code="NoSuchKey")
+        self.aws.get(self.staged["bucket"], key, path)
         value = read(path)
         require(value["runIdentity"] == self.staged["runIdentity"] and value["source"] == source, "Node status identity mismatch")
         return value
@@ -330,8 +343,8 @@ class Controller:
                     return status
                 if status["phase"] in ("failed", "finished"):
                     raise DeploymentError("Node stopped before requested phase")
-            except AwsError:
-                pass
+            except AwsError as error:
+                check_poll_error(error)
             self.sleep(2)
         raise DeploymentError("Node phase deadline exceeded")
 

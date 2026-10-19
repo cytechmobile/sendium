@@ -54,6 +54,7 @@ def diagnostics(aws, credits, plan, request, directory):
                 and document["provenance"]["applicationCommit"] == request["provenance"]["applicationCommit"]
                 and document["provenance"]["harnessRevision"] == request["provenance"]["harnessRevision"], "Diagnostic report identity mismatch")
         validate_results(document)
+        require(document["configuration"]["infrastructure"]["region"] == plan["region"], "Diagnostic report region mismatch")
         metadata = document["measurementMetadata"]
         if not metadata.get("measurementStartUtc") or metadata.get("observedDurationNanos", 0) <= 0:
             result["issues"].append("MEASUREMENT_WINDOW_UNAVAILABLE")
@@ -66,10 +67,13 @@ def diagnostics(aws, credits, plan, request, directory):
         require(len(set(instances.values())) == 2, "Distinct instance IDs required")
         described = aws.call("ec2", "describe-instances", instance_ids=list(instances.values()))
         actual = {item["InstanceId"]: item for reservation in described["Reservations"] for item in reservation["Instances"]}
-        for identity in instances.values():
+        for source, identity in instances.items():
             tags = {item["Key"]: item["Value"] for item in actual[identity]["Tags"]}
             require(tags.get("sendium:managed-by") == "performance-tests" and tags.get("sendium:repository") == request["repository"]
-                    and tags.get("sendium:run-identity") == request["runIdentity"], "Diagnostic instance ownership mismatch")
+                    and tags.get("sendium:run-identity") == request["runIdentity"] and tags.get("sendium:role") == source,
+                    "Diagnostic instance ownership/source mismatch")
+            require(actual[identity]["InstanceType"] == document["configuration"]["infrastructure"][source]["instanceType"],
+                    "Diagnostic instance type mismatch")
         evidence = collect_cpu_credits.collect(credits, instances, start, end)
         prepare.write(Path(directory) / "cpu-credits.json", evidence)
     except (Exception, KeyboardInterrupt):

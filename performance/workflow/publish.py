@@ -18,6 +18,10 @@ from semantics import validate_results
 
 HERE = Path(__file__).resolve().parent
 IMMUTABLE = ("provenance", "configuration", "overall", "cohortIntervals", "eventIntervals", "drain")
+PRIVILEGED_ENVIRONMENT = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+                          "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+                          "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                          "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 
 
 def read(path):
@@ -78,14 +82,14 @@ def immutable(before, after):
     prepare.require(metadata == {key: value for key, value in before["measurementMetadata"].items() if key != "resourcesFinalized"},
                     "Finalization changed measurement metadata")
     retained = [reason for reason in before["validity"]["reasons"] if reason.get("scope") != "resources"]
-    prepare.require(all(reason in after["validity"]["reasons"] for reason in retained), "Finalization discarded workload reasons")
+    prepare.require(retained == [reason for reason in after["validity"]["reasons"] if reason.get("scope") != "resources"],
+                    "Finalization changed workload reasons")
     prepare.require(not any(reason.get("severity") == "FAILED" for reason in retained) or after["validity"]["status"] == "failed",
                     "Finalization downgraded a workload failure")
 
 
 def finalize(request, original, builds, inputs, work, resources, java="java"):
-    prepare.require(not any(os.environ.get(key) for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-                    "AWS_WEB_IDENTITY_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")), "Finalization requires an unprivileged job")
+    prepare.require(not any(os.environ.get(key) for key in PRIVILEGED_ENVIRONMENT), "Finalization requires an unprivileged job")
     manifest = prepare.verify_bundle(request, builds, "harness", "x86_64")
     prepare.require(inputs["runIdentity"] == request["runIdentity"] and manifest in inputs["artifacts"], "Finalizer build identity mismatch")
     prepare.write(work / "initial-results.json", original)
@@ -137,6 +141,22 @@ def fallback_markdown(report):
     return "\n".join(lines) + "\n"
 
 
+def copy_evidence(path, target, issues, maximum=64 * 1024 * 1024):
+    if path is None:
+        return None
+    try:
+        prepare.require(path.stat().st_size <= maximum, "Evidence exceeds size budget")
+        shutil.copyfile(path, target)
+        return str(target.resolve())
+    except (OSError, ValueError):
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        issues.append({"code": "EVIDENCE_UNAVAILABLE_OR_OVERSIZED", "source": target.name})
+        return None
+
+
 def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, directory, java="java"):
     directory = Path(directory)
     directory.mkdir(exist_ok=False)
@@ -144,7 +164,7 @@ def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, 
     for path in (work, evidence, logs):
         path.mkdir()
     roots = [Path(diagnostic) / "retrieved", Path(controller) / "execution/retrieved", Path(controller) / "retrieved"]
-    issues, original = [], None
+    issues, evidence_issues, original = [], [], None
     for path in (root / "harness/results.json" for root in roots):
         if path.is_file():
             try:
@@ -159,26 +179,18 @@ def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, 
     for source in ("sendium", "harness"):
         filename = source + "-resources.jsonl"
         path = first_file([root / source / filename for root in roots])
-        if path:
-            prepare.require(path.stat().st_size <= 64 * 1024 * 1024, "Evidence exceeds size budget")
-            shutil.copyfile(path, evidence / filename)
-            resources[source + "Samples"] = str((evidence / filename).resolve())
+        resources[source + "Samples"] = copy_evidence(path, evidence / filename, evidence_issues)
     credit = first_file([Path(diagnostic) / "cpu-credits.json"])
-    if credit:
-        prepare.require(credit.stat().st_size <= 64 * 1024 * 1024, "Credit evidence exceeds size budget")
-        shutil.copyfile(credit, evidence / credit.name)
-        resources["cpuCredits"] = str((evidence / credit.name).resolve())
+    resources["cpuCredits"] = copy_evidence(credit, evidence / "cpu-credits.json", evidence_issues)
     for base, names in ((Path(controller), ("controller-outcome.json", "stack-events.json", "resolution.json")),
                         (Path(diagnostic), ("diagnostics-outcome.json",)), (Path(cleanup), ("cleanup-outcome.json",))):
         for name in names:
             path = first_file([base / name])
-            if path and path.stat().st_size <= 16 * 1024 * 1024:
-                shutil.copyfile(path, logs / name)
+            copy_evidence(path, logs / name, evidence_issues, 16 * 1024 * 1024)
     for source in ("sendium", "harness"):
         for name in ("process.log", "node-status.json", "state.json", "lifecycle.jsonl"):
             path = first_file([root / source / name for root in roots])
-            if path and path.stat().st_size <= 16 * 1024 * 1024:
-                shutil.copyfile(path, logs / (source + "-" + name))
+            copy_evidence(path, logs / (source + "-" + name), evidence_issues, 16 * 1024 * 1024)
     if original is None:
         report = unavailable(request, "REPORT_UNAVAILABLE_OR_INVALID")
         markdown = fallback_markdown(report)
@@ -211,7 +223,7 @@ def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, 
     exit_code = 1 if report["validity"]["status"] == "failed" or issues or failed_jobs else 0
     workflow = {"schemaVersion": 1, "runIdentity": request["runIdentity"], "observationStatus": report["validity"]["status"],
                 "jobOutcomes": outcomes, "cleanupRequired": expected_cleanup, "cleanupConfirmed": cleanup_ok if expected_cleanup else None,
-                "issues": issues, "exitCode": exit_code}
+                "issues": issues, "evidenceIssues": evidence_issues, "exitCode": exit_code}
     prepare.write(directory / "workflow-outcome.json", workflow)
     report["diagnostics"] = ["workflow-outcome.json"] + sorted(path.relative_to(directory).as_posix() for base in (logs, evidence) for path in base.iterdir())
     validate(report, request)
@@ -219,6 +231,7 @@ def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, 
     cleanup_label = ("confirmed" if cleanup_ok else "unconfirmed") if expected_cleanup else "not required"
     markdown += "\n## Workflow / lifecycle outcome\n\nPipeline: **" + ("failed" if exit_code else "completed") + "**; cleanup: **" + cleanup_label + "**.\n\n"
     markdown += "\n".join("- " + html.escape(code) for code in issues) + "\n"
+    markdown += "\n".join("- Evidence unavailable: " + html.escape(issue["source"]) for issue in evidence_issues) + "\n"
     (directory / "summary.md").write_text(markdown, encoding="utf-8")
     return workflow
 

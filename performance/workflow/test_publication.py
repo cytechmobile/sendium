@@ -153,8 +153,8 @@ class PublicationTests(unittest.TestCase):
             work = Path(directory) / "work"
             work.mkdir()
             resources = {"schemaVersion": 1, "sendiumSamples": None, "harnessSamples": None, "cpuCredits": None, "sampleBudget": 8192}
-            for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"):
-                self.assertFalse(os.environ.get(key), "Run this fixture without cloud credentials")
+            for key in publish.PRIVILEGED_ENVIRONMENT:
+                self.assertFalse(bool(os.environ.get(key)), "Run this fixture without cloud credentials")
             final, markdown = publish.finalize(req, original, bundles, inputs, work, resources)
             self.assertTrue(final["measurementMetadata"]["resourcesFinalized"])
             publish.immutable(original, final)
@@ -167,18 +167,21 @@ class RecoveryTests(unittest.TestCase):
             root = Path(directory)
             req, report = measured()
             ids = {"sendium": "i-11111111111111111", "harness": "i-22222222222222222"}
+            report["configuration"]["infrastructure"]["region"] = "eu-west-1"
             report["measurementMetadata"]["measurementStartUtc"] = "2026-10-16T12:00:00.123456789Z"
             for source, identity in ids.items():
-                report["configuration"]["infrastructure"][source] = {"instanceId": identity}
+                report["configuration"]["infrastructure"][source] = {"instanceId": identity, "instanceType": "t4g.small"}
             path = root / "retrieved/harness"
             path.mkdir(parents=True)
             prepare.write(path / "results.json", report)
             tags = [{"Key": name, "Value": value} for name, value in {"sendium:managed-by": "performance-tests",
                 "sendium:repository": req["repository"], "sendium:run-identity": req["runIdentity"]}.items()]
-            aws = Mock(call=lambda *_args, **_kwargs: {"Reservations": [{"Instances": [{"InstanceId": identity, "Tags": tags} for identity in ids.values()]}]})
+            aws = Mock(call=lambda *_args, **_kwargs: {"Reservations": [{"Instances": [
+                {"InstanceId": identity, "InstanceType": "t4g.small", "Tags": tags + [{"Key": "sendium:role", "Value": source}]}
+                for source, identity in ids.items()]}]})
             partial = {"schemaVersion": 1, "instances": [], "collectionIssues": ["CREDIT_BALANCE_MISSING"]}
             with patch.object(recover.deploy, "retrieve", return_value={}), patch.object(recover.collect_cpu_credits, "collect", return_value=partial) as collect:
-                result = recover.diagnostics(aws, Mock(), {}, req, root)
+                result = recover.diagnostics(aws, Mock(), {"region": "eu-west-1"}, req, root)
             self.assertEqual(result["exitCode"], 0)
             self.assertEqual(collect.call_args.args[1], ids)
             self.assertEqual(collect.call_args.args[2].microsecond, 123456)
