@@ -180,9 +180,21 @@ def summary(request, path, ready=False):
         lines.append("| " + html.escape(key) + " | <code>" + html.escape(str(value)).replace("|", "&#124;") + "</code> |")
     if ready:
         lines.extend(["", "Both Linux architectures are built and their input digests verified.",
-                      "This stage prepares artifacts; AWS benchmark execution is integrated in Task 5.2."])
+                      "Verified inputs are ready for protected AWS resolution and execution."])
     with Path(path).open("a", encoding="utf-8") as stream:
         stream.write("\n".join(lines) + "\n")
+
+
+def read_inputs():
+    return json.loads(os.environ["DISPATCH_INPUTS_JSON"])
+
+
+def github_context(controller_revision):
+    return {"ref": os.environ["GITHUB_REF"], "repository": os.environ["GITHUB_REPOSITORY"],
+            "applicationCommit": os.environ["GITHUB_SHA"], "controllerRevision": controller_revision,
+            "workflowRevision": os.environ["GITHUB_WORKFLOW_SHA"], "runId": os.environ["GITHUB_RUN_ID"],
+            "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "workflowRunUrl": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"]}
 
 
 def main():
@@ -203,12 +215,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "normalize":
-            context = {"ref": os.environ["GITHUB_REF"], "repository": os.environ["GITHUB_REPOSITORY"],
-                       "applicationCommit": os.environ["GITHUB_SHA"], "controllerRevision": os.environ["CONTROLLER_REVISION"],
-                       "workflowRevision": os.environ["GITHUB_WORKFLOW_SHA"], "runId": os.environ["GITHUB_RUN_ID"],
-                       "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                       "workflowRunUrl": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"]}
-            request = normalize(json.loads(os.environ["DISPATCH_INPUTS_JSON"]), context, read(HERE.parent / "presets/aws-private-jvm-v1.json"))
+            request = normalize(read_inputs(), github_context(os.environ["CONTROLLER_REVISION"]), read(HERE.parent / "presets/aws-private-jvm-v1.json"))
             write(args.output, request)
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
                 stream.write("controller_revision=" + request["controllerRevision"] + "\nrun_identity=" + request["runIdentity"] + "\n")

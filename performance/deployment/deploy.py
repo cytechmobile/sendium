@@ -131,7 +131,8 @@ def stage(aws, plan, preset, directory):
             ("node", HERE / "node.py", "inputs/common/node.py"),
             ("transport", HERE / "aws_cli.py", "inputs/common/aws_cli.py"),
             ("sampler", HERE.parent / "resources/sample_process.py", "inputs/common/sample_process.py"),
-            ("network", HERE.parent / "infrastructure/network.yaml", "templates/network.yaml")):
+            ("network", HERE.parent / "infrastructure/network.yaml", "templates/network.yaml"),
+            ("runTemplate", HERE.parent / "infrastructure/run.yaml", "templates/run.yaml")):
         upload(name, path, key)
     effective_path = Path(directory) / "preset.json"
     write_new(effective_path, effective)
@@ -139,7 +140,7 @@ def stage(aws, plan, preset, directory):
     # No local artifact paths or credentials are needed after staging.
     return {key: plan[key] for key in ("schemaVersion", "region", "runIdentity", "runStack", "bootstrapStack", "repository", "provenance")} | {
         "bucket": bucket, "artifacts": descriptors, "preset": effective,
-        "createdAt": marker["createdAt"], "expiresAt": marker["expiresAt"]}
+        "createdAt": marker["createdAt"], "expiresAt": marker["expiresAt"], "resolution": plan.get("resolution", {})}
 
 
 def inspect_run(aws, staged):
@@ -216,6 +217,7 @@ def documents(staged, result, instances, timeout):
     infrastructure = {"preset": preset["id"], "region": staged["region"], "database": {
         **preset["database"], "identifier": result["DatabaseIdentifier"], "availabilityZone": result["PrimaryAvailabilityZone"],
         "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"]}}
+    infrastructure["resolution"] = staged.get("resolution", {})
     for source in ("sendium", "harness"):
         instance = instances[result[source.title() + "InstanceId"]]
         infrastructure[source] = {"instanceId": instance["InstanceId"], "instanceType": instance["InstanceType"],

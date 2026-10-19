@@ -5,9 +5,10 @@ Performance Tests → Run workflow**, select the application branch with **Use
 workflow from**, and set the inputs below. GitHub requires the workflow file on
 the default branch before dispatch is available.
 
-The implemented Task 5.1 stage validates the request, builds both Linux
-architectures and publishes verified input identities. AWS provisioning/execution
-is integrated in Task 5.2, report publication/cleanup in 5.3 and trust/failure
+The preparation stage validates requests, builds both Linux architectures and
+publishes verified identities. The [protected AWS job](AWS_EXECUTION.md) resolves
+compatibility and invokes CloudFormation/SSM. Report publication/cleanup follows
+in Task 5.3 and trust/failure
 verification in 5.4. A completed preparation run is not a benchmark observation.
 Task 5.5's complete local rehearsal remains required before AWS validation in 6.1.
 
@@ -36,7 +37,7 @@ existing workload schema/compatibility/lifecycle-budget checks before builds.
 Instance overrides become the effective preset's two EC2 defaults. RDS, storage,
 networking, JVM arguments, capacities and retention remain preset settings.
 Regional offerings, memory, AMI/instance architectures, exact engine/JRE identities
-and expiry readiness are resolved/checked in the protected Task 5.2 path.
+and expiry readiness are resolved/checked in the protected execution path.
 
 Numbers arrive through the JSON-serialized `inputs` context, not shell fragments.
 Whole-number fields reject fractional values, booleans and values outside Java
@@ -56,7 +57,7 @@ types, invalid durations/delays and non-finite values fail preparation.
 - **Builds:** use separate application and harness jobs on native GitHub-hosted
   `ubuntu-24.04` (x86_64) and `ubuntu-24.04-arm` runners, with Temurin Java 25.
   Build both architectures without guessing EC2 architecture from a family name.
-  Task 5.2 selects the matching builds after AWS type/AMI resolution.
+  The AWS job selects matching builds after type/AMI resolution.
 - **Credentials:** validation, both build jobs and independent manifest aggregation
   have only `contents: read`; no environment, OIDC grant, cloud credentials or
   repository secrets are supplied. Checkout credentials are not persisted.
