@@ -1,5 +1,5 @@
 name: Performance Tests
-run-name: Performance preparation · ${{ github.ref_name }} · ${{ inputs.ingress_mode }}
+run-name: Performance · ${{ github.ref_name }} · ${{ inputs.ingress_mode }}
 
 on:
   workflow_dispatch:
@@ -105,6 +105,96 @@ jobs:
           name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/request.json
           if-no-files-found: error
+          retention-days: 30
+
+  aws-execution:
+    name: Provision and execute private AWS benchmark
+    needs: [validate, build-ready]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: sendium-performance
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ORCHESTRATOR_ROLE_ARN: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+    steps:
+      - name: Checkout exact maintained controller
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install trusted controller dependencies
+        run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-build-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-inputs
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-application-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/application-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-application-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/application-arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-harness-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/harness-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-harness-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/harness-arm64
+      - name: Check protected environment configuration
+        run: |
+          : "${AWS_REGION:?Set AWS_REGION in sendium-performance}"
+          : "${AWS_ORCHESTRATOR_ROLE_ARN:?Set AWS_ORCHESTRATOR_ROLE_ARN in sendium-performance}"
+          : "${AWS_BOOTSTRAP_STACK:?Set AWS_BOOTSTRAP_STACK in sendium-performance}"
+      - name: Assume orchestration role using OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 10800
+          unset-current-credentials: true
+      - name: Resolve, stage, create and execute through SSM
+        id: execute
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/run_aws.py \
+              --request "$RUNNER_TEMP/request/request.json" \
+              --build-inputs "$RUNNER_TEMP/build-inputs/build-inputs.json" \
+              --bundles "$RUNNER_TEMP/bundles" --output "$RUNNER_TEMP/aws-performance"
+      - name: Preserve available controller outcomes and retrieved evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/aws-performance/controller-outcome.json
+            ${{ runner.temp }}/aws-performance/cleanup-plan.json
+            ${{ runner.temp }}/aws-performance/staged.json
+            ${{ runner.temp }}/aws-performance/resolution.json
+            ${{ runner.temp }}/aws-performance/stack-creation.json
+            ${{ runner.temp }}/aws-performance/stack-events.json
+            ${{ runner.temp }}/aws-performance/execution/deployment-outcome.json
+            ${{ runner.temp }}/aws-performance/execution/retrieved/**
+            ${{ runner.temp }}/aws-performance/retrieved/**
+          if-no-files-found: ignore
           retention-days: 30
 
   application:

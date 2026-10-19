@@ -74,7 +74,7 @@ stack. Do not extend the deadline by recomputing it after artifact upload.
 Create `run.yaml` with the resolved parameters and tags described in
 [`../infrastructure/README.md`](../infrastructure/README.md). Its network child URL
 now exists at the staged run key. AMI/engine/JRE resolution and protected stack
-creation are workflow integration inputs (Task 5.2); this command does not
+creation are handled by the [protected workflow controller](../workflow/AWS_EXECUTION.md); this command does not
 provision or infer a default AWS region.
 
 ## 2. Execute a create-complete run

@@ -398,7 +398,7 @@ Resources:
                 Condition: {StringEquals: {'iam:PassedToService': cloudformation.amazonaws.com}}
               - Sid: RegionalPreflight
                 Effect: Allow
-                Action: [ec2:DescribeAvailabilityZones, ec2:DescribeInstanceTypes, ec2:DescribeInstanceTypeOfferings, ec2:DescribeImages, ec2:DescribePrefixLists, ec2:DescribeManagedPrefixLists, ec2:DescribeInstances, ec2:DescribeInstanceStatus, ec2:DescribeVolumes, rds:DescribeDBEngineVersions, rds:DescribeOrderableDBInstanceOptions, rds:DescribeDBInstances, ssm:DescribeInstanceInformation, ssm:GetCommandInvocation, ssm:ListCommandInvocations]
+                Action: [ec2:DescribeAvailabilityZones, ec2:DescribeInstanceTypes, ec2:DescribeInstanceTypeOfferings, ec2:DescribeImages, ec2:DescribePrefixLists, ec2:DescribeManagedPrefixLists, ec2:DescribeVpcEndpointServices, ec2:DescribeInstances, ec2:DescribeInstanceStatus, ec2:DescribeVolumes, rds:DescribeDBEngineVersions, rds:DescribeOrderableDBInstanceOptions, rds:DescribeDBInstances, ssm:DescribeInstanceInformation, ssm:GetCommandInvocation, ssm:ListCommandInvocations]
                 Resource: '*'
                 Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
               - Sid: ResolvePublicAmiParameters

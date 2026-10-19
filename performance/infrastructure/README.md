@@ -87,6 +87,11 @@ Configure environment-scoped region, role and bootstrap-stack values for later
 workflows; the orchestration role can read its own bootstrap outputs. Do not
 store static AWS access keys.
 
+The [protected workflow configuration](../workflow/AWS_EXECUTION.md) names the
+three environment variables: `AWS_REGION`, `AWS_ORCHESTRATOR_ROLE_ARN` and
+`AWS_BOOTSTRAP_STACK`. It validates the actual assumed identity, installed expiry
+and regional compatibility before creating run resources.
+
 ### Privilege and ownership contract
 
 The orchestration role creates only namespaced run stacks, using the exact
