@@ -452,6 +452,9 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
+              - Effect: Allow
                 Action: [ec2:DescribeInstances, ec2:DescribeInstanceTypes, ec2:DescribeInstanceCreditSpecifications, cloudwatch:GetMetricStatistics]
                 Resource: '*'
                 Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}

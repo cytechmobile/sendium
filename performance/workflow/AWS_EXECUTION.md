@@ -17,6 +17,7 @@ Configure environment **`sendium-performance`** with maintainer-controlled acces
 | `AWS_REGION` | Explicit benchmark/bootstrap region; no inferred default |
 | `AWS_ORCHESTRATOR_ROLE_ARN` | Bootstrap output `OrchestratorRoleArn` |
 | `AWS_BOOTSTRAP_STACK` | Installed bootstrap stack name |
+| `AWS_DIAGNOSTICS_ROLE_ARN` | Bootstrap output `DiagnosticsRoleArn`, used by the separate read-only job |
 
 The job requests `id-token: write` and `contents: read`, then assumes the configured
 role using GitHub OIDC. Its 10,800-second session matches the bootstrap role limit
@@ -92,9 +93,9 @@ uploaded. Retention is 30 days. A provisioning failure may have controller
 evidence without a harness report; a completed harness report remains resource-
 inconclusive until diagnostic evidence is finalized separately.
 
-Task 5.3 integrates final reports, diagnostic-role credit collection,
+The [reporting and cleanup jobs](REPORTING.md) perform read-only credit collection,
 unprivileged finalization and immediate cleanup for success/failure/cancellation.
-Independent expiry is required before provisioning now. Task 5.5's complete local
+Independent expiry is also required before provisioning. Task 5.5's complete local
 rehearsal remains required before AWS validation in 6.1.
 
 ## Offline verification
