@@ -52,10 +52,16 @@ def distributions(measurement):
 
 
 def validate_results(document):
+    if any(reason.get("severity") == "FAILED" for reason in document["validity"].get("reasons", [])):
+        require(document["validity"]["status"] == "failed", "Failed reasons must retain failed classification")
     workload = document["configuration"]["workload"]
     overall = document["overall"]
     counts = overall["counts"]
     duration = overall["durationSeconds"]
+    observed_nanos = document["measurementMetadata"].get("observedDurationNanos")
+    if observed_nanos is not None:
+        require(type(observed_nanos) is int and observed_nanos >= 0, "Invalid resource observation duration")
+        equal(duration, observed_nanos / 1_000_000_000, "Resource and workload observation durations differ")
     cohorts = document["cohortIntervals"]
     events = document["eventIntervals"]
     accounting(counts, workload["dlrEnabled"])

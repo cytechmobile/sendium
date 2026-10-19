@@ -368,3 +368,185 @@ jobs:
           path: ${{ runner.temp }}/build-inputs.json
           if-no-files-found: error
           retention-days: 30
+
+  diagnostics:
+    name: Recover evidence and collect read-only AWS diagnostics
+    needs: [validate, aws-execution]
+    if: always() && needs.validate.result == 'success' && needs.aws-execution.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: sendium-performance
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+      AWS_DIAGNOSTICS_ROLE_ARN: ${{ vars.AWS_DIAGNOSTICS_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DIAGNOSTICS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-diag-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Recover public evidence and collect instance credit observations
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/recover.py diagnostics \
+              --request "$RUNNER_TEMP/request/request.json" --output "$RUNNER_TEMP/diagnostics"
+      - name: Preserve available diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/diagnostics/diagnostics-outcome.json
+            ${{ runner.temp }}/diagnostics/cpu-credits.json
+            ${{ runner.temp }}/diagnostics/retrieved/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  cleanup:
+    name: Delete owned stack and temporary run artifacts
+    needs: [validate, aws-execution, diagnostics]
+    if: always() && needs.validate.result == 'success' && needs.aws-execution.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: sendium-performance
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+      AWS_ORCHESTRATOR_ROLE_ARN: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-clean-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Reconstruct identity and perform bounded idempotent cleanup
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/recover.py cleanup \
+              --request "$RUNNER_TEMP/request/request.json" --output "$RUNNER_TEMP/cleanup"
+      - name: Preserve cleanup outcome
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cleanup/cleanup-outcome.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  publish:
+    name: Finalize and publish results without AWS credentials
+    needs: [validate, application, harness, build-ready, aws-execution, diagnostics, cleanup]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/setup-java@v6
+        continue-on-error: true
+        with:
+          java-version: '25'
+          distribution: temurin
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-build-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-inputs
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/controller
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/diagnostics
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cleanup
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-harness-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publish-builds/harness-x86_64
+      - name: Validate accounting, finalize resources and publish failure-aware summaries
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+          WORKFLOW_OUTCOMES_JSON: ${{ toJSON(needs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/publish.py \
+              --request "$RUNNER_TEMP/request/request.json" --controller "$RUNNER_TEMP/controller" \
+              --diagnostic "$RUNNER_TEMP/diagnostics" --cleanup "$RUNNER_TEMP/cleanup" \
+              --builds "$RUNNER_TEMP/publish-builds" --build-inputs "$RUNNER_TEMP/build-inputs/build-inputs.json" \
+              --output "$RUNNER_TEMP/published"
+      - name: Preserve final results and diagnostic bundle even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/published/results.json
+            ${{ runner.temp }}/published/summary.md
+            ${{ runner.temp }}/published/workflow-outcome.json
+            ${{ runner.temp }}/published/evidence/**
+            ${{ runner.temp }}/published/diagnostics/**
+          if-no-files-found: error
+          retention-days: 30

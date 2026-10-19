@@ -173,8 +173,10 @@ retrieved report; preserve collector issues and absent/lagging credit points.
 Set `resource-inputs.json`'s `cpuCredits` to that file's relative path. A separate
 unprivileged publishing job invokes `finalize-report` as documented in
 [`../harness/EXECUTION.md`](../harness/EXECUTION.md), then validates report schemas
-and independent accounting semantics. Task 5.3 wires these job/artifact boundaries;
-the protected controller never invokes finalization code.
+and independent accounting semantics. The workflow enforces these job/artifact boundaries;
+the protected controller never invokes finalization code. The implemented
+[reporting jobs](../workflow/REPORTING.md) wire diagnostic collection, unprivileged
+finalization and immediate cleanup in that order.
 
 ## 4. Clean up a completed, failed or cancelled run
 
@@ -245,8 +247,8 @@ cleanup fails, the outcome distinguishes the deleted stack from remaining data.
 The one-day S3 lifecycle remains a fallback for temporary objects/incomplete
 uploads; the [independent sweeper](EXPIRY.md) recovers abandoned expired runs.
 
-Task 5.3 wires this command into final workflow cleanup after success, failure or
-cancellation, preserving cleanup outcomes even when another job failed. Keep the
+The workflow's dedicated cleanup job invokes the same engine after success,
+failure or cancellation, preserving outcomes even when another job failed. Keep the
 bootstrap service/control roles installed until all run cleanup has completed.
 
 ## Verification

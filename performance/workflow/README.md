@@ -7,9 +7,9 @@ the default branch before dispatch is available.
 
 The preparation stage validates requests, builds both Linux architectures and
 publishes verified identities. The [protected AWS job](AWS_EXECUTION.md) resolves
-compatibility and invokes CloudFormation/SSM. Report publication/cleanup follows
-in Task 5.3 and trust/failure
-verification in 5.4. A completed preparation run is not a benchmark observation.
+compatibility and invokes CloudFormation/SSM. Separate [reporting and cleanup](REPORTING.md)
+jobs finalize results without cloud credentials and delete run-owned resources.
+Trust/failure verification continues in Task 5.4. A completed preparation run is not a benchmark observation.
 Task 5.5's complete local rehearsal remains required before AWS validation in 6.1.
 
 ## Inputs and defaults

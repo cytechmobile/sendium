@@ -146,26 +146,28 @@ def build_bundle(request, component, architecture, checkout, output, java_versio
     return manifest
 
 
+def verify_bundle(request, directory, component, architecture):
+    require(component in FILES and architecture in ARCHITECTURES, "Unknown build target")
+    relative = component + "-" + architecture
+    bundle = Path(directory) / relative
+    require(bundle.is_dir() and not bundle.is_symlink() and not (bundle / "build-manifest.json").is_symlink(), "Invalid artifact directory")
+    manifest = read(bundle / "build-manifest.json")
+    require(isinstance(manifest, dict) and set(manifest) == {"schemaVersion", "runIdentity", "component", "sourceRevision",
+            "architecture", "javaVersion", "file", "sha256", "size"}, "Build manifest fields mismatch")
+    require(manifest.get("schemaVersion") == 1 and manifest.get("runIdentity") == request["runIdentity"]
+            and manifest.get("component") == component and manifest.get("architecture") == architecture
+            and manifest.get("sourceRevision") == revision(request, component)
+            and manifest.get("file") == FILES[component], "Build manifest identity mismatch")
+    target = bundle / FILES[component]
+    require(target.is_file() and not target.is_symlink() and 0 < target.stat().st_size <= MAX_ARTIFACT_BYTES
+            and type(manifest["size"]) is int and target.stat().st_size == manifest["size"]
+            and digest(target) == manifest["sha256"], "Build artifact size/digest mismatch")
+    require(re.fullmatch(r"25(?:[.+-].*)?", manifest["javaVersion"]), "Build Java version mismatch")
+    return {**manifest, "path": relative + "/" + target.name}
+
+
 def verify_bundles(request, directory):
-    artifacts = []
-    for component in FILES:
-        for architecture in sorted(ARCHITECTURES):
-            relative = component + "-" + architecture
-            bundle = Path(directory) / relative
-            require(bundle.is_dir() and not bundle.is_symlink() and not (bundle / "build-manifest.json").is_symlink(), "Invalid artifact directory")
-            manifest = read(bundle / "build-manifest.json")
-            require(isinstance(manifest, dict) and set(manifest) == {"schemaVersion", "runIdentity", "component", "sourceRevision",
-                    "architecture", "javaVersion", "file", "sha256", "size"}, "Build manifest fields mismatch")
-            require(manifest.get("schemaVersion") == 1 and manifest.get("runIdentity") == request["runIdentity"]
-                    and manifest.get("component") == component and manifest.get("architecture") == architecture
-                    and manifest.get("sourceRevision") == revision(request, component)
-                    and manifest.get("file") == FILES[component], "Build manifest identity mismatch")
-            target = bundle / FILES[component]
-            require(target.is_file() and not target.is_symlink() and 0 < target.stat().st_size <= MAX_ARTIFACT_BYTES
-                    and type(manifest["size"]) is int and target.stat().st_size == manifest["size"]
-                    and digest(target) == manifest["sha256"], "Build artifact size/digest mismatch")
-            require(re.fullmatch(r"25(?:[.+-].*)?", manifest["javaVersion"]), "Build Java version mismatch")
-            artifacts.append({**manifest, "path": relative + "/" + target.name})
+    artifacts = [verify_bundle(request, directory, component, architecture) for component in FILES for architecture in sorted(ARCHITECTURES)]
     return {"schemaVersion": 1, "runIdentity": request["runIdentity"], "provenance": request["provenance"],
             "controllerRevision": request["controllerRevision"], "artifacts": artifacts}
 
