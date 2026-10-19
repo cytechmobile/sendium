@@ -72,14 +72,15 @@ The publisher has only `contents: read`, no protected environment/OIDC and no AW
 authentication action. It consumes available controller/diagnostic/cleanup
 artifacts and verifies the maintained x86_64 harness build's exact
 revision/attempt/architecture/size/SHA-256 before calling `finalize-report`.
-The helper also refuses finalization when cloud/OIDC credential environment
-variables are present.
+The helper also refuses finalization when direct, profile/file, container or OIDC
+credential-provider environment variables are present. Hosted-job isolation is
+the primary boundary; the variable guard is an additional misuse check.
 
 Report and evidence paths are built from fixed public filenames, not downloaded
 `resource-inputs.json` paths. Both schema and independent accounting/window checks
 run before/after finalization. Workload provenance/configuration, overall/minute
 counts, rates, histograms, drain observations, timing metadata and non-resource
-failure reasons must remain unchanged. Only resource evidence/classification is
+failure reasons (including their exact sequence) must remain unchanged. Only resource evidence/classification is
 enriched; cleanup/pipeline outcomes are kept separately in `workflow-outcome.json`.
 
 - A failed workload/accounting observation stays failed.
@@ -109,6 +110,8 @@ diagnostics/                  allowlisted logs, state and control/cleanup outcom
 Private generated configuration, environment files, downloaded runtimes and
 intermediate finalizer working files are excluded. Raw controller/diagnostic
 artifacts remain separately available for recovery/re-publication.
+Unreadable/oversized optional evidence and log copies are recorded in
+`workflow-outcome.json`'s `evidenceIssues`; they do not erase valid measurements.
 
 ## Verification
 
@@ -124,3 +127,6 @@ The test uses an explicitly synthetic one-message observation, verifies unchange
 measurements and checks that missing resources stay inconclusive. It requires no
 AWS credentials or resources. The complete local rehearsal remains Task 5.5,
 before real AWS validation in 6.1.
+
+See [the permissions/failure audit](AUDIT.md) for fixed findings, outcome coverage
+and the remaining hosted/live confirmations.

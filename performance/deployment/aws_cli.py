@@ -14,6 +14,16 @@ class AwsError(RuntimeError):
         self.code = code
 
 
+def failure(service, operation, parameters, stderr):
+    stderr = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr or ""
+    match = re.search(r"An error occurred \(([A-Za-z0-9_.-]+)\)", stderr)
+    code = match[1] if match else "AWS_REQUEST_FAILED"
+    if (service == "cloudformation" and operation in ("describe-stacks", "delete-stack") and code == "ValidationError"
+            and ("Stack with id " + str(parameters.get("stack_name")) + " does not exist") in stderr):
+        code = "StackNotFound"
+    return AwsError(service + ":" + operation + " failed", code=code)
+
+
 class AwsCli:
     def __init__(self, region):
         self.region = region
@@ -42,14 +52,7 @@ class AwsCli:
             result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout_seconds, check=True)
             return json.loads(result.stdout) if result.stdout.strip() else {}
         except subprocess.CalledProcessError as error:
-            stderr = error.stderr or ""
-            match = re.search(r"An error occurred \(([A-Za-z0-9_.-]+)\)", stderr)
-            code = match[1] if match else "AWS_REQUEST_FAILED"
-            # Match only exact stack absence, never generic validation/authentication failures.
-            if (service == "cloudformation" and operation in ("describe-stacks", "delete-stack") and code == "ValidationError"
-                    and ("Stack with id " + str(parameters.get("stack_name")) + " does not exist") in stderr):
-                code = "StackNotFound"
-            raise AwsError(service + ":" + operation + " failed", code=code) from None
+            raise failure(service, operation, parameters, error.stderr) from None
         except (OSError, ValueError, subprocess.SubprocessError):
             # Do not publish AWS stderr, command arguments, or secret values.
             raise AwsError(service + ":" + operation + " failed") from None
@@ -66,6 +69,9 @@ class AwsCli:
                    "--bucket", bucket, "--key", key, str(path)]
         try:
             subprocess.run(command, capture_output=True, timeout=self.timeout_seconds, check=True)
+        except subprocess.CalledProcessError as error:
+            Path(path).unlink(missing_ok=True)
+            raise failure("s3api", "get-object", {"bucket": bucket, "key": key}, error.stderr) from None
         except (OSError, subprocess.SubprocessError):
             Path(path).unlink(missing_ok=True)
             raise AwsError("s3api:get-object failed") from None

@@ -145,6 +145,7 @@ def run(aws, downloads, request, inputs, bundles, settings, directory):
             outcome["issues"].append("BENCHMARK_EXECUTION_FAILED")
         outcome["phase"] = "finished"
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, prepare.ValidationError, KeyboardInterrupt):
+        outcome["exitCode"] = 1
         outcome["issues"].append("PROTECTED_CONTROLLER_FAILED")
     finally:
         if staged:

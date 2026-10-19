@@ -221,6 +221,7 @@ class Node:
         captured = None
         sampler = None
         exit_code = 1
+        private_values = ()
         try:
             if self.source == "harness":
                 generated = self.root / "generated/harness"
@@ -234,12 +235,14 @@ class Node:
                 write(self.root / "execution.json", execution)
                 command = [self.java(), *self.document["jvmArguments"], "-jar", str(self.root / "harness"), "run",
                            str(generated), str(self.root / "execution.json"), str(self.root / "report")]
+                private_values = tuple(self.secrets())
                 captured = CapturedProcess(command, self.root, child_environment())
             else:
                 environment = child_environment()
                 environment.update(read(self.root / "generated/sendium/environment.json"))
                 command = [self.java(), *self.document["jvmArguments"], "-jar",
                            str(self.install / "application/quarkus-app/quarkus-run.jar")]
+                private_values = tuple(self.secrets())
                 captured = CapturedProcess(command, self.root / "generated/sendium", environment)
                 sampler = subprocess.Popen(["python3", str(self.root / "sampler"), "--pid", str(captured.process.pid),
                                             "--duration-seconds", str(self.document["timeoutSeconds"]),
@@ -273,7 +276,7 @@ class Node:
             if captured:
                 captured.stop()
                 text = captured.log()
-                for value in sorted(self.secrets(), key=len, reverse=True):
+                for value in sorted(private_values, key=len, reverse=True):
                     if value:
                         text = text.replace(value, "[REDACTED]")
                 (self.root / "process.log").write_text(text, encoding="utf-8")
