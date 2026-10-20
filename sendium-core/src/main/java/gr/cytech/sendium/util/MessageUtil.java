@@ -3,6 +3,8 @@ package gr.cytech.sendium.util;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Strings;
 import gr.cytech.sendium.core.message.StandardMessage;
+import java.util.HexFormat;
+import java.util.Optional;
 import java.util.Set;
 
 public class MessageUtil {
@@ -92,7 +94,7 @@ public class MessageUtil {
      * @return True if the provided message has a supported UDH format
      */
     public static boolean is8BitMessagePart(StandardMessage message) {
-        return hasUdh(message) && message.binheader.startsWith(UdhPrefix.BIT_8.value);
+        return concatenation(message).map(part -> part.referenceBits() == 8).orElse(false);
     }
 
     /**
@@ -103,7 +105,7 @@ public class MessageUtil {
      * @return True if the provided message has a supported UDH format
      */
     public static boolean is16BitMessagePart(StandardMessage message) {
-        return hasUdh(message) && message.binheader.startsWith(UdhPrefix.BIT_16.value);
+        return concatenation(message).map(part -> part.referenceBits() == 16).orElse(false);
     }
 
     public static boolean hasUdh(StandardMessage message) {
@@ -111,40 +113,67 @@ public class MessageUtil {
     }
 
     public static String getMessageReference(StandardMessage message) {
-        String msgRefNum = null;
-        if (is8BitMessagePart(message)) {
-            // The digits 6-8 contain the reference number of the 8 bit concatenated message.
-            msgRefNum = message.binheader.substring(6, 8);
-        } else if (is16BitMessagePart(message)) {
-            // The digits 6-10 contain the reference number of the 16 bit concatenated message.
-            msgRefNum = message.binheader.substring(6, 10);
-        }
-
-        //The ref can be the same across multiple clients/apis. By prepending the user_id
-        //we guaranty that if a client uses only one API (e.g smpp or http) the msgRefNum
-        //will be unique. However, if the same client uses multiple APIs there will be still
-        //a small possibility to have an overlapping reference.
-        if (msgRefNum != null) {
-            msgRefNum = message.owner_id.concat(":").concat(String.valueOf(msgRefNum));
-        }
-        return msgRefNum;
+        // Legacy runtime reference only; pending admission uses the complete MultipartKey and a group-instance UUID.
+        return concatenation(message).map(part -> String.valueOf(message.owner_id) + ":" +
+                (part.referenceBits() == 8 ? HexFormat.of().withUpperCase().toHexDigits((byte) part.reference()) :
+                        HexFormat.of().withUpperCase().toHexDigits((short) part.reference()))).orElse(null);
     }
 
     public static int getNumberOfCurrentPart(StandardMessage message) {
-        if (is8BitMessagePart(message) || is16BitMessagePart(message)) {
-            int length = message.binheader.length();
-            return Integer.parseInt(message.binheader.substring(length - 2, length), 16);
-        }
-        return 0;
+        return concatenation(message).map(Concatenation::ordinal).orElse(0);
     }
 
     public static int getNumberOfTotalParts(StandardMessage message) {
-        if (is8BitMessagePart(message)) {
-            return Integer.parseInt(message.binheader.substring(8, 10), 16);
-        } else if (is16BitMessagePart(message)) {
-            return Integer.parseInt(message.binheader.substring(10, 12), 16);
+        return concatenation(message).map(Concatenation::total).orElse(0);
+    }
+
+    /** Parses one valid concatenation IE anywhere in a length-checked UDH; malformed headers are unsupported. */
+    public static Optional<Concatenation> concatenation(StandardMessage message) {
+        if (message == null || !hasUdh(message)) {
+            return Optional.empty();
         }
-        return 0;
+        byte[] header;
+        try {
+            header = HexFormat.of().parseHex(message.binheader);
+        } catch (IllegalArgumentException failure) {
+            return Optional.empty();
+        }
+        if (header.length == 0 || Byte.toUnsignedInt(header[0]) != header.length - 1) {
+            return Optional.empty();
+        }
+        Concatenation result = null;
+        for (int offset = 1; offset < header.length;) {
+            if (offset + 2 > header.length) {
+                return Optional.empty();
+            }
+            int identifier = Byte.toUnsignedInt(header[offset]);
+            int length = Byte.toUnsignedInt(header[offset + 1]);
+            int start = offset + 2;
+            int end = start + length;
+            if (end > header.length) {
+                return Optional.empty();
+            }
+            if (identifier == 0 || identifier == 8) {
+                if (result != null || length != (identifier == 0 ? 3 : 4)) {
+                    return Optional.empty();
+                }
+                int total = Byte.toUnsignedInt(header[end - 2]);
+                int ordinal = Byte.toUnsignedInt(header[end - 1]);
+                if (total == 0 || ordinal == 0 || ordinal > total) {
+                    return Optional.empty();
+                }
+                int reference = Byte.toUnsignedInt(header[start]);
+                if (identifier == 8) {
+                    reference = (reference << 8) | Byte.toUnsignedInt(header[start + 1]);
+                }
+                byte[] normalized = header.clone();
+                normalized[end - 1] = 0;
+                result = new Concatenation(identifier == 0 ? 8 : 16, reference, total, ordinal,
+                        HexFormat.of().withUpperCase().formatHex(normalized));
+            }
+            offset = end;
+        }
+        return Optional.ofNullable(result);
     }
 
     public static String validateText(String udh, String msgBody, int msgType, int maxBodyLength) {
@@ -347,6 +376,10 @@ public class MessageUtil {
 
     private static boolean isValidGsmChar(char ch) {
         return OneByteCharacters.contains(ch) || TwoByteCharacters.contains(ch);
+    }
+
+    /** Normalization preserves all UDH bytes and IE order, except for hex case and the part ordinal. */
+    public record Concatenation(int referenceBits, int reference, int total, int ordinal, String normalizedUdh) {
     }
 
     public enum UdhPrefix {

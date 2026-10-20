@@ -4,8 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -13,6 +17,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.time.Duration;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
 import static gr.cytech.sendium.core.storage.pending.PendingRecordMappingTest.message;
@@ -70,7 +76,7 @@ class PendingRecordCodecTest {
         }
         assertFailure(new byte[]{(byte) 255}, "CORRUPT_RECORD");
         assertFailure(cbor.writeValueAsBytes(List.of("not-an-envelope")), "CORRUPT_RECORD");
-        for (String field : List.of("schemaVersion", "sourceId", "disposition", "message")) {
+        for (String field : List.of("schemaVersion", "sourceId", "disposition", "message", "multipart")) {
             ObjectNode record = encodedTree();
             record.remove(field);
             assertFailure(cbor.writeValueAsBytes(record), "CORRUPT_RECORD");
@@ -153,6 +159,43 @@ class PendingRecordCodecTest {
         record.put("futureOptionalNote", "ignored");
         ((ObjectNode) record.get("message")).put("futureOptionalInput", 17);
         assertThat(codec.decode(cbor.writeValueAsBytes(record)).message().restore().body).isEqualTo("private body");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0500037F0301", "06080412340301", "0B050423F023F100037F0301"})
+    void roundTripsMultipartMembership(String udh) throws Exception {
+        try (var pending = new MemoryPendingMessageStore<StandardMessage>(2, value -> PendingMessageData.capture(value).restore())) {
+            pending.open();
+            StandardMessage first = message();
+            first.binheader = udh;
+            SourceId firstId = new SourceId(UUID.fromString(first.serial));
+            var original = pending.admitPart(firstId, first, Duration.ofSeconds(60));
+            StandardMessage repeated = message();
+            repeated.serial = UUID.randomUUID().toString();
+            repeated.binheader = first.binheader;
+            SourceId repeatedId = new SourceId(UUID.fromString(repeated.serial));
+            var separate = pending.admitPart(repeatedId, repeated, Duration.ofSeconds(60));
+            var record = new PendingSourceRecord(repeatedId, PendingSourceRecord.Disposition.HELD,
+                    PendingMessageData.capture(pending.find(repeatedId).orElseThrow()), separate);
+            var decoded = codec.decode(codec.encode(record));
+            assertThat(decoded.multipart()).isEqualTo(separate);
+            assertThat(decoded.multipart().groupId()).isNotEqualTo(original.groupId());
+            assertThat(decoded.multipart().source()).isEqualTo(repeatedId);
+            assertThat(decoded.message().restore().serial).isEqualTo(repeated.serial);
+
+            ObjectNode invalid = (ObjectNode) cbor.readTree(codec.encode(record));
+            ((ObjectNode) invalid.get("multipart")).put("sourceId", first.serial);
+            assertFailure(cbor.writeValueAsBytes(invalid), "CORRUPT_RECORD");
+            invalid = (ObjectNode) cbor.readTree(codec.encode(record));
+            ((ObjectNode) invalid.get("multipart").get("key")).put("recipient", "different recipient");
+            assertFailure(cbor.writeValueAsBytes(invalid), "CORRUPT_RECORD");
+            invalid = (ObjectNode) cbor.readTree(codec.encode(record));
+            ((ObjectNode) invalid.get("multipart")).put("ordinal", 4);
+            assertFailure(cbor.writeValueAsBytes(invalid), "CORRUPT_RECORD");
+            invalid = (ObjectNode) cbor.readTree(codec.encode(record));
+            ((ObjectNode) invalid.get("multipart")).put("deadline", "invalid private deadline");
+            assertFailure(cbor.writeValueAsBytes(invalid), "CORRUPT_RECORD");
+        }
     }
 
     private ObjectNode encodedTree() throws Exception {

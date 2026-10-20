@@ -44,6 +44,33 @@ class MessageUtilTest {
     }
 
     @Test
+    void concatenationMayAppearBesideOtherInformationElements() {
+        var first = messageWithUdh("0b050423f023f100037f0301");
+        var second = messageWithUdh("0B050423F023F100037F0302");
+        var parsed = MessageUtil.concatenation(first).orElseThrow();
+        assertThat(parsed.referenceBits()).isEqualTo(8);
+        assertThat(parsed.reference()).isEqualTo(127);
+        assertThat(parsed.total()).isEqualTo(3);
+        assertThat(parsed.ordinal()).isEqualTo(1);
+        assertThat(parsed.normalizedUdh()).isEqualTo(MessageUtil.concatenation(second).orElseThrow().normalizedUdh());
+        assertThat(MessageUtil.getNumberOfCurrentPart(first)).isEqualTo(1);
+        assertThat(MessageUtil.getNumberOfTotalParts(first)).isEqualTo(3);
+        var trailingPort = messageWithUdh("0B00037F0301050423F023F1");
+        assertThat(MessageUtil.getNumberOfCurrentPart(trailingPort)).isEqualTo(1);
+    }
+
+    @Test
+    void invalidConcatenationCannotBeAdmittedAsASupportedPart() {
+        for (String udh : java.util.List.of("050003", "0500037F0001", "0500037F0200", "0500037F0203", "0500037F020Z",
+                "0400037F0201", "0500047F0201", "0A00037F020100037F0201", "06080312340201")) {
+            var message = messageWithUdh(udh);
+            assertThat(MessageUtil.concatenation(message)).as(udh).isEmpty();
+            assertThat(MessageUtil.is8BitMessagePart(message)).as(udh).isFalse();
+            assertThat(MessageUtil.is16BitMessagePart(message)).as(udh).isFalse();
+        }
+    }
+
+    @Test
     void getSmsCntUsesTextAndConcatenationBoundaries() {
         assertThat(MessageUtil.getSmsCnt("a".repeat(160), StandardMessage.MSG_TEXT, true)).isEqualTo(1);
         assertThat(MessageUtil.getSmsCnt("a".repeat(161), StandardMessage.MSG_TEXT, true)).isEqualTo(2);

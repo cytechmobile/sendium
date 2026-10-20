@@ -15,6 +15,7 @@ import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.RoutedWorkStore;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -149,6 +150,31 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     @Override
     public SourceId acceptHeld(SourceId source, M message) {
         return accept(source, message, true);
+    }
+
+    @Override
+    public MultipartMembership acceptPart(SourceId source, M message, Duration timeout) {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(message, "message");
+        Objects.requireNonNull(timeout, "timeout");
+        lock.lock();
+        try {
+            requireRunning(Role.PENDING);
+            MultipartMembership accepted;
+            if (sourceSelections.containsKey(source)) {
+                accepted = pending.findMultipart(source)
+                        .orElseThrow(() -> invalid(Role.PENDING, "Multipart source is no longer retained"));
+            } else {
+                accepted = pending.admitPart(source, message, timeout);
+            }
+            if (accepted == null || !source.equals(accepted.source())) {
+                throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
+                        "Pending admission did not confirm multipart source membership");
+            }
+            return accepted;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

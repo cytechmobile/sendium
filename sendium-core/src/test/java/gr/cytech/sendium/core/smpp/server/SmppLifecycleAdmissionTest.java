@@ -12,7 +12,6 @@ import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
-import gr.cytech.sendium.util.MessageUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.mockito.ArgumentCaptor;
@@ -85,7 +84,7 @@ class SmppLifecycleAdmissionTest {
             worker.setIngressCoordinator(lifecycle.coordinator);
             var failure = new OutboundStorageException(OutboundStage.Role.PENDING, reason, "private backend details");
             if (held) {
-                doThrow(failure).when(lifecycle.pending).admitHeld(any(), any());
+                doThrow(failure).when(lifecycle.pending).admitPart(any(), any(), any());
             } else {
                 doThrow(failure).when(lifecycle.pending).admit(any(), any());
             }
@@ -118,7 +117,7 @@ class SmppLifecycleAdmissionTest {
     }
 
     @Test
-    void multipartPartsAreAcknowledgedIndividuallyThenPublishedWithAllSources() throws Exception {
+    void multipartSuccessFollowsMembershipAdmission() throws Exception {
         try (var lifecycle = new OutboundIngressFixture(2); var worker = new TestWorker()) {
             worker.setIngressCoordinator(lifecycle.coordinator);
             worker.onResponse = response -> {
@@ -127,6 +126,11 @@ class SmppLifecycleAdmissionTest {
                 assertThat(accepted.sourceIds.iterator().next().value()).isEqualTo(
                         UUID.fromString(response.getMessageId()));
                 accepted.sourceIds.forEach(source -> assertThat(lifecycle.pending.find(source)).isPresent());
+                accepted.sourceIds.forEach(source -> assertThat(lifecycle.pending.findMultipart(source)).hasValueSatisfying(membership -> {
+                    assertThat(membership.source()).isEqualTo(source);
+                    assertThat(membership.key().total()).isEqualTo(2);
+                    assertThat(membership.deadline()).isNotNull();
+                }));
                 assertThat(lifecycle.coordinator.selectToRouter(2)).isZero();
             };
             var first = submission("0500037F0201", "Hello ", 1);
@@ -197,7 +201,7 @@ class SmppLifecycleAdmissionTest {
             worker.enqueueIn(first);
             worker.enqueueIn(third);
             worker.processQueued();
-            worker.expire(first.pMsg);
+            worker.expire(first.pMsg, lifecycle.pending);
             var events = worker.queued();
             assertThat(events).hasSize(2).allSatisfy(event -> {
                 assertThat(event.sourceIds).hasSize(1);
@@ -215,24 +219,37 @@ class SmppLifecycleAdmissionTest {
     }
 
     @Test
-    void ignoredDuplicateOrdinalStillReleasesItsAcceptedSourceWithTheOriginalGroup() throws Exception {
-        try (var lifecycle = new OutboundIngressFixture(3); var worker = new TestWorker()) {
+    void repeatedOrdinalRemainsIndependentAfterOriginalAggregateCompletes() throws Exception {
+        try (var lifecycle = new OutboundIngressFixture(4); var worker = new TestWorker()) {
             worker.setIngressCoordinator(lifecycle.coordinator);
-            worker.enqueueIn(submission("0500037F0201", "first", 1));
-            worker.enqueueIn(submission("0500037F0201", "ignored", 2));
-            worker.enqueueIn(submission("0500037F0202", "second", 3));
+            worker.enqueueIn(submission("0500037F0301", "first-", 1));
+            var repeated = submission("0500037F0301", "repeated", 2);
+            worker.enqueueIn(repeated);
+            SourceId repeatedSource = new SourceId(UUID.fromString(repeated.pMsg.serial));
+            worker.enqueueIn(submission("0500037F0302", "second-", 3));
+            worker.enqueueIn(submission("0500037F0303", "third", 4));
             worker.processQueued();
             var ready = worker.getInEventQueue().remove();
             assertThat(ready.sourceIds).hasSize(3);
-            assertThat(ready.pMsg.body).isEqualTo("firstsecond");
-            assertThat(ready.pMsg.reassembledParts).hasSize(2);
+            assertThat(ready.sourceIds).doesNotContain(repeatedSource);
+            assertThat(ready.pMsg.body).isEqualTo("first-second-third");
+            assertThat(ready.pMsg.reassembledParts).hasSize(3);
             worker.handleIngressMessages(List.of(ready));
             lifecycle.coordinator.selectToRouter(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.sources()).hasSize(3);
             lifecycle.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             ready.sourceIds.forEach(source -> assertThat(lifecycle.pending.find(source)).isEmpty());
-            assertThat(worker.responses).hasSize(3);
+            assertThat(lifecycle.pending.find(repeatedSource)).isPresent();
+            worker.expire(repeated.pMsg, lifecycle.pending);
+            worker.processQueued();
+            assertThat(lifecycle.coordinator.selectToRouter(1)).isEqualTo(1);
+            var separate = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            assertThat(separate.sources()).containsExactly(repeatedSource);
+            assertThat(separate.message().body).isEqualTo("repeated");
+            lifecycle.coordinator.discard(separate.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
+            assertThat(worker.responses).hasSize(4).allSatisfy(response ->
+                    assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK));
         }
     }
 
@@ -264,7 +281,7 @@ class SmppLifecycleAdmissionTest {
             worker.enqueueIn(first);
             worker.processQueued();
             worker.enqueueIn(second);
-            worker.expire(first.pMsg);
+            worker.expire(first.pMsg, lifecycle.pending);
             var events = worker.queued();
             var unprocessed = events.stream().filter(event -> event.submitSm != null).findFirst().orElseThrow();
             var expired = events.stream().filter(event -> event.submitSm == null).findFirst().orElseThrow();
@@ -274,7 +291,7 @@ class SmppLifecycleAdmissionTest {
             assertThat(lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow().message().body).isEqualTo("first");
             worker.handleIngressMessages(List.of(unprocessed));
             assertThat(lifecycle.coordinator.selectToRouter(2)).isZero();
-            worker.expire(second.pMsg);
+            worker.expire(second.pMsg, lifecycle.pending);
             worker.processQueued();
             assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
             assertThat(lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow().message().body).isEqualTo("second");
@@ -368,8 +385,9 @@ class SmppLifecycleAdmissionTest {
             handleIngressMessages(queued());
         }
 
-        private void expire(StandardMessage part) {
-            messagePartsHandler.new DelayedMessagePartsTask(MessageUtil.getMessageReference(part)).call();
+        private void expire(StandardMessage part, PendingMessageStore<StandardMessage> pending) {
+            var membership = pending.findMultipart(new SourceId(UUID.fromString(part.serial))).orElseThrow();
+            messagePartsHandler.new DelayedMessagePartsTask(membership.groupId().toString()).call();
         }
 
         @Override

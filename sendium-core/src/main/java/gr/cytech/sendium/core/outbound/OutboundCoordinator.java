@@ -7,6 +7,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -40,6 +41,9 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
 
     /** Accepts ownership without making the source routable; returns the same confirmed handle as accept. */
     SourceId acceptHeld(SourceId source, M message);
+
+    /** Accepts a multipart source with stable group membership before protocol success. */
+    MultipartMembership acceptPart(SourceId source, M message, Duration timeout);
 
     /**
      * Makes already-accepted held sources available to bounded selection using one prepared execution message.

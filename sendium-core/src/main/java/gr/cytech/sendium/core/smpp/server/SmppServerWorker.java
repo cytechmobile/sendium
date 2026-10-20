@@ -30,6 +30,7 @@ import gr.cytech.sendium.core.smpp.server.tasks.PrintStatisticsTask;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.worker.FailDelayPolicy;
 import gr.cytech.sendium.core.worker.FailDelayPolicyAction;
 import gr.cytech.sendium.core.worker.WorkerType;
@@ -47,6 +48,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -148,7 +150,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     protected MessagePartsHandler<M> messagePartsHandler;
     protected boolean isFastUnsafeStop = false;
     private final ReentrantReadWriteLock ingressLifecycleLock = new ReentrantReadWriteLock(true);
-    private final Map<M, Set<SourceId>> pendingPartSources = Collections.synchronizedMap(new IdentityHashMap<>());
+    private final Map<M, MultipartMembership> pendingPartSources = Collections.synchronizedMap(new IdentityHashMap<>());
     private volatile OutboundCoordinator<M> ingressCoordinator;
     private volatile boolean ingressStarted;
 
@@ -1024,10 +1026,12 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                     throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNSUPPORTED,
                             "Unsupported multipart header");
                 }
-                SourceId acceptedSource = ingressCoordinator.acceptHeld(source, event.pMsg);
+                var membership = ingressCoordinator.acceptPart(source, event.pMsg,
+                        Duration.ofMillis(messagePartsHandler.getTimeoutInMilliseconds()));
+                SourceId acceptedSource = membership.source();
                 event.pMsg.serial = acceptedSource.value().toString();
                 synchronized (pendingPartSources) {
-                    pendingPartSources.computeIfAbsent(event.pMsg, ignored -> new HashSet<>()).add(acceptedSource);
+                    pendingPartSources.put(event.pMsg, membership);
                 }
                 InEvent<M> accepted = new InEvent<>(event.pMsg, event.submitSm, event.mpid, event.localTimestamp,
                         false, event.responseMessageId, Set.of(acceptedSource));
@@ -1093,8 +1097,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                     }
                     if (event.submitSm == null) {
                         ingressCoordinator.makeHeldReady(event.sourceIds, event.pMsg);
-                    } else if (pendingPartSources.containsKey(event.pMsg)) {
-                        messagePartsHandler.addMessagePart(event.pMsg);
+                    } else {
+                        var membership = pendingPartSources.get(event.pMsg);
+                        if (membership != null) {
+                            messagePartsHandler.addAcceptedPart(event.pMsg, membership);
+                        }
                     }
                     // A replayed raw event may already have handed its sources to a retained part or ready event.
                     continue;
@@ -1412,19 +1419,6 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     public class CcatMessagePartsEventsListener implements MessagePartsEventsListener<M> {
         @Override
-        public void onDuplicateMessagePart(M original, M duplicate) {
-            if (ingressCoordinator == null || original == duplicate) {
-                return;
-            }
-            synchronized (pendingPartSources) {
-                Set<SourceId> originalSources = requirePartSources(original);
-                Set<SourceId> duplicateSources = requirePartSources(duplicate);
-                originalSources.addAll(duplicateSources);
-                pendingPartSources.remove(duplicate);
-            }
-        }
-
-        @Override
         public void onMessagePartsHandlingEvent(MessagePartsHandler.MessagePartsEventType type, List<M> parts) {
 
             List<Set<SourceId>> sources = new ArrayList<>();
@@ -1464,11 +1458,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         private Set<SourceId> requirePartSources(M part) {
-            Set<SourceId> sources = pendingPartSources.get(part);
-            if (sources == null || sources.isEmpty()) {
+            var membership = pendingPartSources.get(part);
+            if (membership == null) {
                 throw new IllegalStateException("Reassembled part has no lifecycle source ownership");
             }
-            return sources;
+            return Set.of(membership.source());
         }
 
         @Override

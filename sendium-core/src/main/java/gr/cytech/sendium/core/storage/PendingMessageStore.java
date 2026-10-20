@@ -2,7 +2,9 @@ package gr.cytech.sendium.core.storage;
 
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -22,6 +24,18 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
 
     /** Retains an accepted source without making it eligible for selection until makeHeldReady succeeds. */
     SourceId admitHeld(SourceId source, M message);
+
+    /**
+     * Atomically accepts a held part with its immutable membership before acknowledgement. Every new source ID
+     * is independent: fill the oldest unexpired open matching group missing its ordinal, or create a new group.
+     * Creation order breaks ties. The first accepted part fixes the group's absolute deadline using timeout;
+     * later arrivals never extend it. An internal retry of a retained multipart source returns its original membership.
+     * A source already admitted without multipart membership cannot be converted through this method.
+     */
+    MultipartMembership admitPart(SourceId source, M message, Duration timeout);
+
+    /** Returns recorded membership for a retained multipart source; ordinary or absent sources have no membership. */
+    Optional<MultipartMembership> findMultipart(SourceId source);
 
     /** Returns an isolated accepted payload, or absence established by a ready backend; failures are not absence. */
     Optional<M> find(SourceId source);
@@ -43,6 +57,8 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * While all sources remain retained, repeating the exact source set preserves the first published
      * payload and cannot duplicate work, including after selection/routing. Missing, ordinarily admitted,
      * or differently grouped sources fail explicitly. The caller owns assembly/expiry policy.
+     * Assigned multipart sources may be published together only as their complete recorded group;
+     * partial/expired assigned parts are published individually, never mixed with another group or unassigned held sources.
      */
     void makeHeldReady(Set<SourceId> sources, M message);
 
