@@ -2,8 +2,12 @@ package gr.cytech.sendium.routing;
 
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
+import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.external.filter.FilterStatusCodes;
@@ -16,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -27,6 +32,52 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class StandardOutboundDispatchTest {
+    @Test
+    @SuppressWarnings("unchecked")
+    void repeatedStatusChecksAndDrainTimeoutsKeepOneMonitorPerCleanupAttempt() throws Exception {
+        var coordinator = mock(OutboundCoordinator.class);
+        var first = new CopyingCompletion();
+        var replacement = new CopyingCompletion();
+        var work = new Routed<>(new WorkId(UUID.randomUUID()), new SelectionId(UUID.randomUUID()),
+                "smpp.provider", message("hello"));
+        when(coordinator.complete(any(), any())).thenReturn(first, replacement);
+        var provider = mock(SmppClientWorker.class);
+        when(provider.getFullName()).thenReturn(work.destination());
+        try (var dispatch = new StandardOutboundDispatch(coordinator, mock(StandardRoutingManager.class))) {
+            var execution = dispatch.submitToProvider(work, provider);
+            dispatch.beginShutdown();
+            for (int i = 0; i < 10_000; i++) {
+                assertThat(execution.isCompletedSuccessfully()).isFalse();
+                assertThat(execution.hasCompletionFailure()).isFalse();
+                assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isFalse();
+            }
+            assertThat(first.copies).hasValue(1);
+            // Neither repeated waits nor their timeouts add dependents to the retained handoff.
+            assertThat(first.getNumberOfDependents()).isEqualTo(1);
+
+            first.completeExceptionally(new IllegalStateException("cleanup unavailable"));
+            assertThat(execution.hasCompletionFailure()).isTrue();
+            assertThatThrownBy(() -> dispatch.awaitProviderDrain(Duration.ZERO))
+                    .isInstanceOf(IllegalStateException.class).hasRootCauseMessage("cleanup unavailable");
+            execution.retryTerminalCleanup();
+            assertThat(execution.hasCompletionFailure()).isFalse();
+            assertThat(replacement.copies).hasValue(1);
+            replacement.complete(null);
+            assertThat(execution.isCompletedSuccessfully()).isTrue();
+            assertThat(dispatch.awaitProviderDrain(Duration.ZERO)).isTrue();
+        }
+    }
+
+    private static final class CopyingCompletion extends CompletableFuture<Void> {
+        private final AtomicInteger copies = new AtomicInteger();
+
+        @Override
+        public CompletableFuture<Void> toCompletableFuture() {
+            copies.incrementAndGet();
+            return minimalCompletionStage().toCompletableFuture();
+        }
+    }
+
     @Test
     void interruptedDestinationRecordingRetriesTheOriginalIntentWithoutRepeatingLookup() throws Exception {
         try (var fixture = new OutboundIngressFixture(1)) {

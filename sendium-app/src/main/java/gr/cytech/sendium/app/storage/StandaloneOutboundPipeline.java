@@ -30,6 +30,9 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.interceptor.Interceptor;
 import org.eclipse.microprofile.config.Config;
+import org.eclipse.microprofile.health.HealthCheck;
+import org.eclipse.microprofile.health.HealthCheckResponse;
+import org.eclipse.microprofile.health.Readiness;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,7 +46,8 @@ import java.util.concurrent.TimeUnit;
 
 /** Standalone-only assembly; importing sendium-core never starts these processors. */
 @ApplicationScoped
-public class StandaloneOutboundPipeline {
+@Readiness
+public class StandaloneOutboundPipeline implements HealthCheck {
     private static final Logger logger = LoggerFactory.getLogger(StandaloneOutboundPipeline.class);
     @Inject Instance<OutboundCoordinator<StandardMessage>> coordinators;
     OutboundCoordinator<StandardMessage> coordinator;
@@ -56,6 +60,7 @@ public class StandaloneOutboundPipeline {
     private int batchSize;
     private final Object schedulingLock = new Object();
     private boolean stopping;
+    private String processorFailure;
     private final Map<WorkId, StandardOutboundDispatch.ProviderExecution> executions = new ConcurrentHashMap<>();
 
     // Resolving profile validates the configured backends before constructing or starting any stage.
@@ -93,7 +98,7 @@ public class StandaloneOutboundPipeline {
 
     private void scheduleNextCycle(long delay) {
         synchronized (schedulingLock) {
-            if (!stopping) {
+            if (!stopping && processorFailure == null) {
                 processors.schedule(this::runProcessingCycle, delay, TimeUnit.MILLISECONDS);
             }
         }
@@ -101,12 +106,38 @@ public class StandaloneOutboundPipeline {
 
     private void runProcessingCycle() {
         synchronized (schedulingLock) {
-            if (stopping) {
+            if (stopping || processorFailure != null) {
                 return;
             }
         }
-        boolean progressed = process();
-        scheduleNextCycle(progressed ? 0 : 100);
+        try {
+            boolean progressed;
+            try {
+                progressed = process();
+            } catch (RuntimeException failure) {
+                logFailure("processing cycle", failure);
+                progressed = false;
+            }
+            scheduleNextCycle(progressed ? 0 : 100);
+        } catch (RuntimeException | Error failure) {
+            synchronized (schedulingLock) {
+                processorFailure = failure.getClass().getName();
+            }
+            logger.error("Standalone outbound processor terminated; readiness is DOWN", failure);
+            throw failure;
+        }
+    }
+
+    @Override
+    public HealthCheckResponse call() {
+        synchronized (schedulingLock) {
+            var health = HealthCheckResponse.named("standalone-outbound")
+                    .status(processors != null && !stopping && processorFailure == null);
+            if (processorFailure != null) {
+                health.withData("failureType", processorFailure);
+            }
+            return health.build();
+        }
     }
 
     boolean process() {
@@ -171,12 +202,11 @@ public class StandaloneOutboundPipeline {
     private void retryExecutions() {
         executions.entrySet().removeIf(entry -> {
             var execution = entry.getValue();
-            var completion = execution.completion().toCompletableFuture();
-            if (completion.isDone() && !completion.isCompletedExceptionally()) {
+            if (execution.isCompletedSuccessfully()) {
                 return true;
             }
             execution.retryPendingHandoffs();
-            if (completion.isCompletedExceptionally()) {
+            if (execution.hasCompletionFailure()) {
                 execution.retryTerminalCleanup();
             }
             return false;
