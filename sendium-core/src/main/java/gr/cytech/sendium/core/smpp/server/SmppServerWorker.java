@@ -1024,16 +1024,18 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                     throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNSUPPORTED,
                             "Unsupported multipart header");
                 }
-                ingressCoordinator.acceptHeld(source, event.pMsg);
+                SourceId acceptedSource = ingressCoordinator.acceptHeld(source, event.pMsg);
+                event.pMsg.serial = acceptedSource.value().toString();
                 synchronized (pendingPartSources) {
-                    pendingPartSources.computeIfAbsent(event.pMsg, ignored -> new HashSet<>()).add(source);
+                    pendingPartSources.computeIfAbsent(event.pMsg, ignored -> new HashSet<>()).add(acceptedSource);
                 }
                 InEvent<M> accepted = new InEvent<>(event.pMsg, event.submitSm, event.mpid, event.localTimestamp,
-                        false, event.responseMessageId, Set.of(source));
+                        false, event.responseMessageId, Set.of(acceptedSource));
                 accepted.notifyClient = event.notifyClient;
                 inEventQueue.add(accepted);
             } else {
-                ingressCoordinator.accept(source, event.pMsg);
+                SourceId acceptedSource = ingressCoordinator.accept(source, event.pMsg);
+                event.pMsg.serial = acceptedSource.value().toString();
             }
             if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
                 logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(), MessageTrace.identifiers(event.pMsg));

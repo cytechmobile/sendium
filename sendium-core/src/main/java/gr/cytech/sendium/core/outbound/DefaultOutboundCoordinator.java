@@ -122,32 +122,33 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     @Override
-    public void accept(SourceId source, M message) {
-        accept(source, message, false);
+    public SourceId accept(SourceId source, M message) {
+        return accept(source, message, false);
     }
 
-    private void accept(SourceId source, M message, boolean held) {
+    private SourceId accept(SourceId source, M message, boolean held) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(message, "message");
         lock.lock();
         try {
             requireRunning(Role.PENDING);
             if (sourceSelections.containsKey(source)) {
-                return;
+                return source;
             }
-            if (held) {
-                pending.admitHeld(source, message);
-            } else {
-                pending.admit(source, message);
+            SourceId accepted = held ? pending.admitHeld(source, message) : pending.admit(source, message);
+            if (!source.equals(accepted)) {
+                throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
+                        "Pending admission did not confirm the requested source handle");
             }
+            return accepted;
         } finally {
             lock.unlock();
         }
     }
 
     @Override
-    public void acceptHeld(SourceId source, M message) {
-        accept(source, message, true);
+    public SourceId acceptHeld(SourceId source, M message) {
+        return accept(source, message, true);
     }
 
     @Override

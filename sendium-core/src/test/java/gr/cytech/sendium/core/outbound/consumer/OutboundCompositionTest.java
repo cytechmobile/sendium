@@ -37,8 +37,12 @@ class OutboundCompositionTest {
                 selection, destination.name(), destination.message());
         when(router.take(Duration.ZERO)).thenReturn(Optional.of(selected));
         when(routed.record(assignment)).thenReturn(work);
+        when(pending.admit(source, message)).thenReturn(source);
+        when(pending.find(source)).thenReturn(Optional.of(message));
 
-        pending.admit(source, message);
+        OutboundWork.SourceId accepted = pending.admit(source, message);
+        assertThat(accepted).isEqualTo(source);
+        assertThat(pending.find(accepted).orElseThrow().campaignId).isEqualTo("campaign-7");
         CampaignMessage selectedMessage = router.take(Duration.ZERO).orElseThrow().message();
         CampaignMessage routedMessage = routed.record(assignment).message();
 

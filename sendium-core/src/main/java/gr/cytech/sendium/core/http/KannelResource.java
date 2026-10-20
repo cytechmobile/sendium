@@ -217,17 +217,20 @@ public class KannelResource {
             if (msg.acked) {
                 msg.dlrReturnMetadata = DlrReturnMetadata.http(usr, msg.from, msg.to, dlrUrl);
             }
+            String acceptedMessageId;
             if (outboundCoordinators.isUnsatisfied()) {
                 queueProvider.getRouterQueue().enqueue(msg);
+                acceptedMessageId = msg.serial;
             } else {
-                outboundCoordinators.get().accept(new SourceId(gatewayMessageId), msg);
+                SourceId accepted = outboundCoordinators.get().accept(new SourceId(gatewayMessageId), msg);
+                acceptedMessageId = accepted.value().toString();
             }
             if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
                 logger.info("message.accepted ingress=http {}", MessageTrace.identifiers(msg));
             }
 
             return Response.status(Response.Status.ACCEPTED)
-                    .entity(msg.serial)
+                    .entity(acceptedMessageId)
                     .build();
 
         } catch (OutboundStorageException e) {

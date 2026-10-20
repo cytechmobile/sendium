@@ -3,6 +3,8 @@ package gr.cytech.sendium.core.storage;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 
+import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 public interface PendingMessageStore<M extends StandardMessage> extends OutboundStage {
@@ -13,11 +15,26 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * not be acknowledged. This admits ready work, subject to the selection eligibility policy.
      * Repeating either admission method preserves the first accepted payload and held/ready disposition.
      * Deduplication after terminal source removal is not promised.
+     * Returns the supplied stable source handle only after backend acceptance; never returns null
+     * or substitutes another source ID. Callers must use this result before acknowledging success.
      */
-    void admit(SourceId source, M message);
+    SourceId admit(SourceId source, M message);
 
     /** Retains an accepted source without making it eligible for selection until makeHeldReady succeeds. */
-    void admitHeld(SourceId source, M message);
+    SourceId admitHeld(SourceId source, M message);
+
+    /** Returns an isolated accepted payload, or absence established by a ready backend; failures are not absence. */
+    Optional<M> find(SourceId source);
+
+    /**
+     * Returns at most limit retained source handles, including held/selected/routed sources, in UUID.compareTo
+     * order strictly after afterExclusive. Pass null to start; continue from the last returned ID, even if that
+     * source has since completed. An empty page ends traversal. limit must be positive. Pages are immutable.
+     * This is bounded recovery access, not selection or a payload backlog copy. A quiescent scan visits all
+     * retained sources once. Concurrent admission at/before the cursor may be missed; completed sources may
+     * disappear before find. Startup recovery must quiesce admission/processing rather than assume a snapshot.
+     */
+    List<SourceId> sourcesAfter(SourceId afterExclusive, int limit);
 
     /**
      * Makes held sources ready using one execution message referring to their nonempty source set. Original

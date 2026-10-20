@@ -6,9 +6,9 @@ import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.List;
 import java.util.NavigableMap;
 import java.util.NavigableSet;
 import java.util.Objects;
@@ -39,7 +39,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
     private final int capacity;
     private final UnaryOperator<M> snapshots;
     private final Function<? super M, Instant> eligibleAt;
-    private final Map<SourceId, Source<M>> records = new HashMap<>();
+    private final NavigableMap<SourceId, Source<M>> records = new TreeMap<>(Comparator.comparing(SourceId::value));
     private final NavigableMap<Integer, NavigableSet<Entry<M>>> waiting = new TreeMap<>(Comparator.reverseOrder());
     private State state = State.NEW;
     private Object selectorOwner;
@@ -83,18 +83,18 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
     }
 
     @Override
-    public void admit(SourceId source, M message) {
-        admit(source, message, false);
+    public SourceId admit(SourceId source, M message) {
+        return admit(source, message, false);
     }
 
-    private void admit(SourceId source, M message, boolean held) {
+    private SourceId admit(SourceId source, M message, boolean held) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(message, "message");
         lock.lock();
         try {
             requireReady(Role.PENDING);
             if (records.containsKey(source)) {
-                return;
+                return source;
             }
             if (records.size() >= capacity) {
                 throw new OutboundStorageException(Role.PENDING, CAPACITY_EXCEEDED, "Memory pending capacity reached");
@@ -107,14 +107,15 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
                 accepted.ready = ready;
                 addWaiting(ready);
             }
+            return source;
         } finally {
             lock.unlock();
         }
     }
 
     @Override
-    public void admitHeld(SourceId source, M message) {
-        admit(source, message, true);
+    public SourceId admitHeld(SourceId source, M message) {
+        return admit(source, message, true);
     }
 
     @Override
@@ -182,7 +183,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
                 "Ready publication requires retained held sources with one matching source set");
     }
 
-    /** Single-source lookup for memory-backend consumers; returns an isolated execution value. */
+    @Override
     public Optional<M> find(SourceId source) {
         Objects.requireNonNull(source, "source");
         lock.lock();
@@ -190,6 +191,28 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
             requireReady(Role.PENDING);
             Source<M> entry = records.get(source);
             return entry == null ? Optional.empty() : Optional.of(snapshot(entry.message, Role.PENDING));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Recovery page limit must be positive");
+        }
+        lock.lock();
+        try {
+            requireReady(Role.PENDING);
+            var remaining = afterExclusive == null ? records : records.tailMap(afterExclusive, false);
+            var page = new ArrayList<SourceId>();
+            for (SourceId source : remaining.navigableKeySet()) {
+                if (page.size() == limit) {
+                    break;
+                }
+                page.add(source);
+            }
+            return List.copyOf(page);
         } finally {
             lock.unlock();
         }
