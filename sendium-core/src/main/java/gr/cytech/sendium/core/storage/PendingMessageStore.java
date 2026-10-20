@@ -47,8 +47,11 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
     void makeHeldReady(Set<SourceId> sources, M message);
 
     /**
-     * Called only after all work and required handoffs are terminal. Missing sources are already
-     * complete. Partial multi-source completion is allowed; retrying the full set must be safe.
+     * Called only after all work and required handoffs are terminal. Successful return confirms that
+     * every requested source is absent. Missing sources count as complete only when a ready backend can
+     * establish their absence; unavailability, corrupt state, or inaccessible ownership must fail explicitly.
+     * A failed call may have removed some or all requested sources before its result became uncertain.
+     * Retrying the full source set must therefore be safe; a failure must never be treated as established absence.
      */
     void complete(Set<SourceId> sources);
 }

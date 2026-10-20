@@ -110,6 +110,40 @@ abstract class PendingMessageStoreContract {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void completionOfKnownAbsentSourceIsIdempotent(boolean held) {
+        try (var pending = createStore(2)) {
+            pending.open();
+            SourceId completed = source(1);
+            SourceId unrelated = source(2);
+            if (held) {
+                pending.admitHeld(completed, message(completed, "held"));
+            } else {
+                pending.admit(completed, message(completed, "ready"));
+            }
+            pending.admit(unrelated, message(unrelated, "unrelated"));
+            pending.complete(Set.of(completed));
+            assertThat(pending.find(completed)).isEmpty();
+            pending.complete(Set.of(completed));
+            pending.complete(Set.of(source(3)));
+            assertThat(pending.find(unrelated).orElseThrow().body).isEqualTo("unrelated");
+            assertThat(pending.sourcesAfter(null, 3)).containsExactly(unrelated);
+            pending.admit(source(4), message(source(4), "replacement"));
+        }
+    }
+
+    @Test
+    void completionRequiresReadyBackendEvenForMissingHandles() {
+        try (var pending = createStore(1)) {
+            assertUnavailable(() -> pending.complete(Set.of(source(1))));
+            pending.open();
+            pending.complete(Set.of(source(1)));
+            pending.close();
+            assertUnavailable(() -> pending.complete(Set.of(source(1))));
+        }
+    }
+
     @Test
     void reportsBackendIdentityAndReadiness() {
         try (var pending = createStore(1)) {
