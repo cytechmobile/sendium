@@ -9,6 +9,7 @@ import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardRoutingManager;
 import org.eclipse.microprofile.config.Config;
+import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -24,6 +25,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -40,6 +42,43 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class StandaloneOutboundSchedulingTest {
+    @Test
+    void recoverableCycleFailureBacksOffAndKeepsReadinessUp() throws Exception {
+        try (var fixture = new SchedulingFixture()) {
+            doThrow(new IllegalStateException("cycle unavailable")).doCallRealMethod().when(fixture.pipeline).process();
+            fixture.runNext();
+            assertThat(fixture.nextDelay()).isEqualTo(100);
+            assertThat(fixture.pipeline.call().getStatus()).isEqualTo(HealthCheckResponse.Status.UP);
+            fixture.accept(1);
+            fixture.runNext();
+            assertThat(fixture.nextDelay()).isZero();
+            verify(fixture.routing).lookupForLifecycle(any());
+        }
+    }
+
+    @Test
+    void fatalCycleFailureMarksReadinessDownAndDoesNotSilentlyReschedule() throws Exception {
+        try (var fixture = new SchedulingFixture()) {
+            var failure = new LinkageError("simulated fatal processor failure");
+            doThrow(failure).when(fixture.pipeline.coordinator).selectToRouter(2);
+            assertThatThrownBy(fixture::runNext).isSameAs(failure);
+            assertThat(fixture.cycles).hasSize(1);
+            var health = fixture.pipeline.call();
+            assertThat(health.getStatus()).isEqualTo(HealthCheckResponse.Status.DOWN);
+            assertThat(health.getData().orElseThrow()).containsEntry("failureType", LinkageError.class.getName());
+        }
+    }
+
+    @Test
+    void failedReschedulingMarksReadinessDown() throws Exception {
+        try (var fixture = new SchedulingFixture()) {
+            doThrow(new java.util.concurrent.RejectedExecutionException("scheduler unavailable"))
+                    .when(fixture.scheduler).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+            assertThatThrownBy(fixture::runNext).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
+            assertThat(fixture.pipeline.call().getStatus()).isEqualTo(HealthCheckResponse.Status.DOWN);
+        }
+    }
+
     @Test
     void productiveBacklogContinuesImmediatelyInBoundedCyclesThenBacksOff() throws Exception {
         try (var fixture = new SchedulingFixture()) {
@@ -145,7 +184,7 @@ class StandaloneOutboundSchedulingTest {
     private static final class SchedulingFixture implements AutoCloseable {
         private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         private final StandardRoutingManager routing = mock(StandardRoutingManager.class);
-        private final StandaloneOutboundPipeline pipeline = new StandaloneOutboundPipeline();
+        private final StandaloneOutboundPipeline pipeline = spy(new StandaloneOutboundPipeline());
         private final List<Runnable> cycles = new ArrayList<>();
         private final List<Long> delays = new ArrayList<>();
         private int nextCycle;

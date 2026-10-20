@@ -131,9 +131,9 @@ or provider scheduling. Idle, paused, or unsuccessful cycles back off for 100 mi
 selection or returning an unroutable item alone does not count as progress. Shutdown prevents
 further cycle scheduling. Batch size is not TPS or provider
 concurrency: attempts use the worker's shared rate limiter and a dispatcher-owned execution pool
-sized by its `threadCount`. A sending slot is reserved before executor submission, bounding queued
-plus executing preparation tasks. The default shared two-thread scheduler handles destination
-resolution and timed retries; rate waits, worker filters, and SMPP sends run on the worker's pool.
+sized by its `threadCount`. At most that many preparation loops execute concurrently, taking waiting
+attempts from the worker FIFO. The default shared two-thread scheduler handles destination resolution
+and timed retries; rate waits, worker filters, and SMPP sends run on the worker's pool.
 Stopped-worker pools are retired during transition maintenance, and dispatcher close shuts down
 its worker pools after provider drain even when the timer scheduler is application-owned.
 Awaiting asynchronous outcomes does not hold a sending slot. Count limits do not bound message bytes.
@@ -174,6 +174,21 @@ attempts, not either storage-return operation.
 Each provider response is claimed once; duplicate callbacks cannot create another replacement or
 complete unrelated sources. Admission deduplication applies while ownership is retained, not forever.
 Runtime worker removal's legacy queue return does not migrate coordinator-owned parent records.
+
+Provider preparation uses a per-worker FIFO of already-owned runtime attempts. Up to the worker's
+`threadCount` preparation threads drain it directly as capacity becomes available; busy work does not
+create a separate contention timer per message. Paused backlogs share one worker wake-up. Preparation
+capacity is released after preparation/submission, without waiting for asynchronous provider responses
+or DLR handoffs. The retained source-capacity bound still governs admitted work.
+
+Each provider execution retains one private completion monitor per terminal-cleanup attempt. Status
+polling reuses that monitor, and repeated drain timeouts wait on completion notifications instead of
+attaching new future copies or aggregate completion trees to outstanding work.
+
+The standalone pipeline contributes the `standalone-outbound` readiness check. Recoverable processing
+cycle failures back off and retry. A fatal cycle failure or failed rescheduling is logged with its
+exception and makes readiness DOWN, with only the failure class exposed in health data. Readiness is
+also DOWN before pipeline activation and during shutdown; a terminated chain is not silently restarted.
 
 ## Graceful Shutdown
 

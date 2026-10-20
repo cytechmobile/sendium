@@ -16,6 +16,7 @@ import gr.cytech.sendium.external.filter.FilterStatusCodes;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -27,7 +28,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -39,7 +40,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
     private final ConcurrentMap<SmppClientWorker<StandardMessage>, WorkerExecution> workerExecutors = new ConcurrentHashMap<>();
-    private final ConcurrentMap<WorkId, CompletionStage<Void>> activeExecutions = new ConcurrentHashMap<>();
+    private final ConcurrentMap<WorkId, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
+    private final Object completionLock = new Object();
     private boolean shuttingDown;
     private boolean closed;
     private final ConcurrentMap<SelectionId, PendingRouting> routingTransitions = new ConcurrentHashMap<>();
@@ -158,7 +160,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         execution.retryCompletion = () -> track(work.id(), coordinator.complete(work.id(), execution.attempts));
         CompletionStage<Void> attempts = scheduleAttempt(work.message(), () -> worker, execution);
         execution.attempts = attempts;
-        execution.completion = track(work.id(), coordinator.complete(work.id(), attempts));
+        execution.setCompletion(track(work.id(), coordinator.complete(work.id(), attempts)));
         return execution;
     }
 
@@ -197,33 +199,53 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         if (timeout.isNegative()) {
             throw new IllegalArgumentException("Negative drain timeout");
         }
-        CompletableFuture<?>[] completions;
+        long remaining = timeout.toNanos();
         synchronized (this) {
             if (!shuttingDown) {
                 throw new IllegalStateException("Begin dispatch shutdown before awaiting provider drain");
             }
-            completions = activeExecutions.values().stream().map(CompletionStage::toCompletableFuture)
-                    .toArray(CompletableFuture[]::new);
         }
-        try {
-            CompletableFuture.allOf(completions).get(timeout.toNanos(), TimeUnit.NANOSECONDS);
-            removeSuccessfulExecutions();
-            return true;
-        } catch (java.util.concurrent.TimeoutException timeoutFailure) {
-            return false;
-        } catch (java.util.concurrent.ExecutionException failure) {
-            throw new IllegalStateException("Resolve failed provider handoffs or terminal cleanup before shutdown", failure.getCause());
+        synchronized (completionLock) {
+            while (true) {
+                removeSuccessfulExecutions();
+                for (var completion : activeExecutions.values()) {
+                    if (completion.isCompletedExceptionally()) {
+                        try {
+                            completion.join();
+                        } catch (java.util.concurrent.CompletionException | java.util.concurrent.CancellationException failure) {
+                            throw new IllegalStateException("Resolve failed provider handoffs or terminal cleanup before shutdown",
+                                    failure.getCause() == null ? failure : failure.getCause());
+                        }
+                    }
+                }
+                if (activeExecutions.isEmpty()) {
+                    return true;
+                }
+                if (remaining <= 0) {
+                    return false;
+                }
+                long started = System.nanoTime();
+                TimeUnit.NANOSECONDS.timedWait(completionLock, remaining);
+                remaining -= System.nanoTime() - started;
+            }
         }
     }
 
-    private CompletionStage<Void> track(WorkId id, CompletionStage<Void> completion) {
-        activeExecutions.put(id, completion);
-        completion.whenComplete((ignored, failure) -> {
-            if (failure == null) {
-                activeExecutions.remove(id, completion);
+    private CompletableFuture<Void> track(WorkId id, CompletionStage<Void> completion) {
+        var monitor = completion.toCompletableFuture();
+        synchronized (completionLock) {
+            activeExecutions.put(id, monitor);
+            completionLock.notifyAll();
+        }
+        monitor.whenComplete((ignored, failure) -> {
+            synchronized (completionLock) {
+                if (failure == null) {
+                    activeExecutions.remove(id, monitor);
+                }
+                completionLock.notifyAll();
             }
         });
-        return completion;
+        return monitor;
     }
 
     private void requireDispatching() {
@@ -233,10 +255,9 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     }
 
     private void removeSuccessfulExecutions() {
-        activeExecutions.entrySet().removeIf(entry -> {
-            var completion = entry.getValue().toCompletableFuture();
-            return completion.isDone() && !completion.isCompletedExceptionally();
-        });
+        synchronized (completionLock) {
+            activeExecutions.values().removeIf(completion -> completion.isDone() && !completion.isCompletedExceptionally());
+        }
     }
 
     /** Call after drain and execution-loop stop/join; parent stores remain application-owned. */
@@ -251,7 +272,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
             throw new IllegalStateException("Resolve unfinished routing transitions before closing outbound dispatch");
         }
         closed = true;
-        workerExecutors.values().forEach(execution -> execution.executor.shutdown());
+        workerExecutors.values().forEach(WorkerExecution::stop);
         workerExecutors.clear();
         if (ownsScheduler) {
             scheduler.shutdown();
@@ -270,7 +291,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
             if (entry.getKey().isKeepOnRunning()) {
                 return false;
             }
-            entry.getValue().executor.shutdown();
+            entry.getValue().stop();
             return true;
         });
     }
@@ -285,21 +306,99 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
         CompletableFuture<?>[] parts = handoffs.stream().map(CompletionStage::toCompletableFuture)
                 .toArray(CompletableFuture[]::new);
-        return track(work.id(), coordinator.complete(work.id(), CompletableFuture.allOf(parts)));
+        return track(work.id(), coordinator.complete(work.id(), CompletableFuture.allOf(parts))).minimalCompletionStage();
     }
 
-    /** Slots bound submitted preparation tasks, including any tasks waiting in the executor. */
-    private static final class WorkerExecution {
-        private final Semaphore slots;
+    /** Owned attempts wait once in FIFO order; preparation threads continue directly when capacity frees. */
+    private final class WorkerExecution {
+        private final SmppClientWorker<StandardMessage> worker;
+        private final int threads;
+        private final ArrayDeque<ProviderAttempt> waiting = new ArrayDeque<>();
         private final ThreadPoolExecutor executor;
+        private int running;
+        private ScheduledFuture<?> wakeup;
 
         private WorkerExecution(SmppClientWorker<StandardMessage> worker) {
-            int threads = Math.max(1, worker.getThreadCount());
-            slots = new Semaphore(threads);
+            this.worker = worker;
+            threads = Math.max(1, worker.getThreadCount());
             executor = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
                     new ArrayBlockingQueue<>(threads),
                     Thread.ofPlatform().name("outbound-provider-" + worker.getFullName() + "-", 1).daemon(true).factory());
             executor.allowCoreThreadTimeOut(true);
+        }
+
+        private synchronized void enqueue(ProviderAttempt attempt) {
+            waiting.addLast(attempt);
+            dispatchWaiting();
+        }
+
+        private void dispatchWaiting() {
+            if (waiting.isEmpty()) {
+                return;
+            }
+            try {
+                if (!worker.isKeepOnRunning() || executor.isShutdown()) {
+                    throw new IllegalStateException("Destination worker stopped: " + worker.getFullName());
+                }
+                if (worker.isPause()) {
+                    if (wakeup == null) {
+                        wakeup = scheduler.schedule(this::resume, 100, TimeUnit.MILLISECONDS);
+                    }
+                    return;
+                }
+                int available = Math.min(threads - running, waiting.size());
+                for (int i = 0; i < available; i++) {
+                    running++;
+                    try {
+                        executor.execute(this::drain);
+                    } catch (RuntimeException failure) {
+                        running--;
+                        throw failure;
+                    }
+                }
+            } catch (RuntimeException failure) {
+                failWaiting(failure);
+            }
+        }
+
+        private synchronized void resume() {
+            wakeup = null;
+            dispatchWaiting();
+        }
+
+        private void drain() {
+            try {
+                while (true) {
+                    ProviderAttempt next;
+                    synchronized (this) {
+                        if (waiting.isEmpty() || !worker.isKeepOnRunning() || worker.isPause()) {
+                            return;
+                        }
+                        next = waiting.removeFirst();
+                    }
+                    next.prepare();
+                }
+            } finally {
+                synchronized (this) {
+                    running--;
+                    dispatchWaiting();
+                }
+            }
+        }
+
+        private void failWaiting(RuntimeException failure) {
+            while (!waiting.isEmpty()) {
+                waiting.removeFirst().fail(failure);
+            }
+        }
+
+        private synchronized void stop() {
+            if (wakeup != null) {
+                wakeup.cancel(false);
+                wakeup = null;
+            }
+            failWaiting(new IllegalStateException("Destination worker stopped: " + worker.getFullName()));
+            executor.shutdown();
         }
     }
 
@@ -358,8 +457,6 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                 }
                 state = AttemptState.PREPARING;
             }
-            WorkerExecution destination = null;
-            boolean reserved = false;
             try {
                 if (worker == null) {
                     worker = Objects.requireNonNull(resolveDestination.get(), "retry destination");
@@ -367,38 +464,24 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                 if (!worker.isKeepOnRunning()) {
                     throw new IllegalStateException("Destination worker stopped: " + worker.getFullName());
                 }
-                if (worker.isPause()) {
-                    synchronized (this) {
-                        state = AttemptState.QUEUED;
-                        schedule(100);
-                    }
-                    return;
-                }
-                destination = executionFor(worker);
-                if (!destination.slots.tryAcquire()) {
-                    synchronized (this) {
-                        state = AttemptState.QUEUED;
-                        schedule(100);
-                    }
-                    return;
-                }
-                reserved = true;
-                WorkerExecution reservedDestination = destination;
-                destination.executor.execute(() -> prepare(reservedDestination));
-                reserved = false;
-            } catch (Exception error) {
                 synchronized (this) {
-                    state = AttemptState.FAILED;
-                    failure = error;
+                    state = AttemptState.QUEUED;
                 }
-            } finally {
-                if (reserved) {
-                    destination.slots.release();
-                }
+                executionFor(worker).enqueue(this);
+            } catch (Exception error) {
+                fail(error);
             }
         }
 
-        private void prepare(WorkerExecution destination) {
+        private synchronized void fail(Throwable error) {
+            state = AttemptState.FAILED;
+            failure = error;
+        }
+
+        private void prepare() {
+            synchronized (this) {
+                state = AttemptState.PREPARING;
+            }
             try {
                 var submission = worker.submitPreparedCoordinated(message, (payload, policy) ->
                         scheduleAttempt(payload, policy == SmppClientWorker.NackHandlePolicy.RETRY_ROUTER ?
@@ -417,12 +500,10 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                     }
                 });
             } catch (Exception error) {
-                synchronized (this) {
-                    state = AttemptState.FAILED;
-                    failure = error;
-                }
-            } finally {
-                destination.slots.release();
+                fail(error);
+            } catch (Error error) {
+                fail(error);
+                throw error;
             }
         }
     }
@@ -432,11 +513,26 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         private final List<CoordinatedSmppSubmission<StandardMessage>> submissions = new CopyOnWriteArrayList<>();
         private final List<ProviderAttempt> providerAttempts = new CopyOnWriteArrayList<>();
         private CompletionStage<Void> completion;
+        private CompletableFuture<Void> completionMonitor;
         private CompletionStage<Void> attempts;
-        private java.util.function.Supplier<CompletionStage<Void>> retryCompletion;
+        private Supplier<CompletableFuture<Void>> retryCompletion;
+
+        private void setCompletion(CompletableFuture<Void> monitor) {
+            completionMonitor = monitor;
+            completion = monitor.minimalCompletionStage();
+        }
 
         public CompletionStage<Void> completion() {
             return completion;
+        }
+
+        /** Status checks reuse the monitor instead of copying an incomplete minimal stage on every poll. */
+        public boolean isCompletedSuccessfully() {
+            return completionMonitor.isDone() && !completionMonitor.isCompletedExceptionally();
+        }
+
+        public boolean hasCompletionFailure() {
+            return completionMonitor.isCompletedExceptionally();
         }
 
         public void retryPendingHandoffs() {
@@ -451,7 +547,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
         /** Retries store cleanup after successful handoffs without sending the message again. */
         public CompletionStage<Void> retryTerminalCleanup() {
-            completion = retryCompletion.get();
+            setCompletion(retryCompletion.get());
             return completion;
         }
     }

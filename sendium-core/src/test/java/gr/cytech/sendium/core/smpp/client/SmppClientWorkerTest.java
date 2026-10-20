@@ -41,7 +41,9 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -117,7 +119,6 @@ class SmppClientWorkerTest {
     @Test
     void legacyAndCoordinatedMessagesShareTheConfiguredWorkerRateLimit() throws Exception {
         var worker = new LegacyRateWorker();
-        worker.configureRate(2);
         var queue = new Queue<StandardMessage>();
         queue.enqueue(messageWithNetwork());
         worker.useQueue(queue);
@@ -125,6 +126,8 @@ class SmppClientWorkerTest {
         when(container.requestContext()).thenReturn(mock(ManagedContext.class));
         try (var arc = mockStatic(Arc.class)) {
             arc.when(Arc::container).thenReturn(container);
+            // Start the limiter after mock instrumentation, which otherwise accrues stored permits.
+            worker.configureRate(2);
             worker.new Worker(0).run();
         }
         assertThat(worker.legacySends).isEqualTo(1);
@@ -255,6 +258,96 @@ class SmppClientWorkerTest {
             assertThat(worker.preparations).isEqualTo(2);
         } finally {
             rateGate.complete(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void busyWorkerDrainsItsFifoWithoutContentionTimersOrWaitingForProviderResponses() throws Exception {
+        var delayedTasks = new AtomicInteger();
+        var scheduler = new ScheduledThreadPoolExecutor(1) {
+            @Override
+            public ScheduledFuture<?> schedule(Runnable task, long delay, TimeUnit unit) {
+                if (delay > 0) {
+                    delayedTasks.incrementAndGet();
+                    return super.schedule(task, 1, TimeUnit.DAYS);
+                }
+                return super.schedule(task, delay, unit);
+            }
+        };
+        var rateGate = new CompletableFuture<Void>();
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.rateGate = rateGate;
+        int count = 256;
+        try (var fixture = new OutboundIngressFixture(count);
+             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class), scheduler)) {
+            var executions = new java.util.ArrayList<StandardOutboundDispatch.ProviderExecution>();
+            var messages = new java.util.ArrayList<String>();
+            for (int i = 0; i < count; i++) {
+                var message = messageWithNetwork();
+                message.body = "message-" + i;
+                messages.add(message.body);
+                fixture.coordinator.accept(new SourceId(UUID.randomUUID()), message);
+            }
+            fixture.coordinator.selectToRouter(count);
+            for (int i = 0; i < count; i++) {
+                var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                fixture.coordinator.recordToRouted(selected, new Destination<>(worker.getFullName(), selected.message()));
+                executions.add(dispatch.submitToProvider(
+                        fixture.coordinator.takeFromRouted(worker.getFullName(), Duration.ZERO).orElseThrow(), worker));
+            }
+            assertThat(worker.rateEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
+            assertThat(worker.rateChecks).isEqualTo(1);
+            assertThat(delayedTasks).hasValue(0);
+            dispatch.beginShutdown();
+            rateGate.complete(null);
+            worker.awaitRequests(count);
+            assertThat(worker.coordinatedRequests).extracting(request ->
+                    CharsetUtil.decode(request.getShortMessage(), CharsetUtil.NAME_GSM)).containsExactlyElementsOf(messages);
+            assertThat(delayedTasks).hasValue(0);
+            // Preparation slots are released before provider responses/handoffs, preserving the SMPP window.
+            assertThat(executions).allSatisfy(execution -> assertThat(execution.isCompletedSuccessfully()).isFalse());
+            worker.coordinatedRequests.forEach(request -> respond(handler(worker), request, SmppConstants.STATUS_OK));
+            assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(5))).isTrue();
+            assertThat(executions).allSatisfy(execution -> assertThat(execution.isCompletedSuccessfully()).isTrue());
+        } finally {
+            rateGate.complete(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void pausedWorkerSharesOneWakeupAcrossItsBacklogAndResumesDuringDrain() throws Exception {
+        var wakeups = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
+        var scheduler = new ScheduledThreadPoolExecutor(1) {
+            @Override
+            public ScheduledFuture<?> schedule(Runnable task, long delay, TimeUnit unit) {
+                if (delay > 0) {
+                    wakeups.add(task);
+                    return super.schedule(task, 1, TimeUnit.DAYS);
+                }
+                return super.schedule(task, delay, unit);
+            }
+        };
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.testPaused = true;
+        try (var fixture = new OutboundIngressFixture(16);
+             var dispatch = new StandardOutboundDispatch(fixture.coordinator, mock(StandardRoutingManager.class), scheduler)) {
+            for (int i = 0; i < 16; i++) {
+                submitOwned(dispatch, fixture, worker);
+            }
+            scheduler.submit(() -> { }).get(5, TimeUnit.SECONDS);
+            assertThat(wakeups).hasSize(1);
+            assertThat(worker.preparations).isZero();
+            dispatch.beginShutdown();
+            worker.testPaused = false;
+            wakeups.getFirst().run();
+            worker.awaitRequests(16);
+            worker.coordinatedRequests.forEach(request -> respond(handler(worker), request, SmppConstants.STATUS_OK));
+            assertThat(dispatch.awaitProviderDrain(Duration.ofSeconds(5))).isTrue();
+            assertThat(wakeups).hasSize(1);
+        } finally {
             scheduler.shutdownNow();
         }
     }
