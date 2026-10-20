@@ -51,6 +51,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
     private final Clock clock;
     private final NavigableMap<SourceId, Source<M>> records = new TreeMap<>(Comparator.comparing(SourceId::value));
     private final Map<MultipartKey, List<MultipartGroup>> openGroups = new HashMap<>();
+    private final Map<UUID, MultipartGroup> retainedGroups = new HashMap<>();
     private final NavigableMap<Integer, NavigableSet<Entry<M>>> waiting = new TreeMap<>(Comparator.reverseOrder());
     private State state = State.NEW;
     private Object selectorOwner;
@@ -184,6 +185,8 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
             }
             var membership = new MultipartMembership(source, chosen.id, key, ordinal, chosen.deadline, chosen.order);
             records.put(source, new Source<>(snapshot, membership, chosen));
+            chosen.sources.put(ordinal, source);
+            retainedGroups.put(chosen.id, chosen);
             openGroups.put(key, groups);
             chosen.ordinals.set(ordinal);
             if (chosen.ordinals.cardinality() == key.total()) {
@@ -218,6 +221,19 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
             if (groups.isEmpty()) {
                 openGroups.remove(group.key);
             }
+        }
+    }
+
+    @Override
+    public List<SourceId> multipartSources(UUID groupId) {
+        Objects.requireNonNull(groupId, "groupId");
+        lock.lock();
+        try {
+            requireReady(Role.PENDING);
+            MultipartGroup group = retainedGroups.get(groupId);
+            return group == null ? List.of() : List.copyOf(group.sources.values());
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -349,6 +365,12 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
                 Source<M> entry = records.remove(source);
                 if (entry != null) {
                     closeGroup(entry.group);
+                    if (entry.group != null) {
+                        entry.group.sources.remove(entry.membership.ordinal());
+                        if (entry.group.sources.isEmpty()) {
+                            retainedGroups.remove(entry.group.id);
+                        }
+                    }
                     if (entry.ready != null) {
                         removeWaiting(entry.ready);
                     }
@@ -366,6 +388,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
             state = State.CLOSED;
             records.clear();
             openGroups.clear();
+            retainedGroups.clear();
             waiting.clear();
             changed.signalAll();
         } finally {
@@ -470,6 +493,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         private final Instant deadline;
         private final long order;
         private final BitSet ordinals = new BitSet();
+        private final NavigableMap<Integer, SourceId> sources = new TreeMap<>();
 
         private MultipartGroup(MultipartKey key, Instant deadline, long order) {
             this.key = key;

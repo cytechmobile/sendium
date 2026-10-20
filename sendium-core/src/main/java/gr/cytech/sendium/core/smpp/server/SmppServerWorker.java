@@ -30,7 +30,9 @@ import gr.cytech.sendium.core.smpp.server.tasks.PrintStatisticsTask;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 import gr.cytech.sendium.core.worker.FailDelayPolicy;
 import gr.cytech.sendium.core.worker.FailDelayPolicyAction;
 import gr.cytech.sendium.core.worker.WorkerType;
@@ -223,6 +225,19 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
     }
 
+    /** Reconstruct accepted work before startup; this neither opens a backend nor enables a durable profile. */
+    public void reconstructPendingParts(PendingMessageStore<M> pending, int pageSize) {
+        ingressLifecycleLock.writeLock().lock();
+        try {
+            if (ingressStarted || inExecutor != null || ingressCoordinator == null) {
+                throw new IllegalStateException("Pending reconstruction requires a selected coordinator before startup/admission");
+            }
+            messagePartsHandler.reconstruct(pending, pageSize, ingressCoordinator::makeHeldReady);
+        } finally {
+            ingressLifecycleLock.writeLock().unlock();
+        }
+    }
+
     @Override
     public String getType() {
         return TYPE_SMPP_SERVER;
@@ -232,6 +247,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public Thread start() {
         ingressLifecycleLock.writeLock().lock();
         try {
+            requirePendingRecoveryReady();
             ingressStarted = true;
         } finally {
             ingressLifecycleLock.writeLock().unlock();
@@ -627,6 +643,10 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     protected void configReassemblingTimeout() {
         long timeout = configurationProvider.getLongPrpt(_timeoutMillis);
+        if (messagePartsHandler != null && messagePartsHandler.isRecordDriven()) {
+            messagePartsHandler.setTimeoutInMilliseconds(timeout > 0 ? timeout : 30000L);
+            return;
+        }
         if (timeout > 0) {
             setMessagePartsHandler(new MessagePartsHandler<M>(new CcatMessagePartsEventsListener(), configurationProvider.getLongPrpt(_timeoutMillis)));
             logger.warn("configReassemblingTimeout|warn|set:{}", timeout);
@@ -1020,6 +1040,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     private boolean admitToLifecycle(InEvent<M> event, UUID gatewayMessageId) {
         try {
+            requirePendingRecoveryReady();
             SourceId source = new SourceId(gatewayMessageId);
             if (event.submitSm != null && !Strings.isNullOrEmpty(event.pMsg.binheader)) {
                 if (!messagePartsHandler.isSupportedMessagePart(event.pMsg)) {
@@ -1030,8 +1051,10 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                         Duration.ofMillis(messagePartsHandler.getTimeoutInMilliseconds()));
                 SourceId acceptedSource = membership.source();
                 event.pMsg.serial = acceptedSource.value().toString();
-                synchronized (pendingPartSources) {
-                    pendingPartSources.put(event.pMsg, membership);
+                if (!messagePartsHandler.isRecordDriven()) {
+                    synchronized (pendingPartSources) {
+                        pendingPartSources.put(event.pMsg, membership);
+                    }
                 }
                 InEvent<M> accepted = new InEvent<>(event.pMsg, event.submitSm, event.mpid, event.localTimestamp,
                         false, event.responseMessageId, Set.of(acceptedSource));
@@ -1068,6 +1091,13 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
     }
 
+    private void requirePendingRecoveryReady() {
+        if (messagePartsHandler != null && messagePartsHandler.isRecordDriven() && !messagePartsHandler.isRecoveryReady()) {
+            throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNAVAILABLE,
+                    "Pending multipart reconstruction is not ready");
+        }
+    }
+
     protected boolean checkReassembling(M msg) {
         if (!this.keepOnRunning) {
             return true;
@@ -1097,6 +1127,8 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                     }
                     if (event.submitSm == null) {
                         ingressCoordinator.makeHeldReady(event.sourceIds, event.pMsg);
+                    } else if (messagePartsHandler.isRecordDriven()) {
+                        event.sourceIds.forEach(messagePartsHandler::addAcceptedSource);
                     } else {
                         var membership = pendingPartSources.get(event.pMsg);
                         if (membership != null) {
@@ -1431,11 +1463,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             }
             if (type == MessagePartsHandler.MessagePartsEventType.COMPLETE) {
                 //The first part contains the id that we need to send to the provider
-                M message = parts.getFirst();
-                //we make sure that the filter will not process again the reassembled message
-                message.binheader = null;
-                message.body = parts.stream().map(m -> m.body).collect(Collectors.joining(""));
-                message.reassembledParts = parts.stream().map(m -> m.serial).collect(Collectors.toCollection(ArrayList::new));
+                M message = PendingMultipartRecovery.assemble(parts);
 
                 Set<SourceId> allSources = sources.stream().flatMap(Set::stream).collect(Collectors.toSet());
                 InEvent<M> event = new InEvent<>(message, null, message.onetwork, new Timestamp(message.ctstamp),

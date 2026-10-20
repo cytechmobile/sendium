@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 public interface PendingMessageStore<M extends StandardMessage> extends OutboundStage {
     /**
@@ -36,6 +37,13 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
 
     /** Returns recorded membership for a retained multipart source; ordinary or absent sources have no membership. */
     Optional<MultipartMembership> findMultipart(SourceId source);
+
+    /**
+     * Returns retained handles assigned to one group, bounded by its declared total (at most 255).
+     * Includes members awaiting ingress processing, so expiry does not depend on notification order.
+     * Unknown or fully completed groups return an empty list; backend failures must still propagate.
+     */
+    List<SourceId> multipartSources(UUID groupId);
 
     /** Returns an isolated accepted payload, or absence established by a ready backend; failures are not absence. */
     Optional<M> find(SourceId source);

@@ -10,25 +10,91 @@ import com.cloudhopper.smpp.pdu.SubmitSmResp;
 import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.queue.Queue;
 import org.junit.jupiter.api.Test;
+import utils.OutboundIngressFixture;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 class SmppServerWorkerReassemblyTest {
+
+    @Test
+    void reconstructedGroupAcceptsNewPartWithoutReacknowledgingRecoveredSources() throws Exception {
+        try (var lifecycle = new OutboundIngressFixture(2)) {
+            var legacy = new Queue<StandardMessage>();
+            var worker = new TestSmppServerWorker(new TestConfigurationProvider(), legacy);
+            try {
+                SourceId firstId = new SourceId(UUID.randomUUID());
+                var first = messagePart("0500037F0201", "Hello ", firstId.value().toString());
+                lifecycle.coordinator.acceptPart(firstId, first, Duration.ofSeconds(60));
+                worker.setIngressCoordinator(lifecycle.coordinator);
+                worker.reconstructPendingParts(lifecycle.pending, 1);
+                assertThat(worker.outgoingPdus).isEmpty();
+                assertThat(lifecycle.coordinator.selectToRouter(1)).isZero();
+
+                var second = messagePart("0500037F0202", "world", "assigned at admission");
+                worker.enqueueIn(new InEvent<>(second, new SubmitSm(), 1, new Timestamp(System.currentTimeMillis())));
+                var acceptedEvent = worker.getInEventQueue().remove();
+                worker.handleIngressMessages(List.of(acceptedEvent));
+                assertThat(lifecycle.coordinator.selectToRouter(1)).isEqualTo(1);
+                var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                assertThat(selected.message().body).isEqualTo("Hello world");
+                assertThat(selected.sources()).containsExactlyInAnyOrder(firstId, new SourceId(UUID.fromString(second.serial)));
+                assertThat(worker.outgoingPdus).singleElement().satisfies(pdu ->
+                        assertThat(((SubmitSmResp) pdu).getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK));
+                assertThat(legacy.isEmpty()).isTrue();
+                lifecycle.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
+                worker.handleIngressMessages(List.of(acceptedEvent));
+                assertThat(lifecycle.coordinator.selectToRouter(1)).isZero();
+                assertThatThrownBy(() -> worker.reconstructPendingParts(lifecycle.pending, 1)).isInstanceOf(IllegalStateException.class);
+            } finally {
+                worker.messagePartsHandler.stop();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void failedReconstructionPreventsStartupAndIngressSuccess() {
+        try (var lifecycle = new OutboundIngressFixture(1)) {
+            var worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+            try {
+                worker.setIngressCoordinator(lifecycle.coordinator);
+                PendingMessageStore<StandardMessage> unreadable = mock(PendingMessageStore.class);
+                when(unreadable.sourcesAfter(any(), anyInt())).thenThrow(new OutboundStorageException(
+                        OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNAVAILABLE, "Pending records unavailable"));
+                assertThatThrownBy(() -> worker.reconstructPendingParts(unreadable, 1)).isInstanceOf(OutboundStorageException.class);
+                assertThatThrownBy(worker::start).isInstanceOf(OutboundStorageException.class);
+                var message = messagePart(null, "not accepted", "assigned at admission");
+                worker.enqueueIn(new InEvent<>(message, new SubmitSm(), 1, new Timestamp(System.currentTimeMillis())));
+                assertThat(worker.outgoingPdus).singleElement().satisfies(pdu ->
+                        assertThat(((SubmitSmResp) pdu).getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR));
+                assertThat(lifecycle.pending.sourcesAfter(null, 1)).isEmpty();
+            } finally {
+                worker.messagePartsHandler.stop();
+            }
+        }
+    }
 
     @Test
     void completeUdhPartsAreReassembledAndRoutedToRouterQueue() throws Exception {

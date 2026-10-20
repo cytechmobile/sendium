@@ -50,7 +50,7 @@ commit was not a released durable format. The planned multipart fields are now
 required as the `multipart` key (null for ordinary sources). Intermediate development
 records without this key are rejected, rather than silently interpreted as a complete
 durable schema. Saved membership does not itself implement process-restart recovery;
-shared reconstruction is the next task, and a physical backend follows in #339.
+shared reconstruction is described below, and a physical backend follows in #339.
 
 ## Multipart admission and membership
 
@@ -107,6 +107,57 @@ Null remains distinct from empty text for matching identity. Non-null membership
 requires `HELD` original disposition. Its key and ordinal must match the accepted
 payload's parsed UDH and addresses; mismatches are corruption, not a request to
 reassign the source on decode. Decode never calculates a new group UUID or deadline.
+
+## Reconstructing runtime assembly
+
+`PendingMultipartRecovery` reads a quiescent pending store through bounded
+`sourcesAfter` pages. It indexes only source handles and multipart metadata,
+validating the complete scan before publishing work or declaring recovery ready.
+Group members must agree on their key, group UUID, creation order and deadline;
+different sources cannot claim the same ordinal in one group instance.
+
+- A complete retained group is assembled in ordinal order using detached accepted
+  payloads, retaining the original source IDs for completion and DLR handling.
+- An incomplete expired group releases its received parts independently.
+- An incomplete unexpired group schedules its original deadline. Reconstructing
+  at 12:00:50 with deadline 12:01:00 leaves ten seconds, regardless of downtime.
+- `multipartSources(groupId)` returns only that group's retained handles, bounded
+  by the protocol maximum of 255 parts. It includes accepted parts whose ingress
+  notifications have not been processed. Payloads are fetched only on assembly or
+  expiry; there is no second cache containing the entire backlog's message bodies.
+- A new part notification carries a source handle. Current membership and payload
+  remain authoritative in pending storage, including after reconstruction.
+
+There is **no durable checkpoint of an earlier assembly/publication/release
+decision**. Accepted-source CBOR, membership and deadlines are the reconstruction
+inputs. Pending-only recovery can repeat runtime processing; selected batches and
+destinations survive only under their independently configured stage guarantees.
+Publication retries in a running process use the existing first-binding/idempotence
+contract of `makeHeldReady`. Transient timer-publication failures retry after one
+second without accepting new sources or making provider attempts. Corrupt recovery
+input fails explicitly, leaving accepted ownership intact.
+
+`SmppServerWorker.reconstructPendingParts(pending, pageSize)` is the startup
+entrypoint after selecting its coordinator and opening the owning pending store,
+before starting ingress/dispatch or accepting submissions. It uses the existing
+coordinator publication boundary. Failed reconstruction prevents worker startup
+and success acknowledgements; it does not fall back to legacy processing. Existing
+non-record-driven entrypoints remain supported. Reassembly timeout reconfiguration
+affects new admissions, not saved group deadlines or the active recovery component.
+
+The application owns the scheduler and pending store; closing the recovery component
+cancels its own timers only. The handler owns and stops its scheduler as before.
+Actual durable backend opening, accepted-record indexing, stage reconciliation and
+profile enablement remain with the backend/application assembly in #339 and later
+stage implementations. This entrypoint does not remove the coordinator's current
+guard rejecting unsupported durable profiles. The existing memory backend still
+loses unfinished records when closed or restarted.
+
+Recovery tests use copied codec-backed source records and a controlled clock/timer.
+They verify reconstruction, not physical file publication or forced-process restart
+durability. Full group payloads may be loaded while assembling one message (at most
+255 parts); metadata indices can grow with the count of incomplete groups. Bounded
+recovery access is not a claim of constant memory for those indices.
 
 ## Explicit message field inventory
 

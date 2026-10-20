@@ -1,12 +1,16 @@
 package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 import gr.cytech.sendium.util.MessageUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -21,6 +25,7 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 
 /**
  * This class implements a handler that collects message parts for various concatenated
@@ -35,6 +40,7 @@ public class MessagePartsHandler<M extends StandardMessage> {
     private final Map<String, SortedSet<M>> pendingMessageParts;
     private final Map<String, Future<Boolean>> scheduledTasks;
     private final MessagePartsEventsListener<M> listener;
+    private PendingMultipartRecovery<M> recovery;
 
     private volatile long timeoutInMilliseconds;
     private ScheduledThreadPoolExecutor executor;
@@ -60,6 +66,9 @@ public class MessagePartsHandler<M extends StandardMessage> {
     public synchronized boolean stop() {
         logger.info("Stopping MessagePartsHandler: {} ...", listener.getName());
 
+        if (recovery != null) {
+            recovery.close();
+        }
         //process any scheduled tasks and stop the executor
         executor.shutdown();
 
@@ -81,11 +90,42 @@ public class MessagePartsHandler<M extends StandardMessage> {
         return timeoutInMilliseconds;
     }
 
+    /** Rebuild from a quiescent pending store; the caller supplies its existing coordinated publication boundary. */
+    public synchronized void reconstruct(PendingMessageStore<M> pending, int pageSize, BiConsumer<Set<SourceId>, M> publisher) {
+        if (!pendingMessageParts.isEmpty()) {
+            throw new IllegalStateException("Reconstruction must precede runtime part handling");
+        }
+        if (recovery != null) {
+            recovery.close();
+        }
+        recovery = new PendingMultipartRecovery<>(pending, Clock.systemUTC(), executor, publisher);
+        recovery.reconstruct(pageSize);
+    }
+
+    public synchronized boolean isRecordDriven() {
+        return recovery != null;
+    }
+
+    public synchronized boolean isRecoveryReady() {
+        return recovery != null && recovery.isReady();
+    }
+
+    public synchronized void addAcceptedSource(SourceId source) {
+        if (recovery == null) {
+            throw new IllegalStateException("Record-driven reconstruction has not been selected");
+        }
+        recovery.accepted(source);
+    }
+
     /** Uses the admission-time group instance and deadline instead of reassigning by a legacy reference. */
     public synchronized void addAcceptedPart(M part, MultipartMembership membership) {
         if (!isSupportedMessagePart(part) || !membership.source().value().toString().equalsIgnoreCase(part.serial) ||
                 !membership.key().equals(MultipartKey.from(part)) || membership.ordinal() != MessageUtil.getNumberOfCurrentPart(part)) {
             throw new IllegalArgumentException("Part does not match its accepted membership");
+        }
+        if (recovery != null) {
+            recovery.accepted(membership.source());
+            return;
         }
         long remaining = Math.max(0, Duration.between(Instant.now(), membership.deadline()).toMillis());
         addMessagePart(part, membership.groupId().toString(), remaining);
