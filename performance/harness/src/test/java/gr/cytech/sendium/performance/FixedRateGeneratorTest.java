@@ -22,13 +22,13 @@ class FixedRateGeneratorTest {
     private MessageLedger ledger(RunConfig config, Lifecycle.Clock clock) {
         return new MessageLedger(config, "schedule", clock::nanoTime, TimeUnit.SECONDS.toNanos(5));
     }
-    private static class Clock implements Lifecycle.Clock {
+    private static class FakeClock implements Lifecycle.Clock {
         long now;
-        public long nanoTime() { return now; }
-        public void sleepNanos(long nanos) { now += nanos; }
+        @Override public long nanoTime() { return now; }
+        @Override public void sleepNanos(long nanos) { now += nanos; }
     }
 
-    private FixedRateGenerator generator(RunConfig config, MessageLedger ledger, FixedRateGenerator.Target target, Clock clock) {
+    private FixedRateGenerator generator(RunConfig config, MessageLedger ledger, FixedRateGenerator.Target target, FakeClock clock) {
         return new FixedRateGenerator(config, ledger, target, clock,
                 () -> com.google.common.util.concurrent.TestRateLimiters.create(
                         config.offeredMessagesPerSecond(), clock::nanoTime, clock::sleepNanos));
@@ -36,7 +36,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void usesAbsoluteHalfOpenSlotsAndIncludesTheQuietTailInInputRate() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         List<Long> slots = new ArrayList<>();
@@ -60,7 +60,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void sustainedSlowSubmissionKeepsOriginalTargetsAndReportsDeadlineShortfall() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         List<Long> slots = new ArrayList<>();
@@ -83,7 +83,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void boundedOutstandingWorkDoesNotReduceTheOfferedSchedule() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(10, 2);
         MessageLedger ledger = ledger(config, clock);
         try (var generator = generator(config, ledger,
@@ -102,7 +102,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void lateStartAccountsForMissedTargetsAndNeverDispatchesAtOrAfterDeadline() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         clock.now = 450_000_000L;
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
@@ -124,7 +124,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void warmupBacklogCanLimitMeasurementWithoutContaminatingItsCounters() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(10, 1);
         MessageLedger ledger = ledger(config, clock);
         try (var generator = generator(config, ledger,
@@ -141,7 +141,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void fractionalRateAndFutureStartHaveNoExtraBoundarySubmission() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(0.7, 100);
         MessageLedger ledger = ledger(config, clock);
         try (var generator = generator(config, ledger,
@@ -156,7 +156,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void earlyStopAccountsForUnsentTargetsAndMarksPartialObservation() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         AtomicBoolean stopped = new AtomicBoolean();
@@ -198,7 +198,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void invalidPhasesAndUnrepresentableRatesAreRejected() throws Exception {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         try (var generator = generator(config, ledger, (measured, scheduled) -> false, clock)) {
@@ -214,7 +214,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void briefPauseRecoversAllTargetsWithoutChangingTheirIntendedTimes() throws Exception {
-        Clock clock = new Clock() {
+        FakeClock clock = new FakeClock() {
             boolean paused;
             @Override public void sleepNanos(long nanos) {
                 super.sleepNanos(nanos);
@@ -246,7 +246,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void longPauseCannotAccumulateUnlimitedRecoveryCredit() throws Exception {
-        Clock clock = new Clock() {
+        FakeClock clock = new FakeClock() {
             boolean paused;
             @Override public void sleepNanos(long nanos) {
                 super.sleepNanos(nanos);
@@ -272,7 +272,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void oversleepPastDeadlineNeverDispatchesAnotherTarget() throws Exception {
-        Clock clock = new Clock() {
+        FakeClock clock = new FakeClock() {
             @Override public void sleepNanos(long nanos) { now += 2_000_000_000L; }
         };
         RunConfig config = config(100, 100);
@@ -286,7 +286,7 @@ class FixedRateGeneratorTest {
 
     @Test
     void dispatchEvidenceSeparatesEnqueueTimeFromTransportStartInDrain() {
-        Clock clock = new Clock();
+        FakeClock clock = new FakeClock();
         RunConfig config = config(1, 100);
         MessageLedger ledger = ledger(config, clock);
         ledger.beginMeasurement(0, 1_000_000_000L);
@@ -331,12 +331,12 @@ class FixedRateGeneratorTest {
         });
         List<FixedRateGenerator.Statistics> phases = new ArrayList<>();
         Scenario scenario = new Scenario() {
-            public void awaitReady() { }
-            public void startGeneration(Lifecycle.Phase phase, long start, long deadline) { generator.start(phase, start, deadline); }
-            public void stopGeneration() throws Exception { phases.add(generator.stop()); }
-            public boolean hasOutstandingWork() { return ledger.hasOutstandingWork(); }
-            public void finalizeAccounting() { ledger.freeze(); }
-            public void close() throws Exception { generator.close(); }
+            @Override public void awaitReady() { }
+            @Override public void startGeneration(Lifecycle.Phase phase, long start, long deadline) { generator.start(phase, start, deadline); }
+            @Override public void stopGeneration() throws Exception { phases.add(generator.stop()); }
+            @Override public boolean hasOutstandingWork() { return ledger.hasOutstandingWork(); }
+            @Override public void finalizeAccounting() { ledger.freeze(); }
+            @Override public void close() throws Exception { generator.close(); }
         };
         var outcome = new Lifecycle(phase -> { }).run(config, scenario);
         assertFalse(outcome.drainTimeoutReached());

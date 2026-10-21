@@ -244,7 +244,7 @@ class PackagedSendiumIT {
         assertEquals(dlr ? expected : 0, metricCount(metrics, "resolve"));
         assertTrue(metricCount(metrics, "complete_delivery") >= (dlr ? expected : 0));
         assertFalse(metrics.lines().anyMatch(line -> line.startsWith("sendium_dlr_storage_operation_seconds_count")
-                && line.contains("outcome=\"error\"") && Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1)) > 0));
+                && line.contains("outcome=\"error\"") && DlrMetricSamples.parseValue(line) > 0));
         try (var connection = DriverManager.getConnection(jdbc, POSTGRES.getUsername(), POSTGRES.getPassword());
                 var statement = connection.createStatement()) {
             for (String table : List.of("dlr_message", "provider_correlation")) {
@@ -260,7 +260,7 @@ class PackagedSendiumIT {
         return metrics.lines().filter(line -> line.startsWith("sendium_dlr_storage_operation_seconds_count"))
                 .filter(line -> line.contains("backend=\"postgresql\"") && line.contains("operation=\"" + operation + "\"")
                         && line.contains("outcome=\"success\""))
-                .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).sum();
+                .mapToDouble(DlrMetricSamples::parseValue).sum();
     }
 
     private static HttpResponse<String> get(HttpClient http, URI uri) throws Exception {
