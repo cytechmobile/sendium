@@ -3,6 +3,8 @@ package gr.cytech.sendium.util;
 import gr.cytech.sendium.core.message.StandardMessage;
 import org.junit.jupiter.api.Test;
 
+import java.util.HexFormat;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class MessageUtilTest {
@@ -68,6 +70,39 @@ class MessageUtilTest {
             assertThat(MessageUtil.is8BitMessagePart(message)).as(udh).isFalse();
             assertThat(MessageUtil.is16BitMessagePart(message)).as(udh).isFalse();
         }
+    }
+
+    @Test
+    void zeroLengthAndTruncatedConcatenationElementsAreRejectedSafely() {
+        for (int identifier : new int[]{0, 8}) {
+            int requiredLength = identifier == 0 ? 3 : 4;
+            for (int declared = 0; declared <= requiredLength; declared++) {
+                for (int available = 0; available < requiredLength; available++) {
+                    byte[] header = new byte[3 + available];
+                    header[0] = (byte) (header.length - 1);
+                    header[1] = (byte) identifier;
+                    header[2] = (byte) declared;
+                    java.util.Arrays.fill(header, 3, header.length, (byte) 1);
+                    String udh = HexFormat.of().withUpperCase().formatHex(header);
+                    StandardMessage message = messageWithUdh(udh);
+                    assertThat(MessageUtil.concatenation(message)).as(udh).isEmpty();
+                    assertThat(MessageUtil.is8BitMessagePart(message)).as(udh).isFalse();
+                    assertThat(MessageUtil.is16BitMessagePart(message)).as(udh).isFalse();
+                    assertThat(MessageUtil.getNumberOfCurrentPart(message)).as(udh).isZero();
+                    assertThat(MessageUtil.getNumberOfTotalParts(message)).as(udh).isZero();
+                }
+            }
+        }
+    }
+
+    @Test
+    void maximumWidthReferencesRemainSupported() {
+        var eightBit = MessageUtil.concatenation(messageWithUdh("050003FF0201")).orElseThrow();
+        var sixteenBit = MessageUtil.concatenation(messageWithUdh("060804FFFF0201")).orElseThrow();
+        assertThat(eightBit.referenceBits()).isEqualTo(8);
+        assertThat(eightBit.reference()).isEqualTo(255);
+        assertThat(sixteenBit.referenceBits()).isEqualTo(16);
+        assertThat(sixteenBit.reference()).isEqualTo(65535);
     }
 
     @Test

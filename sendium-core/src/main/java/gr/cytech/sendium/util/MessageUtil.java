@@ -162,8 +162,14 @@ public class MessageUtil {
                 if (total == 0 || ordinal == 0 || ordinal > total) {
                     return Optional.empty();
                 }
+                if (start >= header.length) {
+                    return Optional.empty();
+                }
                 int reference = Byte.toUnsignedInt(header[start]);
                 if (identifier == 8) {
+                    if (start + 1 >= header.length) {
+                        return Optional.empty();
+                    }
                     reference = (reference << 8) | Byte.toUnsignedInt(header[start + 1]);
                 }
                 byte[] normalized = header.clone();
