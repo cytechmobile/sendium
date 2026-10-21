@@ -52,7 +52,7 @@ class InputTests(unittest.TestCase):
     def test_invalid_rates_durations_and_delays_are_rejected(self):
         cases = [{"offered_rate": value} for value in (0, -1, "NaN", "Infinity", "1e1000000", True)]
         cases += [{"measurement_seconds": 0}, {"measurement_seconds": 3601}, {"warmup_seconds": 601},
-                  {"drain_seconds": 601}, {"worker_tps": 1.5}, {"worker_tps": 2147483648},
+                  {"drain_seconds": 601}, {"worker_tps": -1}, {"worker_tps": 1.5}, {"worker_tps": 2147483648},
                   {"provider_response_delay_ms": 10001}, {"provider_dlr_delay_ms": 60001}, {"dlr_enabled": "yes"}]
         for inputs in cases:
             with self.subTest(inputs=inputs), self.assertRaises((ValueError, prepare.ValidationError)):

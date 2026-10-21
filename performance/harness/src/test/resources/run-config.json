@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "ingressMode": "http",
-  "offeredMessagesPerSecond": 100,
-  "workerTps": 100,
+  "offeredMessagesPerSecond": 30,
+  "workerTps": 0,
   "warmupSeconds": 120,
   "measurementSeconds": 600,
   "drainTimeoutSeconds": 120,

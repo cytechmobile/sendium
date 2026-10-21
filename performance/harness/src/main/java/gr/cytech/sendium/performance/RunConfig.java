@@ -10,7 +10,7 @@ public record RunConfig(int schemaVersion, String ingressMode, double offeredMes
             throw new IllegalArgumentException("Unsupported configuration version or ingress mode");
         }
         if (!Double.isFinite(offeredMessagesPerSecond) || offeredMessagesPerSecond <= 0
-                || workerTps < 1 || warmupSeconds < 0 || measurementSeconds < 1
+                || workerTps < 0 || warmupSeconds < 0 || measurementSeconds < 1
                 || drainTimeoutSeconds < 0 || providerResponseDelayMillis < 0
                 || providerDlrDelayMillis < 0 || admissionTimeoutMillis < 1
                 || maxOutstandingRequests < 1 || maxTrackedMessages < 1) {

@@ -99,8 +99,11 @@ def resolve(aws, preset, region):
     prefixes = aws.call("ec2", "describe-managed-prefix-lists", filters=[{"Name": "prefix-list-name", "Values": ["com.amazonaws." + region + ".s3"]}])["PrefixLists"]
     prefixes = [item for item in prefixes if item["OwnerId"] == "AWS" and item["AddressFamily"] == "IPv4"]
     prefix, = prefixes
-    return {"schemaVersion": 1, "region": region, "nodes": nodes,
+    result = {"schemaVersion": 1, "region": region, "nodes": nodes,
             "placement": {"primary": primary, "primaryZoneId": available[primary]["ZoneId"], "secondary": secondary},
             "database": {"engine": "postgres", "engineVersion": version, "instanceType": database["instanceType"],
                          "allocatedStorageGiB": database["allocatedStorageGiB"], "storageType": "gp3"},
             "s3PrefixListId": prefix["PrefixListId"], "endpointServices": sorted(services)}
+    if getattr(aws, "execution_kind", None) == "container-jvm":
+        result.update(executionKind="container-jvm", localRehearsal=aws.simulation)
+    return result

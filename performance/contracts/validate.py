@@ -29,8 +29,8 @@ result_validator = Draft202012Validator(
 config = {
     "schemaVersion": 1,
     "ingressMode": "http",
-    "offeredMessagesPerSecond": 100,
-    "workerTps": 100,
+    "offeredMessagesPerSecond": 30,
+    "workerTps": 0,
     "warmupSeconds": 120,
     "measurementSeconds": 600,
     "drainTimeoutSeconds": 120,
@@ -45,6 +45,7 @@ config_validator.validate(config)
 for field, value in (
     ("measurementSeconds", 0),
     ("offeredMessagesPerSecond", 0),
+    ("workerTps", -1),
     ("maxTrackedMessages", -1),
     ("dlrEnabled", "false"),
     ("ingressMode", "smtp"),

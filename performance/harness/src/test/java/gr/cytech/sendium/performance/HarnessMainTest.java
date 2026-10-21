@@ -17,7 +17,8 @@ class HarnessMainTest {
         assertEquals(0, HarnessMain.run(new String[]{"validate-config", file.toString()}));
         for (String invalid : new String[]{
                 fixture.replace("\"dlrEnabled\": true", "\"dlrEnabled\": \"true\""),
-                fixture.replace("\"workerTps\": 100", "\"workerTps\": 100.5"),
+                fixture.replace("\"workerTps\": 0", "\"workerTps\": 0.5"),
+                fixture.replace("\"workerTps\": 0", "\"workerTps\": -1"),
                 fixture.replace("  \"dlrEnabled\": true,", ""),
                 fixture + " {}"}) {
             Files.writeString(file, invalid);

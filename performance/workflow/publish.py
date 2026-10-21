@@ -90,7 +90,7 @@ def immutable(before, after):
 
 def finalize(request, original, builds, inputs, work, resources, java="java"):
     prepare.require(not any(os.environ.get(key) for key in PRIVILEGED_ENVIRONMENT), "Finalization requires an unprivileged job")
-    manifest = prepare.verify_bundle(request, builds, "harness", "x86_64")
+    manifest = prepare.verify_bundle(request, builds, "harness", prepare.machine_architecture())
     prepare.require(inputs["runIdentity"] == request["runIdentity"] and manifest in inputs["artifacts"], "Finalizer build identity mismatch")
     prepare.write(work / "initial-results.json", original)
     prepare.write(work / "resource-inputs.json", resources)

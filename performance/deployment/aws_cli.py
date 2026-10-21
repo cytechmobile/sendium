@@ -34,6 +34,9 @@ class AwsCli:
             command = ["aws", service, operation, "--region", self.region, "--output", "json", "--no-cli-pager", "--no-paginate"]
             directory = None
             for key, value in parameters.items():
+                if type(value) is bool:
+                    command.append(("--" if value else "--no-") + key.replace("_", "-"))
+                    continue
                 command.append("--" + key.replace("_", "-"))
                 structured = isinstance(value, (dict, list))
                 encoded = json.dumps(value) if structured else str(value)

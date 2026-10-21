@@ -8,7 +8,7 @@
     "schemaVersion": { "const": 1 },
     "ingressMode": { "enum": ["http", "smpp"] },
     "offeredMessagesPerSecond": { "type": "number", "exclusiveMinimum": 0 },
-    "workerTps": { "type": "integer", "minimum": 1 },
+    "workerTps": { "type": "integer", "minimum": 0, "description": "Outgoing worker TPS cap; 0 means unlimited." },
     "warmupSeconds": { "type": "integer", "minimum": 0, "default": 120 },
     "measurementSeconds": { "type": "integer", "minimum": 1, "default": 600 },
     "drainTimeoutSeconds": { "type": "integer", "minimum": 0, "default": 120 },

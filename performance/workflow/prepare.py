@@ -108,6 +108,10 @@ def revision(request, component):
     return request["provenance"]["applicationCommit" if component == "application" else "harnessRevision"]
 
 
+def machine_architecture(machine=None):
+    return {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "arm64", "arm64": "arm64"}.get((machine or platform.machine()).lower())
+
+
 def archive_application(directory, target):
     directory = Path(directory)
     require(directory.is_dir() and not directory.is_symlink() and (directory / "quarkus-run.jar").is_file(), "Complete quarkus-app directory required")
@@ -123,7 +127,7 @@ def archive_application(directory, target):
 
 def build_bundle(request, component, architecture, checkout, output, java_version, machine=None):
     require(component in FILES and architecture in ARCHITECTURES, "Unknown build target")
-    observed = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "arm64", "arm64": "arm64"}.get((machine or platform.machine()).lower())
+    observed = machine_architecture(machine)
     require(observed == architecture, "Build runner architecture mismatch")
     require(re.fullmatch(r"25(?:[.+-].*)?", java_version), "Java 25 build required")
     checkout, output = Path(checkout), Path(output)

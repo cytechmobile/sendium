@@ -6,6 +6,13 @@
 **Planning doc:** [Issue #352](https://github.com/cytechmobile/sendium/issues/352)
 **Companion docs:** Planned: `AwsPerformanceTestsArchitecture.md` (as-built).
 
+**Latest generator validation:** Average-rate Guava pacing completed DLR-enabled
+HTTP/SMPP 100-msg/s runs with all 60,000 measured submissions/dispatch starts and
+receipts, zero misses/errors, and valid evidence. DLR-enabled 30-msg/s regressions
+completed all 18,000 each. Actual timing is reported; 100-msg/s SMPP still queued
+substantially and required 39.839 seconds drain, so this is not an end-to-end
+capacity qualification. See `performance/local/AVERAGE_RATE_VALIDATION.md`.
+
 ---
 
 ## 1. Phase / Task tracker
@@ -36,8 +43,15 @@
 | 5 | 5.2 | Add protected CloudFormation and SSM execution jobs | M | 🟢 done | Added environment-bound OIDC job, dispatch/build rechecks, assumed-role/expiry gating, regional EC2/AMI/RDS/endpoint/AZ resolution, checked same-release JRE/CA downloads, immutable template staging, create-only CloudFormation and SSM execution/retrieval. 32 Linux workflow checks, 60 deployment checks, 23 infrastructure checks and both linters pass. Immediate cleanup/publication follows in 5.3; no AWS resources deployed. |
 | 5 | 5.3 | Publish workflow reports and add cleanup jobs | M | 🟢 done | Added read-only diagnostic recovery/credits, always-run identity-reconstructed cleanup, and unprivileged verified-JAR finalization/publication with unavailable-evidence failure reports and lifecycle outcomes. 45 Linux workflow checks including real packaged-JVM finalization, 6 semantic checks, 60 deployment checks, 23 infrastructure checks and both linters pass. No AWS resources deployed; local rehearsal 5.5 remains required. |
 | 5 | 5.4 | Verify workflow permissions and failure outcomes | M | 🟢 done | Completed offline job/IAM/artifact/lifecycle audit and fixed exit-code, polling, redaction-snapshot, optional-evidence, reason-preservation, credential-provider and source/type checks. 55 Linux workflow/audit checks, 66 deployment checks, 111 Java tests, 6 semantic/9 resource/23 infrastructure checks, three real node smoke cases and both linters pass. Hosted admission/cancellation/IAM remain live confirmations after local rehearsal 5.5. |
-| 5 | 5.5 | Validate the complete deployment in an AWS-like local environment | L | ⚪ not started | Required before 6.1. Separate Linux Sendium/harness nodes, PostgreSQL 17 with verified TLS, private connectivity, production deployment/lifecycle code through local transport, all four protocol/DLR combinations, failure diagnostics, concurrent-run isolation and repeatable cleanup. Detailed acceptance criteria below. |
-| 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | ⚪ not started | Requires successful local rehearsal in 5.5 and configured AWS prerequisites. Both protocols, delivery reports on/off, actual resource measurements; provisioning/scenario failure, cancellation, partial creation, abandoned execution, and independent expiry. |
+| 5 | 5.5 | Validate the complete deployment in an AWS-like local environment | L | 🟢 done | Reusable deployment/lifecycle runner retained. Lifecycle coverage is summarized in `performance/local/VERIFICATION.md`; current DLR-enabled workload evidence is in `performance/local/AVERAGE_RATE_VALIDATION.md`. Pre-fix raw artifacts retired after generator validation. AWS remains unverified. |
+| 5 | 5.6 | Diagnose missed generator sends with isolated scheduling evidence | M | 🟢 done | Established that brief harness GC pauses plus strict slot expiry caused reproduced misses. Investigation-only probes/logs and superseded reports retired; structured timing evidence retained in the fixed generator. Decision history below preserves the reasoning. |
+| 5 | 5.8 | Compare production-style asynchronous SMPP sends with virtual-thread submission | M | 🟢 done | Comparison supported callback-based handling with bounded dispatch. Temporary comparison probes, profiling recordings and pre-fix result documents retired after implementation; decision history below records the rationale. |
+| 5 | 5.10 | Adapt SMPP admission to callback-based responses with bounded dispatch | M | 🟢 done | Implemented bounded socket dispatcher and response callbacks, independent cancellable admission deadlines, window cleanup, and exactly-once terminal accounting. Retained race/socket tests and post-fix DLR-enabled validation in `performance/local/AVERAGE_RATE_VALIDATION.md`. |
+| 5 | 5.9 | Add average-rate Guava pacing with explicit timing-quality reporting | M | 🟢 done | Shared per-phase Guava limiter retains delayed targets with one-second permit storage, original nominal times and exclusive deadlines. Added lateness and per-second submission/dispatch evidence. 124 harness/57 workflow/7 semantic checks pass (one workflow skip). DLR-only HTTP/SMPP full runs at 100/s and 30/s supplied all 60,000/18,000 messages and receipts, zero misses/errors; 100/s SMPP still queued. See `performance/local/AVERAGE_RATE_VALIDATION.md`. |
+| 5 | 5.11 | Remove superseded generator results and investigation-only tooling | S | 🟢 done | Removed 16 old result directories, six superseded write-ups, two Java probes, four profiling recordings, compiled probes/extracted library sources, old harness target artifacts and temporary logging. Retained current DLR-enabled results, reusable runner, timing evidence and tests. Clean harness build: 124 tests pass; seven local and two workload-default checks pass. |
+| 5 | 5.12 | Compare the outbound-storage branch with retained main-equivalent results | M | 🟢 done | Tested candidate `9a6ea9c` at 100 msg/s, HTTP/SMPP with DLR, using the exact retained baseline harness/JRE/preset. HTTP completed all messages but had higher completion p99/drain; SMPP rejected 31,745 and left 10,000 accepted messages unfinished after drain. Detailed initial and patched comparisons are retained with external artifacts, not source. |
+| 5 | 5.13 | Package reusable performance tooling and regression tests for commit | S | 🟢 done | Retained reusable code/tests and concise verification notes; moved the detailed initial branch comparison alongside external results. Reviewed source and excluded generated/private artifacts. Verification: 124 harness tests, 66 deployment, 57 workflow (one platform skip), ten local, seven semantic checks, schema/preset validation and actionlint pass. |
+| 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | ⚪ not started | Requires successful local rehearsal in 5.5 and configured AWS prerequisites. Both protocols with delivery reports enabled, actual resource measurements; provisioning/scenario failure, cancellation, partial creation, abandoned execution, and independent expiry. |
 | 6 | 6.2 | Document AWS installation and maintainer benchmark operations | M | ⚪ not started | Bootstrap and networking installation, GitHub environment/role setup, preset selection, manual execution, results, retention, cost/lifetime boundaries, teardown, and recovery. |
 | 6 | 6.3 | Write the as-built architecture companion document | S | ⚪ not started | Describe implemented components, trust boundaries, data flow, stack ownership, and resource lifecycle with diagrams. |
 
@@ -121,7 +135,7 @@ Provisioning credentials stay with protected workflow orchestration. Application
 
 ### Default AWS/workload preset
 
-`performance/presets/aws-private-jvm-v1.json` and its README define the input contract for Tasks 4.2–4.5. Region comes explicitly from the protected environment's `AWS_REGION`. ~~The initial proposal used `c7i.large`/1 GiB for Sendium, `m7i.xlarge`/2 GiB for the harness, and `db.m7g.large`.~~ The user selected low-cost temporary defaults: **`t4g.small` for both EC2s, 512 MiB heap per JVM, and private Single-AZ PostgreSQL 17 on `db.t4g.small` with 20 GiB gp3**, the minimum new PostgreSQL SSD allocation. EC2 root disks use the resolved AMI root-device minimum (typically 8 GiB), not a padded fixed allocation. Default offered rate and worker TPS are 100. The default EC2s are ARM64; separately resolved x86_64/arm64 overrides remain supported. Private AL2023 AMIs and checksummed Temurin Java 25 archives are staged before execution. Exact image/runtime/database versions, resolved disk sizes, and preset digest must be recorded per run.
+`performance/presets/aws-private-jvm-v1.json` and its README define the input contract for Tasks 4.2–4.5. Region comes explicitly from the protected environment's `AWS_REGION`. ~~The initial proposal used `c7i.large`/1 GiB for Sendium, `m7i.xlarge`/2 GiB for the harness, and `db.m7g.large`.~~ The user selected low-cost temporary defaults: **`t4g.small` for both EC2s, 512 MiB heap per JVM, and private Single-AZ PostgreSQL 17 on `db.t4g.small` with 20 GiB gp3**, the minimum new PostgreSQL SSD allocation. EC2 root disks use the resolved AMI root-device minimum (typically 8 GiB), not a padded fixed allocation. Default offered traffic is **30 msg/s**, with **worker TPS 0 (unlimited)**. Local qualification uses the same 120/600/120-second phases and 5/1000-ms provider delays as AWS. The default EC2s are ARM64; separately resolved x86_64/arm64 overrides remain supported. Private AL2023 AMIs and checksummed Temurin Java 25 archives are staged before execution. Exact image/runtime/database versions, resolved disk sizes, and preset digest must be recorded per run.
 
 The default network is per-run with two private subnets, endpoints for SSM/SSM Messages/Secrets Manager, and S3 gateway access; no public IP, NAT, or internet gateway. Both EC2s and requested RDS placement use the first selected AZ; the database subnet group spans both AZs. RDS uses verified TLS, encrypted storage, no automatic upgrade/storage resizing, and explicit delete policies without snapshots. Independent expiry uses an EventBridge-scheduled Lambda. Resource TTL is four hours, expiry checks every 15 minutes, fallback S3 expiration one day, and public workflow artifacts 30 days. Maximum phase durations fit sample, histogram, job, cleanup, and expiry budgets. These are setup/resource bounds, not measured-performance gates. Templates/resolution and live account verification remain later tasks.
 
@@ -200,6 +214,187 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-21 — Commit reusable implementation and concise verification notes
+
+**Decision:** User approved committing the reusable performance implementation,
+regression tests, local runner/comparison helpers and project design tracker.
+Keep concise generator/lifecycle verification notes. Move the detailed initial
+feat/338 comparison to `INITIAL_BRANCH_COMPARISON.md` alongside its external
+artifacts; keep generated results, logs, temporary source builders and profiling
+recordings outside Git. Preserve earlier design entries as history.
+
+**Why:** The source and tests are needed to reproduce future benchmarks; individual
+experiment narratives are not required implementation. The separate storage fix
+was already committed on its application branch as `310dc5b`; this commit scope
+is the performance branch. Verification passes: 124 Java tests and 140 Python
+checks (one existing platform skip), schema/preset validation and workflow linting.
+
+**Alternatives considered:** Commit all generated evidence (unnecessary output),
+or omit test-only source/helpers (would lose regression coverage). Kept the reusable
+source and its tests together, with DCO sign-off required for the commit.
+
+### 2026-10-20 — Compare feat/338 with retained post-fix baseline using identical harness bytes
+
+**Decision:** User requested the outbound-storage branch comparison and chose to
+reuse retained main-equivalent 100-msg/s DLR-enabled results. Build application
+commit `9a6ea9cf814104f567fba2fb6bf4806a7f9a3d90` from a Git archive, inherit the
+baseline control image and exact harness binary, and record application/controller
+revisions separately. Added selected-application image and comparison helpers.
+
+**Why:** Avoid an unnecessary baseline rerun while keeping generator/runtime
+identity verifiable. The comparator verifies matching workload, harness/JRE,
+installer/transport/sampler/preset/network/template hashes and runtime sizing.
+HTTP completed delivery with higher observed tail latency; SMPP hit pending
+capacity exhaustion, rejected 31,745 and left 10,000 accepted unfinished at the
+drain cutoff. The rehearsal failed despite valid measurement evidence; cleanup
+completed. This is an initial comparison, not statistical attribution or a
+root-cause diagnosis. See `performance/local/FEAT338_COMPARISON.md`.
+
+**Alternatives considered:** Eight fresh paired/repeated runs (user selected the
+existing baseline first); rebuild the harness with the feature (would confound
+comparison); tune feature capacity to suppress rejection (would conceal shipped
+behavior). No no-DLR or 30-msg/s workload was run. No application branch code was
+changed; the next investigation is the SMPP forward-progress/capacity failure.
+
+### 2026-10-20 — Retire pre-fix results and investigation-only instrumentation
+
+**Decision:** At the user's request, remove superseded pre-fix load reports,
+isolated Java probes, their profiling/compiled artifacts, and old local rehearsal
+output directories. Retain current 100-msg/s DLR-enabled validation and the
+30-msg/s DLR-enabled default regression evidence. Remove buffered incident logging
+and verbose GC/safepoint flags; keep structured per-second timing and lateness
+histograms, production callback/pacing implementations and regression tests.
+
+**Why:** The investigation is complete and the generator supplied all targets
+at the requested average rate. The 30-msg/s runs checked the existing shared
+default after changing shared pacing; they were regression checks, not a change
+of the requested 100-msg/s workload. Future workload tests remain DLR-enabled.
+
+**Alternatives considered:** Retain all exploratory artifacts (unnecessary clutter),
+or remove reusable runner/tests/current timing evidence (still needed for future
+AWS validation and maintenance). The separate GC-tuning proposal is retired;
+average-rate pacing addressed the clarified requirement without collector tuning.
+Earlier entries below remain historical; their retired file paths are not links
+to retained evidence. The current result document is
+`performance/local/AVERAGE_RATE_VALIDATION.md`.
+
+**Verification:** A clean harness build removed stale integration outputs and
+passed all 124 tests. Seven local runner checks and two shared workload-default
+checks pass. All four retained post-fix result files are present. No local
+session containers remain; no additional long-running workload was launched.
+
+### 2026-10-20 — Use average-rate Guava pacing and retain delayed targets
+
+**Decision:** User clarified that offered rate is an average with short-term
+variation and approved production-style Guava pacing after source verification.
+Use one shared limiter per phase, one permit per target, unchanged original
+nominal timestamps and fixed phase deadlines. Do not prebuild large batches
+without allocation evidence. Guava stores up to one second of unused permits;
+long interruptions or capacity limits remain visible shortfalls. Bound its
+uninterruptible waits to 20 ms and recheck stop/deadline after waiting.
+
+**Why:** The previous expired-slot policy turned brief JVM pauses into permanently
+unsent targets despite otherwise adequate generation capacity. New timing evidence
+separates lateness, adapter submissions, dispatch starts and provider arrivals.
+Full DLR-enabled HTTP/SMPP validation at 100/s and 30/s supplied all planned
+measurement targets with no misses/errors. Existing validity rules are unchanged;
+100/s SMPP had substantial downstream queueing and about 40 seconds drain.
+Details: `performance/local/AVERAGE_RATE_VALIDATION.md`.
+
+**Alternatives considered:** Strict 10-ms slot expiry (does not match the clarified
+workload); unlimited catch-up (misleading burst behavior); whole-batch transmission
+under one permit (incorrect message-rate accounting); large prebuilt batches
+(preparation bottleneck not demonstrated). No-DLR workload tests were explicitly
+excluded per user instruction. GC tuning is deferred; this changes workload policy
+rather than claiming to eliminate pauses.
+
+### 2026-10-20 — Implement callback-based SMPP admission behind bounded dispatch
+
+**Decision:** Replace per-request virtual-thread response waits with Cloudhopper
+response callbacks. Use a single bounded dispatcher for socket writes and
+independent cancellable admission timers that include queue time. Preserve
+completion futures, early-receipt replay, timeout ambiguity and frozen-ledger
+behavior. Response/timeout/disconnect/close have one terminal accounting winner.
+
+**Why:** The preceding comparison supported lower-overhead callback handling,
+while socket/window writes can block and must stay off the scheduler. All 120
+harness tests pass, including five new socket/dispatch race checks. Full local
+100-msg/s SMPP no-DLR/DLR runs completed every submitted message, but still had
+3/4 measurement scheduling misses at GC pauses; do not claim this alone fixes
+generation. Some warm-up delay remains unexplained by GC logs. Details:
+`performance/local/SMPP_CALLBACK_VALIDATION.md`.
+
+**Alternatives considered:** Send directly on the scheduler (blocks it on writes),
+retain per-request response-waiting tasks (extra task/wait overhead), rely only on
+library request expiry (does not bound work waiting in our dispatcher). Bounded
+delayed sends remain the separately approved next task; default workload and
+collector behavior are unchanged.
+
+### 2026-10-20 — Compare production SMPP submission before choosing generator changes
+
+**Decision:** User accepted bounded catch-up direction and approved comparing the
+production asynchronous callback pattern before GC tuning. Four transport-only
+100-msg/s measurements completed all 60,000 requests each. Callback allocation
+and CPU were lower on average, but scheduler-side submission maxima were longer.
+Evidence supports a callback-based admission candidate with bounded dispatch,
+not a claim that the complete generator is fixed. Record warm-up misses as well
+as measurement results. See `performance/local/SMPP_SUBMISSION_COMPARISON.md`.
+
+**Why:** The current synchronous-submit-on-virtual-thread pattern can itself
+sustain 100 msg/s in isolation, so a broader claim of insufficient throughput
+would be unsupported. Removing waiting-task overhead may still reduce full-harness
+GC pressure. Both patterns remain subject to JVM pauses.
+
+**Alternatives considered:** Tune GC first (deferred while evaluating the user’s
+production-client suggestion); place callback sends directly on the scheduler
+(can block on socket/window work); silently drop lateness evidence (rejected).
+
+### 2026-10-19 — Diagnose generator misses before changing scheduling policy
+
+**Decision:** Preserve fixed-rate expired-slot accounting. Add bounded, deferred
+pre-skip timing diagnostics and harness GC/safepoint logging. All nine measurement
+miss incidents in the final diagnostic HTTP/SMPP runs align with harness G1 GC
+pauses, whereas isolated immediate-target scheduler repeats have no misses.
+
+**Why:** At 100 msg/s the 10-ms slot interval is shorter than the observed
+21.7–34.0-ms GC pauses. Average CPU is insufficient evidence of scheduling health.
+Printing incident diagnostics during traffic also caused an additional miss;
+buffer and print after the phase instead. Evidence and limitations are in
+`performance/local/GENERATOR_DIAGNOSIS.md`.
+
+**Alternatives considered:** Catch-up bursts or relaxed qualification would
+change/hide offered-load behavior. Collector tuning is the next reviewable task,
+not yet an adopted default. Earlier uninstrumented misses cannot all be attributed
+retrospectively to GC from this evidence alone.
+
+### 2026-10-19 — Explore explicitly requested no-DLR traffic at 100 msg/s locally
+
+**Decision:** Add a validated per-run offered-rate override, retaining the 30-msg/s/DLR-enabled shared defaults. At the user's request, execute HTTP and SMPP without DLR, each at 100 requested msg/s, unlimited workers and the same 120/600/120-second phases/5-ms response delay. Preserve all observations and their original classification; record exploratory qualification separately rather than discarding reports when a strict default-load assertion is not met.
+
+**Results:** HTTP actually submitted/accepted/completed 59,990 of 60,000 measurement targets (10 generator scheduling misses), achieving 99.983 msg/s. SMPP submitted/accepted/completed 59,996 (4 measurement scheduling misses; one additional warm-up miss), achieving 99.993 submitted msg/s and 99.982 provider completions/s within measurement, with seven completions in drain. Both had zero capacity misses, rejections, failures, timeouts, duplicates, accounting violations or DLRs. HTTP minute provider queues were zero; SMPP queues stayed between 7 and 10 and cleared during 0.013-second drain. Both classifications remain **inconclusive** due to generator scheduling misses; this is not proof of an exact continuously supplied 100-msg/s target or a Sendium capacity limit. HTTP's initial qualification assertion stopped the batch after measurement; its evidence was retained/finalized, and SMPP was run separately. Both session cleanups left zero containers/networks/volumes. No AWS resources used. Details: `performance/local/LOAD_TEST_100_NO_DLR.md`.
+
+### 2026-10-19 — Default to DLR-enabled scenarios and exclude generated local outputs from Git
+
+**Decision:** At the user's direction, normal local execution (`--scenarios load` or no scenario argument) selects HTTP+DLR and SMPP+DLR only. No-DLR variants remain available when explicitly named; `--scenarios all` explicitly requests the full matrix. Load analysis has the same DLR-only default and an explicit no-DLR inclusion flag. The AWS dispatch already defaults to DLR enabled. Shared 30-msg/s/unlimited-worker/timing/delay settings are unchanged.
+
+**Repository recommendation:** Keep reusable `performance/local/` scripts, Docker definitions, adapters and documentation as reproducible test source; ignore generated result folders and keep Docker/secret/runtime state ephemeral or outside the checkout. Added ignore rules for documented local result folders. No local source or prior evidence was deleted, and no commit has been made for these pending changes.
+
+### 2026-10-19 — Use the same sustained 30-msg/s workload locally and on AWS
+
+**Decision:** At the user's direction, change default offered traffic to 30 msg/s and outgoing worker TPS to 0 (Sendium's unlimited setting). Keep the AWS timing/delay settings exactly: 120-second warm-up, 600-second measurement, 120-second maximum drain, 5-ms response and 1000-ms DLR delay. Local requests inherit the same workload without reduced-rate, duration or DLR-delay overrides. Run HTTP/SMPP with DLR both enabled/disabled at these exact values: 3,600 warm-up messages excluded and 18,000 measured targets per scenario. Review minute sending rates, resources and unfinished-work history, not completion alone, when reporting whether steady traffic was handled.
+
+**Verification:** Shared schema/Java/config generation and workflow defaults now accept 0 as unlimited and default to 30 offered msg/s. All 115 Java checks pass, including four unlimited-generation cases. Regression checks require the local workload/measurement settings to inherit the shared preset exactly. All four real local 600-second measurements passed with 18,000 accepted/provider-completed messages each and all receipts forwarded when requested. No missed targets, rejections, failures, timeouts, duplicates or accounting errors occurred. HTTP sending was exactly 30/s in every minute; SMPP sending was 29.950–30.050/s at minute boundaries, with no sustained backlog growth. Provider backlogs were 0–3; in-flight receipt backlogs stayed bounded (HTTP 44, SMPP 30–33), and all work cleared within 1.554 seconds of drain. Process evidence covered all 600 seconds. Final inventory showed no remaining session containers/networks/volumes. Detailed rates/latencies/resources are in `performance/local/LOAD_TEST.md`.
+
+**Boundary:** Historical 2-msg/s functional/fault/isolation results remain smoke evidence, not qualification of this load. This step reran the four normal scenarios at the exact shared values, not the entire fault/concurrency matrix. No AWS resources were used. Positive worker caps remain optional explicit inputs; 0 is the default unlimited setting. Local hardware/credit/storage limits remain distinct from AWS capacity.
+
+### 2026-10-19 — Complete the AWS-like local topology and lifecycle rehearsal
+
+**Decision:** Add `performance/local/` with a host-stdlib Docker launcher, isolated build/node/controller images, real local S3/Secrets APIs, separately constrained AL2023 Sendium/harness nodes and PostgreSQL 17 requiring verified TLS. Use per-run private traffic/database/management networks and production compatibility resolution, staging, SSM orchestration, node install/run/sampling, diagnostic recovery, cleanup, expiry and offline publication through explicit local adapters. Local reports identify container execution, fixture instance classes and a base-commit/working-tree fingerprint; production AWS presets remain unchanged. Document actual versus modeled behavior and the one-command run/resume/cleanup paths.
+
+**Verification:** The complete 12-case matrix passes: all four HTTP/SMPP × DLR combinations, database unavailability, invalid CA, application crash, controller SIGTERM, partial staging, partial creation, abandoned expiry and concurrent-run isolation. Positive cases reconcile six measured messages/receipts with warm-up excluded. Actual TLS connections, plaintext/wrong-CA rejection, denied harness database access, cross-run traffic/input isolation and unaffected concurrent cleanup are checked. Every cleanup repeats successfully; final host inventory reports zero session containers/networks/volumes. Schema/independent semantics, known-credential scans and unprivileged real-JVM publication run on the actual outputs. A subsequent final-export redaction regression/fresh positive smoke also passes. No AWS resources deployed.
+
+**Boundary:** LocalStack provides actual S3/Secrets services; EC2/RDS/CloudFormation metadata, SSM delivery/systemd, runtime CLI scope and scheduled time are modeled. gp3/encryption/AMI and burst-credit behavior, AWS IAM/OIDC/endpoints, hosted cancellation/admission and native ARM64 on the selected cloud types still require Task 6.1. Shared Docker-VM `/proc` summaries are not EC2 capacity findings. The local prerequisite is now satisfied; live validation still requires the configured account/region/bootstrap/environment.
 
 ### 2026-10-19 — Audit declared permissions and failure paths before local rehearsal
 

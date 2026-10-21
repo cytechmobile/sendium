@@ -17,6 +17,9 @@ public final class MeasurementTimeline {
             long providerArrivals, long providerResponses, long receiptsGenerated, long receiptsForwarded, Backlog outstanding) { }
     public record Snapshot(long durationNanos, long drainNanos, List<Cohort> cohorts,
             List<EventInterval> events, long outsideWindowEvents, int intervalBudget) { }
+    public record InputSecond(long startOffsetSeconds, long submissions, long dispatchStarts) { }
+    public record InputTiming(String dispatchBoundary, long dispatchesDuringMeasurement, long dispatchesDuringDrain,
+            LatencyHistogram.Snapshot submissionToDispatch, List<InputSecond> seconds) { }
 
     private static final class Events {
         final long[] counts = new long[MessageLedger.Event.values().length];
@@ -29,12 +32,18 @@ public final class MeasurementTimeline {
     private Long endOffset, finishOffset;
     private long outsideWindowEvents;
     private long lastMeasurementUpdate = -1, lastDrainUpdate = -1;
+    private final long[] submissionsBySecond, dispatchesBySecond;
+    private long measurementDispatches, drainDispatches;
+    private final LatencyHistogram dispatchWait = new LatencyHistogram();
 
     MeasurementTimeline(long start, long duration, long maxDrain, int budget) {
         if (duration <= 0 || maxDrain < 0 || budget < 1 || buckets(duration) + buckets(maxDrain) > budget) {
             throw new IllegalArgumentException("Measurement exceeds configured interval memory budget");
         }
         this.start = start; plannedDuration = duration; this.maxDrain = maxDrain; this.budget = budget;
+        int inputBuckets = Math.toIntExact((duration + maxDrain + TimeUnit.SECONDS.toNanos(1) - 1)
+                / TimeUnit.SECONDS.toNanos(1));
+        submissionsBySecond = new long[inputBuckets]; dispatchesBySecond = new long[inputBuckets];
         cohorts = new Measurements[(int) buckets(duration)];
         measurementEvents = new Events[cohorts.length];
         drainEvents = new Events[(int) buckets(maxDrain)];
@@ -43,6 +52,30 @@ public final class MeasurementTimeline {
     }
 
     private static long buckets(long nanos) { return nanos / MINUTE + (nanos % MINUTE == 0 ? 0 : 1); }
+    void submission(long when) { countInput(submissionsBySecond, when); }
+    void dispatch(long when, long attemptedAt) {
+        if (!countInput(dispatchesBySecond, when)) { return; }
+        long offset = when - start;
+        if (offset >= 0 && offset < (endOffset == null ? plannedDuration : endOffset)) { measurementDispatches++; }
+        else { drainDispatches++; }
+        dispatchWait.recordNanos(Math.max(0, when - attemptedAt));
+    }
+    private boolean countInput(long[] counts, long when) {
+        long offset = when - start;
+        if (eventsAt(when) == null) { return false; }
+        counts[(int) (offset / 1_000_000_000L)]++;
+        return true;
+    }
+    InputTiming inputTiming(long now) {
+        long end = endOffset == null ? observedEnd(now) : endOffset;
+        long finish = finishOffset == null ? observedFinish(now, end) : finishOffset;
+        var seconds = new ArrayList<InputSecond>();
+        for (int i = 0; i < submissionsBySecond.length && i * 1_000_000_000L < finish; i++) {
+            seconds.add(new InputSecond(i, submissionsBySecond[i], dispatchesBySecond[i]));
+        }
+        return new InputTiming("adapter markDispatched before transport call; not socket-write completion or server arrival",
+                measurementDispatches, drainDispatches, dispatchWait.snapshot(), List.copyOf(seconds));
+    }
     boolean matches(long origin, long duration) { return start == origin && plannedDuration == duration; }
     Measurements cohort(long scheduled) {
         long offset = scheduled - start;

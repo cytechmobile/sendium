@@ -235,6 +235,132 @@ class SmppAdmissionClientTest {
         }
     }
 
+    @Test
+    void callbacksPipelineTheWholeWindowAndCorrelateReverseOrderResponses() throws Exception {
+        RunConfig config = config(false, 3000, 10);
+        MessageLedger ledger = ledger(config);
+        var requests = new java.util.concurrent.CopyOnWriteArrayList<PduRequest>();
+        CountDownLatch received = new CountDownLatch(10);
+        try (Gateway gateway = new Gateway((server, request) -> {
+            String token = new String(((SubmitSm) request).getShortMessage(), StandardCharsets.US_ASCII);
+            ledger.event(token, PROVIDER_ARRIVAL);
+            ledger.event(token, PROVIDER_RESPONSE);
+            requests.add(request);
+            received.countDown();
+            return null;
+        }); SmppAdmissionClient client = new SmppAdmissionClient(config, settings(gateway.port), ledger)) {
+            client.connect();
+            var submissions = new java.util.ArrayList<SmppAdmissionClient.Submission>();
+            for (int i = 0; i < 10; i++) { submissions.add(client.submit(true).orElseThrow()); }
+            assertTrue(received.await(2, TimeUnit.SECONDS), "All requests must be dispatched without waiting for replies");
+            assertEquals(10, client.pendingRequests());
+            assertTrue(client.submit(true).isEmpty());
+            for (int i = requests.size() - 1; i >= 0; i--) {
+                gateway.session.get().sendResponsePdu(response(requests.get(i), SmppConstants.STATUS_OK, "id-" + i));
+            }
+            for (var submission : submissions) {
+                assertEquals(ACCEPTED, submission.completion().get(2, TimeUnit.SECONDS));
+            }
+            assertEquals(0, client.pendingRequests());
+            assertEquals(10, ledger.snapshot().acceptedProviderCompleted());
+            assertEquals(0, ledger.snapshot().violations());
+        }
+    }
+
+    @Test
+    void lateResponseAfterTimeoutDoesNotReadmitTheMessageOrOccupyTheWindow() throws Exception {
+        RunConfig config = config(false, 200, 1);
+        MessageLedger ledger = ledger(config);
+        AtomicReference<PduRequest> firstRequest = new AtomicReference<>();
+        try (Gateway gateway = new Gateway((server, request) -> {
+            if (firstRequest.compareAndSet(null, request)) { return null; }
+            return response(request, SmppConstants.STATUS_OK, "next-id");
+        }); SmppAdmissionClient client = new SmppAdmissionClient(config, new SmppIngressSettings(
+                "127.0.0.1", gateway.port, "user", "secret", "from", "to", 1, 3000), ledger)) {
+            client.connect();
+            var first = client.submit(true).orElseThrow();
+            await(() -> firstRequest.get() != null);
+            assertEquals(TIMED_OUT, first.completion().get(2, TimeUnit.SECONDS));
+            gateway.session.get().sendResponsePdu(response(firstRequest.get(), SmppConstants.STATUS_OK, "late-id"));
+            assertEquals(ACCEPTED, client.submit(true).orElseThrow().completion().get(2, TimeUnit.SECONDS));
+            assertEquals(TIMED_OUT, first.completion().get());
+            assertEquals(1, ledger.snapshot().timedOut());
+            assertEquals(1, ledger.snapshot().accepted());
+            assertEquals(0, ledger.snapshot().violations());
+            assertEquals(0, client.pendingRequests());
+        }
+    }
+
+    @Test
+    void peerDisconnectCompletesAllAdmissionsWithoutWaitingForTheirTimeout() throws Exception {
+        RunConfig config = config(false, 10000, 10);
+        MessageLedger ledger = ledger(config);
+        CountDownLatch received = new CountDownLatch(3);
+        try (Gateway gateway = new Gateway((server, request) -> { received.countDown(); return null; });
+                SmppAdmissionClient client = new SmppAdmissionClient(config, settings(gateway.port), ledger)) {
+            client.connect();
+            var submissions = new java.util.ArrayList<SmppAdmissionClient.Submission>();
+            for (int i = 0; i < 3; i++) { submissions.add(client.submit(true).orElseThrow()); }
+            assertTrue(received.await(2, TimeUnit.SECONDS));
+            gateway.session.get().destroy();
+            for (var submission : submissions) {
+                assertEquals(FAILED, submission.completion().get(2, TimeUnit.SECONDS));
+            }
+            assertEquals(0, client.pendingRequests());
+            assertEquals(3, ledger.snapshot().failed());
+            assertEquals(0, ledger.snapshot().pendingAdmission());
+            assertThrows(IllegalStateException.class, () -> client.submit(true));
+        }
+    }
+
+    @Test
+    void genericNackCompletesAdmissionAsInvalidAcknowledgement() throws Exception {
+        RunConfig config = config(false, 3000, 10);
+        MessageLedger ledger = ledger(config);
+        try (Gateway gateway = new Gateway((server, request) -> {
+            GenericNack response = new GenericNack();
+            response.setSequenceNumber(request.getSequenceNumber());
+            response.setCommandStatus(SmppConstants.STATUS_SYSERR);
+            return response;
+        }); SmppAdmissionClient client = new SmppAdmissionClient(config, settings(gateway.port), ledger)) {
+            client.connect();
+            assertEquals(FAILED, client.submit(true).orElseThrow().completion().get(2, TimeUnit.SECONDS));
+            assertEquals(1, client.problems().get(SmppAdmissionClient.Problem.INVALID_ACKNOWLEDGEMENT));
+            assertEquals(0, client.pendingRequests());
+            assertEquals(1, ledger.snapshot().failed());
+        }
+    }
+
+    @Test
+    void stalledDispatcherDoesNotBlockSubmissionAndExpiredQueuedRequestsAreNeverSent() throws Exception {
+        RunConfig config = config(false, 200, 2);
+        MessageLedger ledger = ledger(config);
+        CountDownLatch releaseDispatcher = new CountDownLatch(1);
+        AtomicInteger received = new AtomicInteger();
+        ThreadFactory factory = task -> Thread.ofPlatform().unstarted(() -> {
+            try { releaseDispatcher.await(); task.run(); }
+            catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+        });
+        try (Gateway gateway = new Gateway((server, request) -> {
+            received.incrementAndGet();
+            return response(request, SmppConstants.STATUS_OK, "live-id");
+        }); SmppAdmissionClient client = new SmppAdmissionClient(config, settings(gateway.port), ledger, factory)) {
+            client.connect();
+            var first = client.submit(true).orElseThrow();
+            var second = client.submit(true).orElseThrow();
+            assertEquals(TIMED_OUT, first.completion().get(2, TimeUnit.SECONDS));
+            assertEquals(TIMED_OUT, second.completion().get(2, TimeUnit.SECONDS));
+            assertEquals(0, received.get());
+            assertEquals(0, client.pendingRequests());
+            releaseDispatcher.countDown();
+            assertEquals(ACCEPTED, client.submit(true).orElseThrow().completion().get(2, TimeUnit.SECONDS));
+            assertEquals(1, received.get(), "Expired queued sends must not be transmitted when the dispatcher resumes");
+            assertEquals(2, ledger.snapshot().timedOut());
+            assertEquals(1, ledger.snapshot().accepted());
+            assertEquals(0, ledger.snapshot().violations());
+        } finally { releaseDispatcher.countDown(); }
+    }
+
     private static SubmitSmResp response(PduRequest request, int status, String id) {
         SubmitSmResp response = (SubmitSmResp) request.createResponse();
         response.setCommandStatus(status);
