@@ -1,5 +1,7 @@
 # Pending accepted-source record — CBOR schema
 
+[Outbound storage lifecycle](14-outbound-storage.md) · [Documentation map](DocumentationMap.md)
+
 This documents the explicit pending-source representation introduced by #343.
 It is not Java serialization, a serialization of `StandardMessage`, a file layout,
 or a supported durable backend. The standalone runtime still supports only
@@ -45,9 +47,9 @@ false. Primitive fields cannot be null. Numeric range/type checks do not coerce
 strings, booleans or fractional numbers into integer fields. `dcs` uses the signed
 Java byte representation (-128 through 127), preserving all eight bits.
 
-Version 1 remains under development across #343's tasks; the earlier complete-source
-commit was not a released durable format. The planned multipart fields are now
-required as the `multipart` key (null for ordinary sources). Intermediate development
+Version 1 is the explicit accepted-source schema implemented by #343. The earlier
+complete-source development commit was not a released durable format. The
+`multipart` key is required (null for ordinary sources). Intermediate development
 records without this key are rejected, rather than silently interpreted as a complete
 durable schema. Saved membership does not itself implement process-restart recovery;
 shared reconstruction is described below, and a physical backend follows in #339.
@@ -287,8 +289,8 @@ deferred. Existing in-memory snapshot rules remain unchanged.
   ranges, unknown enum/type tags, mismatched gateway/source UUIDs, duplicate map
   keys, invalid extension values and trailing CBOR values produce
   `kind() == CORRUPT_RECORD` with storage reason `UNAVAILABLE`. A corrupt source
-  cannot be treated as absent. These codec-specific details avoid expanding
-  protocol-facing reason switches before admission integration.
+  cannot be treated as absent. These codec-specific details preserve the existing
+  protocol-facing storage reason vocabulary.
 - Encode/capture of unsupported application values produces storage reason
   `UNSUPPORTED`. All codec errors identify pending stage and codec context, with
   fixed diagnostics and no parser-cause chain containing payload values.
