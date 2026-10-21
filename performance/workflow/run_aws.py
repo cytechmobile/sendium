@@ -104,13 +104,13 @@ def stack_events(aws, name):
              "status": event["ResourceStatus"], "timestamp": event["Timestamp"]} for event in response.get("StackEvents", [])[:100]]}
 
 
-def run(aws, downloads, request, inputs, bundles, settings, directory):
+def run(aws, downloads, request, inputs, bundles, settings, directory, verify_builds=prepare.verify_bundles):
     directory = Path(directory)
     directory.mkdir(exist_ok=False)
     outcome = {"schemaVersion": 1, "runIdentity": request["runIdentity"], "exitCode": 1, "phase": "build-verification", "issues": []}
     plan, staged = None, None
     try:
-        require(prepare.verify_bundles(request, bundles) == inputs, "Consolidated build inputs differ from downloaded artifacts")
+        require(verify_builds(request, bundles) == inputs, "Consolidated build inputs differ from downloaded artifacts")
         outcome["phase"] = "bootstrap-preflight"
         cleanup_plan, boot, partition = preflight(aws, request, settings)
         prepare.write(directory / "cleanup-plan.json", cleanup_plan)

@@ -26,7 +26,7 @@ python performance/contracts/validate.py --preset performance/presets/aws-privat
 | Database | Private, encrypted RDS PostgreSQL 17, `db.t4g.small`, Single-AZ, 20 GiB gp3 (minimum new SSD allocation) |
 | Database authentication/TLS | Run-owned Secrets Manager credentials; verified TLS using a staged RDS CA bundle |
 | DLR subsystem | PostgreSQL stays configured in both message-level DLR modes |
-| Workload | HTTP, 100 offered messages/sec, worker TPS 100, DLR enabled |
+| Workload | HTTP, 30 offered messages/sec, worker TPS 0 (unlimited), DLR enabled |
 | Phases | 120-second warm-up, 600-second measurement, 120-second maximum drain |
 | Simulator | Successful single-part responses after 5 ms; delivered receipt after 1000 ms |
 | Concurrency | 1000 outstanding admissions; 100,000 tracked entries; explicit 1000-entry SMPP windows |

@@ -113,6 +113,7 @@ public final class ResultReport {
         metadata.put("duplicateDetectionHorizonSeconds", seconds(ledger.retentionNanos()));
         metadata.put("retiredHistoryEvictions", ledger.retiredEvictions()); metadata.put("eventsBeyondRetention", ledger.eventsBeyondRetention());
         metadata.put("intervalBucketBudget", timeline == null ? MeasurementTimeline.DEFAULT_MAX_INTERVALS : timeline.intervalBudget());
+        metadata.set("inputTiming", mapper.valueToTree(ledger.inputTiming()));
         var phases = metadata.putArray("generatorPhases");
         for (var phase : generatorPhases) {
             ObjectNode value = mapper.valueToTree(phase);
@@ -129,6 +130,8 @@ public final class ResultReport {
         limitations.add("Process CPU uses one logical core as 100 percent; host CPU uses aggregate machine capacity.");
         limitations.add("Resource windows use synchronized UTC timestamps; workload latencies use the harness monotonic clock.");
         limitations.add("CloudWatch CPU-credit samples are coarse period observations and may lag; absent values are not zero.");
+        limitations.add("Average-rate pacing retains delayed targets and permits recovery using up to one second of stored Guava permits; it is not a strict per-second cap or a production arrival distribution.");
+        limitations.add("Input dispatch timing marks the start of the adapter transport call, not completed socket writes; provider arrivals remain separate evidence.");
         root.set("resources", evidence.json(mapper, resourceWindow, timeline));
         root.set("validity", mapper.valueToTree(RunValidity.assess(config, ledger, context, generatorPhases, evidence, resourceWindow, observations)));
         root.set("diagnostics", mapper.valueToTree(context.diagnostics()));
@@ -220,7 +223,8 @@ public final class ResultReport {
                 .append(provenance.path("applicationCommit").asText()).append("` · Harness: `").append(provenance.path("harnessRevision").asText()).append("`\n\n");
         var workload = root.path("configuration").path("workload");
         out.append("Ingress: ").append(text(workload.path("ingressMode").asText())).append(" · DLR requested: ")
-                .append(workload.path("dlrEnabled").asBoolean()).append(" · Worker TPS: ").append(workload.path("workerTps").asLong())
+                .append(workload.path("dlrEnabled").asBoolean()).append(" · Worker TPS: ")
+                .append(workload.path("workerTps").asLong() == 0 ? "unlimited (0)" : workload.path("workerTps").asText())
                 .append(" · Run: ").append(text(provenance.path("runIdentity").asText())).append("\n\n");
         for (var reason : root.path("validity").path("reasons")) { out.append("- **").append(text(reason.path("code").asText())).append(":** ").append(text(reason.path("message").asText())).append('\n'); }
         var overall = root.path("overall"); var counts = overall.path("counts"); var rates = overall.path("rates");
@@ -242,6 +246,24 @@ public final class ResultReport {
                 out.append('|').append(String.format(Locale.ROOT, "%.3f", phase.path("maxLatenessNanos").asLong() / 1_000_000.0))
                         .append('|').append(phase.path("stoppedEarly").asBoolean()).append("|\n");
             }
+            for (var phase : root.path("measurementMetadata").path("generatorPhases")) {
+                if (phase.has("pacingMode")) {
+                    out.append("\nPacing: ").append(text(phase.path("pacingMode").asText()))
+                            .append("; targets delayed by at least one nominal interval: ")
+                            .append(phase.path("delayedByAtLeastOnePeriod").asLong())
+                            .append("; send lateness p99 ms: ")
+                            .append(number(phase.path("submissionLateness").path("p99Millis"))).append(".\n\n");
+                }
+            }
+        }
+        var inputTiming = root.path("measurementMetadata").path("inputTiming");
+        if (inputTiming.isObject()) {
+            out.append("\n### Actual input timing\n\n").append(text(inputTiming.path("dispatchBoundary").asText()))
+                    .append(". Measurement dispatch starts: ").append(inputTiming.path("dispatchesDuringMeasurement").asLong())
+                    .append("; drain dispatch starts: ").append(inputTiming.path("dispatchesDuringDrain").asLong())
+                    .append(". Submission-to-dispatch p99 ms: ")
+                    .append(number(inputTiming.path("submissionToDispatch").path("p99Millis")))
+                    .append(". Per-second submission/dispatch counts are in JSON inputTiming.seconds; seconds are aligned to measurement start.\n");
         }
         latencyTable(out, "Overall latency (milliseconds)", overall.path("latencies"));
         out.append("\n## One-minute submission cohorts\n\nCounts follow scheduled-time cohorts through drain; cohort completion rates are intentionally not reported.\n\n")

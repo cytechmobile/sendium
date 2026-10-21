@@ -102,6 +102,16 @@ class BenchmarkConfigGeneratorTest {
         assertFalse(deployment().toString().contains(deployment().database().password()));
     }
 
+    @ParameterizedTest
+    @CsvSource({"http,true", "http,false", "smpp,true", "smpp,false"})
+    void zeroWorkerTpsPreservesSendiumUnlimitedSemantics(String mode, boolean dlr) throws Exception {
+        var config = new RunConfig(1, mode, 30, 0, 120, 600, 120, dlr, 5, 1000, 10000, 1000, 100000);
+        var files = generator.generate(config, deployment()).files();
+        assertEquals("0", properties(files.get("sendium/conf/smsg.properties")).getProperty("outSms.instance.provider.tps"));
+        assertEquals(0, mapper.readTree(files.get("harness/run-config.json")).path("workerTps").asInt());
+        assertEquals(30, mapper.readTree(files.get("harness/run-config.json")).path("offeredMessagesPerSecond").asDouble());
+    }
+
     @Test
     void writerProtectsPrivateFilesAndRefusesExistingOutputOrEscapingPaths() throws Exception {
         Path output = directory.resolve("run");

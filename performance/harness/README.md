@@ -176,13 +176,24 @@ does not silently become application latency. Credentials are redacted from
 settings and protocol byte/PDU logging is disabled.
 
 `submit(measured)` returns an optional token/completion pair, reserving ledger
-capacity before starting a bounded virtual-thread request task. Empty means a
+capacity before enqueueing a socket write on a single dispatcher with a queue
+bounded by `maxOutstandingRequests`. Response callbacks complete admission;
+there is no per-request response-waiting task. Empty means a
 missed generation target. Single-part default-GSM payloads contain the run token;
 registered delivery is requested only when enabled. Successful acknowledgements
 require a nonblank provider/gateway ID. `STATUS_THROTTLED` and `STATUS_MSGQFUL`
 are expected overload rejections; other negative acknowledgements are rejections
 with protocol diagnostics. Timeouts and transport failures remain ambiguous,
 not inferred rejections. Read `problems()` alongside ledger counters.
+
+The admission timeout starts when a request is reserved, includes dispatch-queue
+waiting, and is enforced independently of socket writes. Completing a request
+cancels its timer and releases any remaining SMPP window entry. Timed-out queued
+requests are removed and not sent when dispatch resumes. Response, timeout,
+disconnect and close compete for one terminal admission result; late responses
+cannot change an already-completed result. A peer disconnect fails outstanding
+admissions promptly. Receipt acknowledgements retain their separate bounded
+virtual-thread handling so a stalled submission write does not block DLR replies.
 
 Forwarded `deliver_sm` requests must be successful single-part delivery receipts
 with the expected receipt flag, default/IA5 coding, delivered state, zero error,
@@ -205,8 +216,9 @@ after retained mapping eviction, or `AMBIGUOUS_RECEIPT` after an admission
 timeout/failure (including warm-up). The latter two are inconclusive coverage
 limitations; they are not proof of malformed traffic. No unverified receipt is
 added to completion/latency totals. Final validity classification is implemented
-in Task 3.3. `close()` destroys the session, interrupts/awaits request tasks,
-releases network resources, and finalizes buffered receipts once requests stop.
+in Task 3.3. `close()` stops dispatch and timers, resolves pending admissions,
+destroys the session, interrupts/awaits socket-write and receipt-acknowledgement
+tasks, releases network resources, and finalizes buffered receipts once requests stop.
 Close adapters before freezing the ledger.
 
 Tests use real SMPP sockets against the provider simulator and controlled gateway
@@ -329,9 +341,9 @@ absolute `quarkus-app/quarkus-run.jar` path; retain that directory's companion
 libraries. `-Dintegration.output.directory` can select an external diagnostic
 directory. The default application path targets the current checkout's build.
 
-## Fixed-rate traffic scheduling
+## Average-rate traffic pacing
 
-`FixedRateGenerator` supplies the same open-loop schedule to either ingress
+`FixedRateGenerator` supplies the same open-loop average-rate pacing to either ingress
 adapter. For example, construct it with
 `(measured, scheduled) -> client.submit(measured, scheduled).isPresent()`.
 The callback must return promptly and must use the ledger-backed adapter: a
@@ -355,20 +367,41 @@ not representable and are rejected. Normal phase statistics include the quiet
 tail after the last target, so achieved input rate uses the full observation
 window rather than an artificially shortened denominator.
 
-The schedule remains anchored to its original start. When late, the generator
-counts expired slots as missed in constant space and submits only the latest
-due slot; it never replays the skipped backlog. Slow responses cannot reduce
+Nominal target timestamps remain anchored to the original start, but they are
+not individual expiry deadlines. A shared Guava `RateLimiter` per phase grants
+one permit per target. Briefly late targets retain their original timestamps and
+can recover using the limiter's default one-second stored-permit capacity (100
+stored permits at 100 msg/s). It is neither a strict per-second cap nor a random
+production traffic model. Targets are never submitted before their nominal time.
+No preallocated large message batches or unbounded backlog queue are introduced.
+
+The phase deadline remains exclusive: remaining unsent targets are scheduling
+misses, not sends moved into drain. Long pauses can still produce a shortfall;
+one second of permit storage cannot recover arbitrarily long interruptions.
+Guava's uninterruptible permit waits are capped at 20 ms, with stop/deadline
+checks afterward; longer waits use interruptible sleeps. A fresh phase limiter
+avoids carrying warm-up idle credit into measurement. Slow responses cannot reduce
 the requested rate silently. Full admission/tracking budgets count capacity
 misses without evicting unfinished work. Warm-up uses the same budgets but does
 not contribute to measurement counters; leftover warm-up work can therefore
 produce visible capacity misses during measurement.
 
 Phase statistics expose requested/achieved input rate, scheduled/attempted
-targets, scheduling misses, capacity misses, maximum dispatch-call lateness,
+targets, scheduling misses, capacity misses, maximum target-call lateness,
 elapsed observation, early stop, and saturation. Early stop accounts for unsent
 targets and marks the observation partial. A cancelled caller-facing result
 future does not cancel the internal phase or permit overlapping phases; use
 `stop()` to terminate generation safely. Only one phase can be active or queued.
+
+`pacingMode`, `delayedByAtLeastOnePeriod`, and `submissionLateness` identify the
+average-rate policy and expose lateness rather than treating every delayed slot
+as a dropped send. Lateness is measured before the adapter call, includes nominal
+target delay, and covers capacity-missed target calls as well. Short-term variation
+is visible in `measurementMetadata.inputTiming.seconds`: measured-cohort adapter
+submissions and dispatch starts per aligned second, including dispatch during
+drain. `submissionToDispatch` measures preparation/queue time separately. Its
+dispatch boundary is the start of the adapter's transport call, **not** socket-write
+completion or server receipt; simulator/provider arrivals remain separate evidence.
 
 Adapters retain the original scheduled timestamp alongside actual dispatch
 timing, providing the basis for submission-cohort intervals in Task 3.2. Network

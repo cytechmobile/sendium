@@ -82,6 +82,7 @@ public final class MessageLedger {
     public synchronized long endMeasurement() { return timeline == null ? clock.getAsLong() : timeline.end(clock.getAsLong()); }
     public synchronized void finishDrain() { if (timeline != null) { timeline.finish(clock.getAsLong()); } }
     public synchronized MeasurementTimeline.Snapshot timeline() { return timeline == null ? null : timeline.snapshot(config.dlrEnabled(), clock.getAsLong()); }
+    public synchronized MeasurementTimeline.InputTiming inputTiming() { return timeline == null ? null : timeline.inputTiming(clock.getAsLong()); }
 
     /** Null means a missed generation target. Never evict unfinished work. */
     public synchronized String attempt(boolean measured) {
@@ -105,7 +106,10 @@ public final class MessageLedger {
         peakTracked = Math.max(peakTracked, active.size());
         add(entry, ATTEMPTED, 1); add(entry, PENDING, 1);
         if (cohort != null) { cohort.reserve(); }
-        if (measured && timeline != null) { timeline.backlog(clock.getAsLong(), 1, 0, 0); }
+        if (measured && timeline != null) {
+            timeline.backlog(clock.getAsLong(), 1, 0, 0);
+            timeline.submission(entry.dispatch);
+        }
         return token;
     }
 
@@ -148,7 +152,9 @@ public final class MessageLedger {
             violations++;
             throw new IllegalStateException("Invalid dispatch transition");
         }
-        entry.dispatch = clock.getAsLong();
+        long now = clock.getAsLong();
+        if (entry.measured && timeline != null) { timeline.dispatch(now, entry.dispatch); }
+        entry.dispatch = now;
         entry.explicitlyDispatched = true;
     }
 

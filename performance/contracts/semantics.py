@@ -66,6 +66,21 @@ def validate_results(document):
     events = document["eventIntervals"]
     accounting(counts, workload["dlrEnabled"])
     distributions(overall)
+    timing = document["measurementMetadata"].get("inputTiming")
+    if timing is not None:
+        seconds = timing["seconds"]
+        require([second["startOffsetSeconds"] for second in seconds] == list(range(len(seconds))),
+                "Input seconds must be contiguous and aligned to measurement start")
+        dispatches = timing["dispatchesDuringMeasurement"] + timing["dispatchesDuringDrain"]
+        require(sum(second["dispatchStarts"] for second in seconds) == dispatches,
+                "Input dispatch seconds disagree with measurement/drain totals")
+        require(dispatches <= counts["attempted"], "More dispatch starts than submitted targets")
+        sample = timing["submissionToDispatch"]
+        require(sample["count"] + sample.get("overflowCount", 0) == dispatches,
+                "Dispatch timing samples disagree with dispatch starts")
+        if document["measurementMetadata"].get("outsideWindowEvents", 0) == 0:
+            require(sum(second["submissions"] for second in seconds) == counts["attempted"],
+                    "Input seconds disagree with submitted targets")
     expected_start = 0
     for cohort in cohorts:
         start, end = cohort["startOffsetSeconds"], cohort["endOffsetSeconds"]

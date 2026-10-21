@@ -28,13 +28,19 @@ class FixedRateGeneratorTest {
         public void sleepNanos(long nanos) { now += nanos; }
     }
 
+    private FixedRateGenerator generator(RunConfig config, MessageLedger ledger, FixedRateGenerator.Target target, Clock clock) {
+        return new FixedRateGenerator(config, ledger, target, clock,
+                () -> com.google.common.util.concurrent.TestRateLimiters.create(
+                        config.offeredMessagesPerSecond(), clock::nanoTime, clock::sleepNanos));
+    }
+
     @Test
     void usesAbsoluteHalfOpenSlotsAndIncludesTheQuietTailInInputRate() throws Exception {
         Clock clock = new Clock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         List<Long> slots = new ArrayList<>();
-        try (var generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> {
+        try (var generator = generator(config, ledger, (measured, scheduled) -> {
             slots.add(scheduled);
             String token = ledger.attempt(measured, scheduled);
             assertEquals(scheduled, ledger.scheduledNanos(token));
@@ -53,22 +59,22 @@ class FixedRateGeneratorTest {
     }
 
     @Test
-    void slowSubmissionWorkSkipsExpiredSlotsInsteadOfSendingACatchUpBatch() throws Exception {
+    void sustainedSlowSubmissionKeepsOriginalTargetsAndReportsDeadlineShortfall() throws Exception {
         Clock clock = new Clock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         List<Long> slots = new ArrayList<>();
-        try (var generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> {
+        try (var generator = generator(config, ledger, (measured, scheduled) -> {
             slots.add(scheduled);
             ledger.attempt(measured, scheduled);
             clock.now += 350_000_000L;
             return true;
         }, clock)) {
             var stats = generator.generate(MEASUREMENT, 0, 1_000_000_000L, new AtomicBoolean());
-            assertEquals(List.of(0L, 300_000_000L, 700_000_000L), slots);
+            assertEquals(List.of(0L, 100_000_000L, 200_000_000L), slots);
             assertEquals(3, stats.attempted());
             assertEquals(7, stats.missedScheduling());
-            assertEquals(50_000_000L, stats.maxLatenessNanos());
+            assertEquals(500_000_000L, stats.maxLatenessNanos());
             assertEquals(10, ledger.snapshot().scheduled());
             assertEquals(7, ledger.snapshot().missed());
             assertTrue(stats.saturated());
@@ -80,7 +86,7 @@ class FixedRateGeneratorTest {
         Clock clock = new Clock();
         RunConfig config = config(10, 2);
         MessageLedger ledger = ledger(config, clock);
-        try (var generator = new FixedRateGenerator(config, ledger,
+        try (var generator = generator(config, ledger,
                 (measured, scheduled) -> ledger.attempt(measured, scheduled) != null, clock)) {
             var stats = generator.generate(MEASUREMENT, 0, 1_000_000_000L, new AtomicBoolean());
             assertEquals(10, stats.scheduled());
@@ -101,13 +107,13 @@ class FixedRateGeneratorTest {
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         List<Long> slots = new ArrayList<>();
-        try (var generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> {
+        try (var generator = generator(config, ledger, (measured, scheduled) -> {
             slots.add(scheduled); return ledger.attempt(measured, scheduled) != null;
         }, clock)) {
             var stats = generator.generate(MEASUREMENT, 0, 1_000_000_000L, new AtomicBoolean());
             assertEquals(4, stats.missedScheduling());
-            assertEquals(400_000_000L, slots.getFirst());
-            assertEquals(900_000_000L, slots.getLast());
+            assertEquals(0L, slots.getFirst());
+            assertEquals(500_000_000L, slots.getLast());
             assertEquals(6, stats.attempted());
             slots.clear();
             var expired = generator.generate(MEASUREMENT, 0, 1_000_000_000L, new AtomicBoolean());
@@ -121,7 +127,7 @@ class FixedRateGeneratorTest {
         Clock clock = new Clock();
         RunConfig config = config(10, 1);
         MessageLedger ledger = ledger(config, clock);
-        try (var generator = new FixedRateGenerator(config, ledger,
+        try (var generator = generator(config, ledger,
                 (measured, scheduled) -> ledger.attempt(measured, scheduled) != null, clock)) {
             assertEquals(9, generator.generate(WARMUP, 0, 1_000_000_000L, new AtomicBoolean()).missedCapacity());
             assertEquals(0, ledger.snapshot().scheduled());
@@ -138,7 +144,7 @@ class FixedRateGeneratorTest {
         Clock clock = new Clock();
         RunConfig config = config(0.7, 100);
         MessageLedger ledger = ledger(config, clock);
-        try (var generator = new FixedRateGenerator(config, ledger,
+        try (var generator = generator(config, ledger,
                 (measured, scheduled) -> ledger.attempt(measured, scheduled) != null, clock)) {
             var stats = generator.generate(MEASUREMENT, 1_000_000_000L, 11_000_000_000L, new AtomicBoolean());
             assertEquals(7, stats.scheduled());
@@ -154,7 +160,7 @@ class FixedRateGeneratorTest {
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
         AtomicBoolean stopped = new AtomicBoolean();
-        try (var generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> {
+        try (var generator = generator(config, ledger, (measured, scheduled) -> {
             ledger.attempt(measured, scheduled);
             if (scheduled == 100_000_000L) { stopped.set(true); }
             return true;
@@ -195,7 +201,7 @@ class FixedRateGeneratorTest {
         Clock clock = new Clock();
         RunConfig config = config(10, 100);
         MessageLedger ledger = ledger(config, clock);
-        try (var generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> false, clock)) {
+        try (var generator = generator(config, ledger, (measured, scheduled) -> false, clock)) {
             assertThrows(IllegalArgumentException.class, () -> generator.start(DRAIN, 0, 100));
             assertThrows(IllegalArgumentException.class, () -> generator.start(WARMUP, 100, 0));
             var zero = generator.generate(MEASUREMENT, 0, 0, new AtomicBoolean());
@@ -204,6 +210,99 @@ class FixedRateGeneratorTest {
         }
         assertThrows(IllegalArgumentException.class,
                 () -> new FixedRateGenerator(config(1_000_000_001, 1), ledger, (measured, scheduled) -> false));
+    }
+
+    @Test
+    void briefPauseRecoversAllTargetsWithoutChangingTheirIntendedTimes() throws Exception {
+        Clock clock = new Clock() {
+            boolean paused;
+            @Override public void sleepNanos(long nanos) {
+                super.sleepNanos(nanos);
+                if (!paused && now >= 100_000_000L) { now += 40_000_000L; paused = true; }
+            }
+        };
+        RunConfig config = new RunConfig(1, "http", 100, 0, 0, 1, 1, true, 5, 1000, 10000, 100, 100);
+        MessageLedger ledger = ledger(config, clock);
+        List<Long> slots = new ArrayList<>();
+        try (var generator = generator(config, ledger, (measured, scheduled) -> {
+            slots.add(scheduled);
+            String token = ledger.attempt(measured, scheduled);
+            ledger.markDispatched(token);
+            ledger.admission(token, MessageLedger.Admission.REJECTED);
+            return true;
+        }, clock)) {
+            var stats = generator.generate(MEASUREMENT, 0, 1_000_000_000L, new AtomicBoolean());
+            assertEquals(100, stats.attempted());
+            assertEquals(0, stats.missedScheduling());
+            assertTrue(stats.delayedByAtLeastOnePeriod() > 0);
+            assertTrue(stats.maxLatenessNanos() >= 30_000_000L);
+            assertEquals(100, stats.submissionLateness().count());
+            for (int i = 0; i < 100; i++) { assertEquals(i * 10_000_000L, slots.get(i)); }
+            assertEquals(100, ledger.inputTiming().dispatchesDuringMeasurement());
+            assertEquals(0, ledger.inputTiming().dispatchesDuringDrain());
+            assertEquals(100, ledger.inputTiming().seconds().getFirst().submissions());
+        }
+    }
+
+    @Test
+    void longPauseCannotAccumulateUnlimitedRecoveryCredit() throws Exception {
+        Clock clock = new Clock() {
+            boolean paused;
+            @Override public void sleepNanos(long nanos) {
+                super.sleepNanos(nanos);
+                if (!paused && now >= 100_000_000L) { now += 2_000_000_000L; paused = true; }
+            }
+        };
+        RunConfig config = new RunConfig(1, "http", 100, 0, 0, 4, 1, true, 5, 1000, 10000, 1000, 1000);
+        MessageLedger ledger = ledger(config, clock);
+        try (var generator = generator(config, ledger, (measured, scheduled) -> {
+            assertTrue(clock.now < 4_000_000_000L);
+            String token = ledger.attempt(measured, scheduled);
+            ledger.admission(token, MessageLedger.Admission.REJECTED);
+            return true;
+        }, clock)) {
+            var stats = generator.generate(MEASUREMENT, 0, 4_000_000_000L, new AtomicBoolean());
+            assertEquals(400, stats.scheduled());
+            assertTrue(stats.attempted() < 400);
+            assertTrue(stats.missedScheduling() > 0);
+            assertEquals(400, stats.attempted() + stats.missedScheduling());
+            assertTrue(ledger.inputTiming().seconds().stream().allMatch(second -> second.submissions() <= 201));
+        }
+    }
+
+    @Test
+    void oversleepPastDeadlineNeverDispatchesAnotherTarget() throws Exception {
+        Clock clock = new Clock() {
+            @Override public void sleepNanos(long nanos) { now += 2_000_000_000L; }
+        };
+        RunConfig config = config(100, 100);
+        MessageLedger ledger = ledger(config, clock);
+        try (var generator = generator(config, ledger, (measured, scheduled) -> ledger.attempt(measured, scheduled) != null, clock)) {
+            var stats = generator.generate(MEASUREMENT, 0, 1_000_000_000L, new AtomicBoolean());
+            assertEquals(1, stats.attempted());
+            assertEquals(99, stats.missedScheduling());
+        }
+    }
+
+    @Test
+    void dispatchEvidenceSeparatesEnqueueTimeFromTransportStartInDrain() {
+        Clock clock = new Clock();
+        RunConfig config = config(1, 100);
+        MessageLedger ledger = ledger(config, clock);
+        ledger.beginMeasurement(0, 1_000_000_000L);
+        String token = ledger.attempt(true, 0);
+        clock.now = 1_000_000_000L;
+        ledger.endMeasurement();
+        clock.now = 1_200_000_000L;
+        ledger.markDispatched(token);
+        ledger.freeze();
+        var timing = ledger.inputTiming();
+        assertEquals(0, timing.dispatchesDuringMeasurement());
+        assertEquals(1, timing.dispatchesDuringDrain());
+        assertEquals(1, timing.seconds().getFirst().submissions());
+        assertEquals(0, timing.seconds().getFirst().dispatchStarts());
+        assertEquals(1, timing.seconds().getLast().dispatchStarts());
+        assertEquals(1200, timing.submissionToDispatch().minMillis(), 1);
     }
 
     @Test

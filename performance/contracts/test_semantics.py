@@ -29,6 +29,27 @@ def fixture():
 
 
 class SemanticValidationTests(unittest.TestCase):
+    def test_input_timing_cannot_confuse_submissions_with_dispatch_or_duplicate_counts(self):
+        document = fixture()
+        document["measurementMetadata"]["inputTiming"] = {
+            "dispatchesDuringMeasurement": 1, "dispatchesDuringDrain": 1,
+            "submissionToDispatch": {"count": 2, "overflowCount": 0},
+            "seconds": [{"startOffsetSeconds": second, "submissions": 2 if second == 0 else 0,
+                         "dispatchStarts": 1 if second in (0, 10) else 0} for second in range(15)]}
+        validate_results(document)
+        broken = copy.deepcopy(document)
+        broken["measurementMetadata"]["inputTiming"]["dispatchesDuringMeasurement"] = 2
+        with self.assertRaisesRegex(ValueError, "dispatch seconds"):
+            validate_results(broken)
+        broken = copy.deepcopy(document)
+        broken["measurementMetadata"]["inputTiming"]["seconds"][0]["submissions"] = 1
+        with self.assertRaisesRegex(ValueError, "submitted targets"):
+            validate_results(broken)
+        broken = copy.deepcopy(document)
+        broken["measurementMetadata"]["inputTiming"]["submissionToDispatch"]["count"] = 1
+        with self.assertRaisesRegex(ValueError, "timing samples"):
+            validate_results(broken)
+
     def test_valid_drain_completion_is_not_measurement_throughput(self):
         validate_results(fixture())
 

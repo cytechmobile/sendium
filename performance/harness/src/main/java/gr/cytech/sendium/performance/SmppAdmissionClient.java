@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import static gr.cytech.sendium.performance.MessageLedger.Admission.*;
 
-/** One transceiver session; bounded virtual tasks keep admission response waits off the scheduler. */
+/** One transceiver session; bounded dispatch keeps socket writes off the scheduler; responses use callbacks. */
 public final class SmppAdmissionClient implements AutoCloseable {
     public enum Problem { INVALID_ACKNOWLEDGEMENT, UNEXPECTED_STATUS, TRANSPORT_FAILURE,
         INVALID_RECEIPT, CORRELATION_FAILURE, SATURATION, UNCORRELATED_RECEIPT, AMBIGUOUS_RECEIPT, LIMITED_HISTORY }
@@ -28,9 +28,11 @@ public final class SmppAdmissionClient implements AutoCloseable {
     private final NioEventLoopGroup group;
     private final DefaultSmppClient client;
     private final ExecutorService tasks;
+    private final ThreadPoolExecutor dispatcher;
+    private final ScheduledThreadPoolExecutor timeouts;
     private final Semaphore receiptSlots;
     private final java.util.concurrent.atomic.AtomicInteger receiptAcknowledgements = new java.util.concurrent.atomic.AtomicInteger();
-    private final Map<String, CompletableFuture<MessageLedger.Admission>> pending = new ConcurrentHashMap<>();
+    private final Map<String, Pending> pending = new ConcurrentHashMap<>();
     private final Map<String, List<Long>> early = new HashMap<>();
     private final EnumMap<Problem, AtomicLong> problems = new EnumMap<>(Problem.class);
     private final Object correlation = new Object();
@@ -38,8 +40,22 @@ public final class SmppAdmissionClient implements AutoCloseable {
     private boolean ambiguousAdmissionObserved;
     private volatile SmppSession session;
     private boolean closed;
+    private volatile boolean disconnected;
+
+    private final class Pending {
+        final String token;
+        final CompletableFuture<MessageLedger.Admission> completion = new CompletableFuture<>();
+        final Runnable dispatch = () -> submitRequest(this);
+        volatile ScheduledFuture<?> timeout;
+        volatile SubmitSm request;
+        Pending(String token) { this.token = token; }
+    }
 
     public SmppAdmissionClient(RunConfig config, SmppIngressSettings settings, MessageLedger ledger) {
+        this(config, settings, ledger, Thread.ofPlatform().name("smpp-admission-dispatch").factory());
+    }
+
+    SmppAdmissionClient(RunConfig config, SmppIngressSettings settings, MessageLedger ledger, ThreadFactory dispatchThreads) {
         if (!"smpp".equals(config.ingressMode()) || settings.windowSize() < config.maxOutstandingRequests()) {
             // Otherwise waiting for the local SMPP window would inflate application latency.
             throw new IllegalArgumentException("SMPP window must cover outstanding request capacity");
@@ -50,6 +66,11 @@ public final class SmppAdmissionClient implements AutoCloseable {
         group = new NioEventLoopGroup(1);
         client = new DefaultSmppClient(group);
         tasks = Executors.newVirtualThreadPerTaskExecutor();
+        dispatcher = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(config.maxOutstandingRequests()),
+                dispatchThreads, new ThreadPoolExecutor.AbortPolicy());
+        timeouts = new ScheduledThreadPoolExecutor(1, Thread.ofPlatform().name("smpp-admission-timeouts").factory());
+        timeouts.setRemoveOnCancelPolicy(true);
         receiptSlots = new Semaphore(settings.windowSize());
         for (Problem problem : Problem.values()) { problems.put(problem, new AtomicLong()); }
     }
@@ -68,6 +89,18 @@ public final class SmppAdmissionClient implements AutoCloseable {
         connection.getLoggingOptions().setLogPdu(false);
         connection.getLoggingOptions().setLogBytes(false);
         session = client.bind(connection, new DefaultSmppSessionHandler() {
+            @Override public void fireExpectedPduResponseReceived(PduAsyncResponse response) {
+                if (response.getRequest().getReferenceObject() instanceof Pending admission) {
+                    admissionResponse(admission, response.getResponse());
+                }
+            }
+            @Override public void firePduRequestExpired(PduRequest request) {
+                if (request.getReferenceObject() instanceof Pending admission) { finish(admission, TIMED_OUT, null, null); }
+            }
+            @Override public void fireChannelUnexpectedlyClosed() {
+                disconnected = true;
+                pending.values().forEach(admission -> finish(admission, FAILED, null, Problem.TRANSPORT_FAILURE));
+            }
             @Override public PduResponse firePduRequestReceived(PduRequest request) {
                 if (!(request instanceof DeliverSm receipt)) { return request.createResponse(); }
                 PduResponse response = request.createResponse();
@@ -100,18 +133,26 @@ public final class SmppAdmissionClient implements AutoCloseable {
     }
 
     public synchronized Optional<Submission> submit(boolean measured, long scheduledNanos) {
-        if (closed || !isBound()) { throw new IllegalStateException("SMPP client is not bound"); }
+        if (closed || disconnected || !isBound()) { throw new IllegalStateException("SMPP client is not bound"); }
         String token = ledger.attempt(measured, scheduledNanos);
         if (token == null) { return Optional.empty(); }
-        CompletableFuture<MessageLedger.Admission> completion = new CompletableFuture<>();
-        pending.put(token, completion);
-        tasks.submit(() -> submitRequest(token, completion));
-        return Optional.of(new Submission(token, completion));
+        Pending admission = new Pending(token);
+        pending.put(token, admission);
+        try {
+            admission.timeout = timeouts.schedule(() -> finish(admission, TIMED_OUT, null, null),
+                    config.admissionTimeoutMillis(), TimeUnit.MILLISECONDS);
+            if (admission.completion.isDone()) { admission.timeout.cancel(false); }
+            dispatcher.execute(admission.dispatch);
+        } catch (RejectedExecutionException exception) {
+            finish(admission, FAILED, null, Problem.TRANSPORT_FAILURE);
+        }
+        // A disconnect can race the map insertion after its callback has inspected pending requests.
+        if (disconnected) { finish(admission, FAILED, null, Problem.TRANSPORT_FAILURE); }
+        return Optional.of(new Submission(token, admission.completion));
     }
 
-    private void submitRequest(String token, CompletableFuture<MessageLedger.Admission> completion) {
-        MessageLedger.Admission outcome;
-        String id = null;
+    private void submitRequest(Pending admission) {
+        if (pending.get(admission.token) != admission) { return; }
         try {
             SubmitSm submit = new SubmitSm();
             submit.setSourceAddress(new Address(SmppConstants.TON_UNKNOWN, SmppConstants.NPI_UNKNOWN, settings.source()));
@@ -119,49 +160,84 @@ public final class SmppAdmissionClient implements AutoCloseable {
             submit.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
             submit.setRegisteredDelivery(config.dlrEnabled()
                     ? SmppConstants.REGISTERED_DELIVERY_SMSC_RECEIPT_REQUESTED : 0);
-            submit.setShortMessage(token.getBytes(StandardCharsets.US_ASCII));
-            ledger.markDispatched(token);
-            SubmitSmResp response = session.submit(submit, config.admissionTimeoutMillis());
+            submit.setShortMessage(admission.token.getBytes(StandardCharsets.US_ASCII));
+            submit.setReferenceObject(admission);
+            admission.request = submit;
+            if (pending.get(admission.token) != admission) { return; }
+            boolean frozen;
+            synchronized (ledger) {
+                frozen = ledger.isFrozen();
+                if (!frozen && pending.get(admission.token) == admission) { ledger.markDispatched(admission.token); }
+            }
+            if (frozen) { finish(admission, PENDING, null, null); return; }
+            if (pending.get(admission.token) != admission) { return; }
+            var window = session.sendRequestPdu(submit, config.admissionTimeoutMillis(), false);
+            // Response/timeout/close can win before the socket write returns.
+            if (pending.get(admission.token) != admission) { window.cancel(); }
+        } catch (SmppTimeoutException exception) {
+            finish(admission, TIMED_OUT, null, null);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            finish(admission, FAILED, null, Problem.TRANSPORT_FAILURE);
+        } catch (Exception exception) {
+            finish(admission, FAILED, null, Problem.TRANSPORT_FAILURE);
+        }
+    }
+
+    private void admissionResponse(Pending admission, PduResponse pdu) {
+        MessageLedger.Admission outcome;
+        String id = null;
+        Problem failure = null;
+        if (pdu instanceof SubmitSmResp response) {
             if (response.getCommandStatus() == SmppConstants.STATUS_OK) {
                 id = response.getMessageId();
                 if (id == null || id.isBlank() || id.length() > 64) {
                     outcome = FAILED;
-                    problem(Problem.INVALID_ACKNOWLEDGEMENT);
+                    failure = Problem.INVALID_ACKNOWLEDGEMENT;
                     id = null;
                 } else { outcome = ACCEPTED; }
             } else {
                 outcome = REJECTED;
                 if (response.getCommandStatus() != SmppConstants.STATUS_THROTTLED
-                        && response.getCommandStatus() != SmppConstants.STATUS_MSGQFUL) { problem(Problem.UNEXPECTED_STATUS); }
+                        && response.getCommandStatus() != SmppConstants.STATUS_MSGQFUL) { failure = Problem.UNEXPECTED_STATUS; }
             }
-        } catch (SmppTimeoutException exception) {
-            outcome = TIMED_OUT;
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
+        } else {
             outcome = FAILED;
-            problem(Problem.TRANSPORT_FAILURE);
-        } catch (Exception exception) {
-            outcome = FAILED;
-            problem(Problem.TRANSPORT_FAILURE);
+            failure = Problem.INVALID_ACKNOWLEDGEMENT;
         }
+        finish(admission, outcome, id, failure);
+    }
+
+    private void finish(Pending admission, MessageLedger.Admission outcome, String id, Problem failure) {
         try {
             synchronized (correlation) {
+                if (!pending.remove(admission.token, admission)) { return; }
+                if (admission.timeout != null) { admission.timeout.cancel(false); }
+                dispatcher.remove(admission.dispatch);
+                cancelWindow(admission);
+                if (failure != null) { problem(failure); }
                 if (outcome == FAILED || outcome == TIMED_OUT) { ambiguousAdmissionObserved = true; }
                 synchronized (ledger) {
                     if (ledger.isFrozen()) { outcome = PENDING; }
-                    else { ledger.admission(token, outcome, id); }
+                    else { ledger.admission(admission.token, outcome, id); }
                 }
                 List<Long> receipts = id == null ? null : early.remove(id);
                 if (receipts != null) {
                     bufferedReceipts -= receipts.size();
-                    for (long arrival : receipts) { recordReceipt(token, id, arrival); }
+                    for (long arrival : receipts) { recordReceipt(admission.token, id, arrival); }
                 }
-                pending.remove(token);
-                completion.complete(outcome);
+                admission.completion.complete(outcome);
             }
         } catch (RuntimeException exception) {
-            pending.remove(token);
-            completion.completeExceptionally(exception);
+            admission.completion.completeExceptionally(exception);
+        }
+    }
+
+    private void cancelWindow(Pending admission) {
+        SubmitSm request = admission.request;
+        if (session != null && request != null && request.hasSequenceNumberAssigned()) {
+            var window = session.getSendWindow().get(request.getSequenceNumber());
+            if (window != null && window.getRequest() == request) { window.cancel(); }
         }
     }
 
@@ -210,7 +286,7 @@ public final class SmppAdmissionClient implements AutoCloseable {
         return SmppConstants.STATUS_OK;
     }
 
-    /** Invoke only after admission tasks have stopped, before ledger finalization. */
+    /** Invoke only after generation has stopped and pending admissions have completed, before ledger finalization. */
     public void finalizeReceipts() {
         synchronized (correlation) {
             if (ledger.isFrozen()) { early.clear(); bufferedReceipts = 0; return; }
@@ -238,9 +314,15 @@ public final class SmppAdmissionClient implements AutoCloseable {
 
     @Override public void close() {
         synchronized (this) { if (closed) { return; } closed = true; }
+        dispatcher.shutdownNow();
+        timeouts.shutdownNow();
+        pending.values().forEach(admission -> finish(admission, FAILED, null, Problem.TRANSPORT_FAILURE));
         if (session != null) { session.destroy(); }
         tasks.shutdownNow();
         try {
+            if (!dispatcher.awaitTermination(settings.connectTimeoutMillis(), TimeUnit.MILLISECONDS)) {
+                problem(Problem.TRANSPORT_FAILURE);
+            }
             if (!tasks.awaitTermination(settings.connectTimeoutMillis(), TimeUnit.MILLISECONDS)) {
                 problem(Problem.TRANSPORT_FAILURE);
             }

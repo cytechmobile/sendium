@@ -11,7 +11,9 @@ compatibility and invokes CloudFormation/SSM. Separate [reporting and cleanup](R
 jobs finalize results without cloud credentials and delete run-owned resources.
 The [offline permissions/failure audit](AUDIT.md) records the verified boundaries
 and remaining hosted confirmations. A completed preparation run is not a benchmark observation.
-Task 5.5's complete local rehearsal remains required before AWS validation in 6.1.
+The [complete local rehearsal](../local/README.md) is implemented and its
+[lifecycle verification](../local/VERIFICATION.md) satisfies the prerequisite before
+AWS validation in Task 6.1.
 
 ## Inputs and defaults
 
@@ -24,8 +26,8 @@ therefore have individual fields; durations do not need a grouped string.
 | `ingress_mode` | `http` | `http` or `smpp` |
 | `sendium_instance_type` | `t4g.small` | EC2 type syntax; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
-| `offered_rate` | 100 | Finite, positive messages/sec, at most 1,000,000,000; fractional rates supported |
-| `worker_tps` | 100 | Positive Java-compatible integer |
+| `offered_rate` | 30 | Finite, positive messages/sec, at most 1,000,000,000; fractional rates supported |
+| `worker_tps` | 0 | Nonnegative Java-compatible integer; 0 means unlimited |
 | `warmup_seconds` | 120 | Integer, 0–600 |
 | `measurement_seconds` | 600 | Integer, 1–3600 |
 | `drain_seconds` | 120 | Integer, 0–600 |

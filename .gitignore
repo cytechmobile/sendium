@@ -54,3 +54,8 @@ conf/
 sendium-app/conf
 sendium-app/data
 sendium-app/logs
+
+# Generated local performance rehearsal outputs (keep performance/local source)
+/local-rehearsal-results/
+/local-load-results/
+/local-no-dlr-results/

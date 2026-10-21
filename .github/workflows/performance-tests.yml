@@ -23,12 +23,12 @@ on:
       offered_rate:
         description: Offered messages per second
         type: number
-        default: 100
+        default: 30
         required: true
       worker_tps:
-        description: Sendium outgoing worker TPS
+        description: Outgoing worker TPS cap (0 means unlimited)
         type: number
-        default: 100
+        default: 0
         required: true
       warmup_seconds:
         description: Warm-up seconds (0–600)

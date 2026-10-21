@@ -232,7 +232,7 @@ def documents(staged, result, instances, timeout):
                                   "architecture": instance["Architecture"], "availabilityZone": instance["Placement"]["AvailabilityZone"],
                                   "imageId": instance["ImageId"], "rootDeviceName": instance["RootDeviceName"],
                                   "blockDeviceMappings": instance["BlockDeviceMappings"],
-                                  "rootVolume": instance["resolvedRootVolume"], "execution": "ec2-jvm",
+                                  "rootVolume": instance["resolvedRootVolume"], "execution": staged.get("resolution", {}).get("executionKind", "ec2-jvm"),
                                   "creditMode": "standard" if instance["burstable"] else "not-applicable"}
     execution = {"schemaVersion": 1, "readinessTimeoutSeconds": preset["measurement"]["readinessTimeoutSeconds"],
                  "retentionSeconds": preset["measurement"]["retentionSeconds"], "intervalBudget": preset["measurement"]["intervalBudget"],
