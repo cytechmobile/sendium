@@ -51,7 +51,7 @@ capacity qualification. See `performance/local/AVERAGE_RATE_VALIDATION.md`.
 | 5 | 5.11 | Remove superseded generator results and investigation-only tooling | S | 🟢 done | Removed 16 old result directories, six superseded write-ups, two Java probes, four profiling recordings, compiled probes/extracted library sources, old harness target artifacts and temporary logging. Retained current DLR-enabled results, reusable runner, timing evidence and tests. Clean harness build: 124 tests pass; seven local and two workload-default checks pass. |
 | 5 | 5.12 | Compare the outbound-storage branch with retained main-equivalent results | M | 🟢 done | Tested candidate `9a6ea9c` at 100 msg/s, HTTP/SMPP with DLR, using the exact retained baseline harness/JRE/preset. HTTP completed all messages but had higher completion p99/drain; SMPP rejected 31,745 and left 10,000 accepted messages unfinished after drain. Detailed initial and patched comparisons are retained with external artifacts, not source. |
 | 5 | 5.13 | Package reusable performance tooling and regression tests for commit | S | 🟢 done | Retained reusable code/tests and concise verification notes; moved the detailed initial branch comparison alongside external results. Reviewed source and excluded generated/private artifacts. Verification: 124 harness tests, 66 deployment, 57 workflow (one platform skip), ten local, seven semantic checks, schema/preset validation and actionlint pass. |
-| 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | ⚪ not started | Requires successful local rehearsal in 5.5 and configured AWS prerequisites. Both protocols with delivery reports enabled, actual resource measurements; provisioning/scenario failure, cancellation, partial creation, abandoned execution, and independent expiry. |
+| 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | 🟡 working | Installed eu-west-1 bootstrap and immutable expiry package; stack UPDATE_COMPLETE, live expiry configuration verified and empty Lambda sweep passed. GitHub environment/role variables configured with maintainer review and main/feat/* branch policies. Publishing the workflow PR precedes first DLR-enabled AWS benchmark; hosted OIDC, compute/networking, cancellation and actual expired-run deletion remain pending. |
 | 6 | 6.2 | Document AWS installation and maintainer benchmark operations | M | ⚪ not started | Bootstrap and networking installation, GitHub environment/role setup, preset selection, manual execution, results, retention, cost/lifetime boundaries, teardown, and recovery. |
 | 6 | 6.3 | Write the as-built architecture companion document | S | ⚪ not started | Describe implemented components, trust boundaries, data flow, stack ownership, and resource lifecycle with diagrams. |
 
@@ -214,6 +214,38 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-21 — Install AWS bootstrap and protected GitHub environment
+
+**Decision:** With user approval, install `sendium-performance-bootstrap` in
+eu-west-1 using the authenticated bootstrap SSO profile. Initial creation installed
+the private bucket, exact-repository/environment OIDC trust, restricted service
+roles and runtime boundary. Upload the deterministic expiry package immutably,
+then update the stack to install its Lambda and 15-minute EventBridge schedule.
+The stack reached `UPDATE_COMPLETE`; `check_expiry.py` verified the live settings.
+An actual Lambda invocation considered zero runs and reported no failures/issues.
+
+**GitHub configuration:** Created environment `sendium-performance` with required
+reviewer `lykakis`, self-review allowed, administrator bypass disabled, and custom
+deployment branch policies for `main` and `feat/*`. Set the region, bootstrap stack,
+orchestrator role ARN and diagnostics role ARN environment variables from stack
+outputs. No permanent AWS credentials were placed in GitHub or this repository.
+
+**Evidence:** Installed expiry ZIP SHA-256:
+`9802a53de2bff8246f0e19f093ad237680adf9b81033295b5d023033db7a2cee`.
+Package manifest and initial invocation result are retained outside the checkout
+in `sendium-aws-expiry-20261021`. This establishes bootstrap/configuration and an
+empty live sweep, not scheduled deletion of an expired benchmark or hosted OIDC
+execution. No benchmark EC2, RDS or VPC resources have been provisioned yet.
+
+**Next gate:** Publish/review/merge the maintained workflow on `main`, then run
+the first DLR-enabled AWS workload and verify full lifecycle behavior. Environment
+review approval may be required when protected jobs become eligible. The persistent
+bootstrap and expiry schedule remain installed for subsequent benchmarks.
+
+**Alternatives considered:** Reuse existing resources (none found); create benchmark
+compute before operational expiry (rejected); merge the PR automatically (not
+authorized). Keep AWS performance conclusions pending actual benchmark execution.
 
 ### 2026-10-21 — Commit reusable implementation and concise verification notes
 
