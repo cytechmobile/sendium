@@ -52,6 +52,7 @@ capacity qualification. See `performance/local/AVERAGE_RATE_VALIDATION.md`.
 | 5 | 5.12 | Compare the outbound-storage branch with retained main-equivalent results | M | 🟢 done | Tested candidate `9a6ea9c` at 100 msg/s, HTTP/SMPP with DLR, using the exact retained baseline harness/JRE/preset. HTTP completed all messages but had higher completion p99/drain; SMPP rejected 31,745 and left 10,000 accepted messages unfinished after drain. Detailed initial and patched comparisons are retained with external artifacts, not source. |
 | 5 | 5.13 | Package reusable performance tooling and regression tests for commit | S | 🟢 done | Retained reusable code/tests and concise verification notes; moved the detailed initial branch comparison alongside external results. Reviewed source and excluded generated/private artifacts. Verification: 124 harness tests, 66 deployment, 57 workflow (one platform skip), ten local, seven semantic checks, schema/preset validation and actionlint pass. |
 | 6 | 6.1 | Validate the complete AWS benchmark and resource lifecycle | M | 🟡 working | Installed eu-west-1 bootstrap and immutable expiry package; stack UPDATE_COMPLETE, live expiry configuration verified and empty Lambda sweep passed. GitHub environment/role variables configured with maintainer review and main/feat/* branch policies. Publishing the workflow PR precedes first DLR-enabled AWS benchmark; hosted OIDC, compute/networking, cancellation and actual expired-run deletion remain pending. |
+| 5 | 5.14 | Address PR review comments in harness test helpers | S | 🟢 done | Renamed the fake clock and added Override annotations. Shared DLR metric parsing preserves valid values and fails malformed samples with context/original cause. All 126 harness tests pass; packaged integration test sources compile. Test-only changes require no workload rerun. |
 | 6 | 6.2 | Document AWS installation and maintainer benchmark operations | M | ⚪ not started | Bootstrap and networking installation, GitHub environment/role setup, preset selection, manual execution, results, retention, cost/lifetime boundaries, teardown, and recovery. |
 | 6 | 6.3 | Write the as-built architecture companion document | S | ⚪ not started | Describe implemented components, trust boundaries, data flow, stack ownership, and resource lifecycle with diagrams. |
 
@@ -214,6 +215,22 @@ All entries below are explicitly deferred by issue #352. Their scheduling beyond
 ---
 
 ## 5. Decision log
+
+### 2026-10-21 — Address PR code-quality comments without weakening test failures
+
+**Decision:** Rename the test clock to `FakeClock`, annotate interface overrides,
+and use one test-only DLR metric-value parser in both packaged integration checks.
+Catch malformed numbers only to raise a clearer assertion containing the sample
+and original cause; never substitute zero or discard malformed metrics.
+
+**Why:** Address all ten automated review comments on PR #357 while preserving
+fail-fast integration verification. Added focused parser checks; all 126 harness
+tests pass and the packaged integration sources compile. No production behavior,
+AWS resources or benchmark workload were changed.
+
+**Alternatives considered:** Ignore parsing exceptions or return zero (could hide
+a real metrics/storage failure); rerun full load benchmarks for test-helper edits
+(not relevant to the change).
 
 ### 2026-10-21 — Install AWS bootstrap and protected GitHub environment
 

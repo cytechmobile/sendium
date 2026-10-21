@@ -309,7 +309,7 @@ class HttpAdaptersTest {
             server.start();
         }
         URI uri() { return URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/sendsms"); }
-        public void close() {
+        @Override public void close() {
             server.stop(0);
             executor.shutdownNow();
         }

@@ -77,8 +77,8 @@ class LifecycleTest {
     private static class FakeClock implements Lifecycle.Clock {
         long now;
         boolean interrupt;
-        public long nanoTime() { return now; }
-        public void sleepNanos(long nanos) throws InterruptedException {
+        @Override public long nanoTime() { return now; }
+        @Override public void sleepNanos(long nanos) throws InterruptedException {
             if (interrupt) { throw new InterruptedException(); }
             now += nanos;
         }
@@ -89,13 +89,13 @@ class LifecycleTest {
         final List<String> events = new ArrayList<>();
         long completeAt;
         FakeScenario(FakeClock clock) { this.clock = clock; }
-        public void awaitReady() { events.add("ready"); }
-        public void startGeneration(Lifecycle.Phase phase, long start, long deadline) {
+        @Override public void awaitReady() { events.add("ready"); }
+        @Override public void startGeneration(Lifecycle.Phase phase, long start, long deadline) {
             events.add(phase + ":" + start + ":" + deadline);
         }
-        public void stopGeneration() { events.add("stop:" + clock.now); }
-        public boolean hasOutstandingWork() { return clock.now < completeAt; }
-        public void finalizeAccounting() { events.add("finalize"); }
-        public void close() { events.add("close"); }
+        @Override public void stopGeneration() { events.add("stop:" + clock.now); }
+        @Override public boolean hasOutstandingWork() { return clock.now < completeAt; }
+        @Override public void finalizeAccounting() { events.add("finalize"); }
+        @Override public void close() { events.add("close"); }
     }
 }
