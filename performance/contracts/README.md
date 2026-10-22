@@ -1,6 +1,6 @@
 # Performance harness contracts, version 1
 
-These contracts implement Task 1.1 of `living_docs/AwsPerformanceTests.md`.
+These contracts define the versioned configuration and result formats for the performance harness.
 They describe JSON exchanged by orchestration, the harness, and reporting;
 they do not provision infrastructure or execute traffic.
 

@@ -59,3 +59,6 @@ sendium-app/logs
 /local-rehearsal-results/
 /local-load-results/
 /local-no-dlr-results/
+
+# Local implementation planning
+/living_docs/
