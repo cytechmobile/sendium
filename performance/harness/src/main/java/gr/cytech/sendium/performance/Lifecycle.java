@@ -20,8 +20,8 @@ public final class Lifecycle {
 
     public Lifecycle(Consumer<Phase> observer) {
         this(new Clock() {
-            public long nanoTime() { return System.nanoTime(); }
-            public void sleepNanos(long nanos) throws InterruptedException {
+            @Override public long nanoTime() { return System.nanoTime(); }
+            @Override public void sleepNanos(long nanos) throws InterruptedException {
                 TimeUnit.NANOSECONDS.sleep(nanos);
             }
         }, observer);

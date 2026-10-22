@@ -86,8 +86,8 @@ class ResultReportTest {
         MessageLedger ledger = ledger(config);
         at(160);
         Lifecycle.Clock schedulerClock = new Lifecycle.Clock() {
-            public long nanoTime() { return clock.get(); }
-            public void sleepNanos(long nanos) { clock.addAndGet(nanos); }
+            @Override public long nanoTime() { return clock.get(); }
+            @Override public void sleepNanos(long nanos) { clock.addAndGet(nanos); }
         };
         try (var generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> {
             fail("Expired schedule must not generate traffic"); return false;
