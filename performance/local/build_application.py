@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import io
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 import re
 import subprocess
 import tarfile
@@ -64,6 +64,26 @@ def inspect(image):
                            capture_output=True, text=True).stdout)
 
 
+def application_provenance(controller):
+    # Retain the base image's recovery API instead of mixing a new lab with old helpers.
+    replacements = (
+        (b'"ref": "refs/heads/local-rehearsal"', b'"ref": lab.source.get("applicationRef", "refs/heads/local-rehearsal")'),
+        (b'"applicationCommit": lab.source["baseCommit"]', b'"applicationCommit": lab.source.get("applicationCommit", lab.source["baseCommit"])'),
+    )
+    for old, new in replacements:
+        controller = controller.replace(old, new)
+        if new not in controller:
+            raise ValueError("Base controller does not support selected application provenance")
+    return controller
+
+
+def controller_overlay(image):
+    controller = call(["run", "--rm", "--network", "none", "--entrypoint", "python", image, "-c",
+                       "from pathlib import Path; import sys; sys.stdout.buffer.write(Path('/workspace/performance/local/lab.py').read_bytes())"],
+                      capture_output=True).stdout
+    return application_provenance(controller)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("application_ref")
@@ -81,7 +101,7 @@ def main():
     if args.expected_harness_sha256 and original["harnessSha256"] != args.expected_harness_sha256:
         raise ValueError("Base image does not contain the retained baseline harness")
     archive = git("archive", "--format=tar", revision, "--", "pom.xml", "mvnw", ".mvn", "sendium-core", "sendium-app").stdout
-    overlay = (Path(__file__).resolve().parent / "lab.py").read_bytes()
+    overlay = controller_overlay(base)
     source = dict(original["source"])
     source["baselineWorkingTreeDigest"] = source.pop("workingTreeDigest", None)
     symbolic = git("rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", args.application_ref).stdout.decode().strip()

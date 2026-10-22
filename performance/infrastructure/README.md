@@ -8,7 +8,7 @@
   Temporary `runs/` objects expire after one day by default, with incomplete
   multipart uploads also expired. Versioning is not enabled.
 - Account-level GitHub OIDC provider, or reuse of an existing provider ARN.
-- Environment-bound GitHub orchestration and read-only diagnostic roles.
+- Environment-bound GitHub orchestration, read-only diagnostics and deletion-only cleanup roles.
 - A CloudFormation service role for run infrastructure and a permissions
   boundary required on the EC2 runtime roles.
 - An expiry role and 14-day log group, plus a conditionally installed Lambda,
@@ -58,13 +58,21 @@ trust requires the exact repository/environment subject and audience, not a
 branch-only or wildcard repository subject. This template does not create or
 configure the GitHub environment.
 
+Use `sendium-performance` for approval-gated provisioning/execution. Configure
+`sendium-performance-recovery` (parameter `GitHubRecoveryEnvironment`) with the
+appropriate branch restrictions and no required reviewers. Recovery uses the
+read-only diagnostics and deletion-only cleanup roles, not the provisioning role.
+This lets collection/deletion proceed automatically after success, failure or
+cancellation without opening an unreviewed path to creating benchmark resources.
+
 ### Outputs used by deployment/workflow code
 
 | Output | Consumer |
 |--------|----------|
 | `ArtifactBucketName` | Run-scoped private inputs, immutable bundles, SSM output and diagnostics |
 | `OrchestratorRoleArn` | Protected preflight/provision/control/cleanup jobs |
-| `DiagnosticsRoleArn` | Protected post-run EC2/CloudWatch reads and output retrieval |
+| `DiagnosticsRoleArn` | Automatic post-run EC2/CloudWatch reads and output retrieval |
+| `CleanupRoleArn` | Automatic deletion-only cleanup of owned run stacks and temporary artifacts |
 | `CloudFormationExecutionRoleArn` | `CreateStack --role-arn`; persists for nested-stack deletion/expiry |
 | `RuntimeBoundaryArn` | Mandatory boundary on app/harness roles in the run template |
 | `ExpiryRoleArn`, `ExpiryFunctionName`, `ExpiryLogGroupName` | Persistent expiry and diagnostics |
@@ -74,6 +82,7 @@ configure the GitHub environment.
 | `OidcProviderArn` | Reuse and account-level inventory |
 | `RunStackPrefix`, `RuntimeRolePrefix`, `RunSecretPrefix` | Namespaced run resources |
 | `RepositoryTag`, `GitHubEnvironmentName` | Ownership/access configuration |
+| `GitHubRecoveryEnvironmentName` | Branch-restricted automatic diagnostics/cleanup environment |
 | `TemporaryArtifactRetentionDays` | Effective installed S3 retention setting |
 
 Read outputs with:
@@ -89,7 +98,8 @@ store static AWS access keys.
 
 The [protected workflow configuration](../workflow/AWS_EXECUTION.md) names the
 environment variables `AWS_REGION`, `AWS_ORCHESTRATOR_ROLE_ARN`,
-`AWS_BOOTSTRAP_STACK` and the separate `AWS_DIAGNOSTICS_ROLE_ARN`. It validates the actual assumed identity, installed expiry
+`AWS_BOOTSTRAP_STACK` and the recovery environment's separate
+`AWS_DIAGNOSTICS_ROLE_ARN` / `AWS_CLEANUP_ROLE_ARN`. It validates the actual assumed identity, installed expiry
 and regional compatibility before creating run resources.
 
 ### Privilege and ownership contract

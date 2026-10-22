@@ -17,7 +17,12 @@ Configure environment **`sendium-performance`** with maintainer-controlled acces
 | `AWS_REGION` | Explicit benchmark/bootstrap region; no inferred default |
 | `AWS_ORCHESTRATOR_ROLE_ARN` | Bootstrap output `OrchestratorRoleArn` |
 | `AWS_BOOTSTRAP_STACK` | Installed bootstrap stack name |
-| `AWS_DIAGNOSTICS_ROLE_ARN` | Bootstrap output `DiagnosticsRoleArn`, used by the separate read-only job |
+
+Only the provisioning/execution job uses this approval-gated environment.
+Configure the separate, branch-restricted `sendium-performance-recovery`
+environment **without required reviewers** for automatic diagnostics and cleanup;
+its variables and role boundaries are described in [REPORTING.md](REPORTING.md).
+Do not grant its OIDC subject access to the provisioning role.
 
 The job requests `id-token: write` and `contents: read`, then assumes the configured
 role using GitHub OIDC. Its 10,800-second session matches the bootstrap role limit
@@ -43,7 +48,9 @@ subject; build jobs have neither an environment nor an OIDC grant.
    encrypted 20 GiB gp3. Do not silently downgrade an unavailable engine version.
    Intersect both EC2, RDS and required interface-endpoint AZs. Choose the first
    common AZ and another available regional AZ for the database subnet group;
-   resolve the AWS-owned regional IPv4 S3 prefix list.
+    resolve the AWS-owned regional IPv4 S3 prefix list. Endpoint records are matched
+    by both service name and required type: S3 can return separate Gateway and
+    Interface records under the same name; the benchmark selects Gateway.
 5. Resolve Temurin Java 25 Linux JRE metadata through Adoptium, pinning one exact
    release/build across architectures. Fetch once for identical architectures.
    Verify official SHA-256/size during bounded HTTPS download. Fetch the official

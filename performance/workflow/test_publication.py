@@ -162,6 +162,21 @@ class PublicationTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_cleanup_requires_the_dedicated_role_not_the_provisioning_role(self):
+        cleanup_role = "arn:aws:iam::123456789012:role/sendium-perf-cleanup"
+        orchestration_role = "arn:aws:iam::123456789012:role/sendium-perf-orchestrator"
+        outputs = {"RepositoryTag": "cytechmobile/sendium", "CleanupRoleArn": cleanup_role,
+                   "OrchestratorRoleArn": orchestration_role, "RunStackPrefix": "sendium-perf-run-", "ArtifactBucketName": "bucket"}
+        description = {"StackId": "arn:aws:cloudformation:eu-west-1:123456789012:stack/bootstrap/id",
+                       "Outputs": [{"OutputKey": key, "OutputValue": value} for key, value in outputs.items()]}
+        aws = Mock(call=lambda *_args, **_kwargs: {"Account": "123456789012",
+                   "Arn": "arn:aws:sts::123456789012:assumed-role/sendium-perf-cleanup/session"})
+        with patch.object(recover.deploy, "stack", return_value=description):
+            plan = recover.ownership(aws, request(), "eu-west-1", "bootstrap", cleanup_role, False)
+            self.assertEqual(plan["runStack"], "sendium-perf-run-" + request()["runIdentity"])
+            with self.assertRaisesRegex(ValueError, "bootstrap/role/region mismatch"):
+                recover.ownership(aws, request(), "eu-west-1", "bootstrap", orchestration_role, False)
+
     def test_diagnostics_collects_exact_window_and_preserves_partial_metric_envelope(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

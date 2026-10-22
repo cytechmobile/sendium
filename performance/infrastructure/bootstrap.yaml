@@ -38,6 +38,12 @@ Parameters:
     Default: sendium-performance
     MaxLength: 100
     AllowedPattern: '[A-Za-z0-9_-]+'
+  GitHubRecoveryEnvironment:
+    Type: String
+    Default: sendium-performance-recovery
+    Description: Separate branch-restricted environment without required reviewers for automatic diagnostics and deletion-only cleanup.
+    MaxLength: 100
+    AllowedPattern: '[A-Za-z0-9_-]+'
   ExistingOidcProviderArn:
     Type: String
     Default: ''
@@ -58,6 +64,10 @@ Conditions:
   InstallExpiry: !Not [!Equals [!Ref ExpiryCodeKey, '']]
 
 Rules:
+  SeparateRecoveryEnvironment:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref GitHubEnvironment, !Ref GitHubRecoveryEnvironment]]
+        AssertDescription: Provisioning and automatic recovery must use different GitHub environments.
   CompleteExpiryPackage:
     Assertions:
       - Assert: !Or
@@ -445,7 +455,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: !Ref OidcAudience
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubEnvironment}'
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubEnvironment}'
+                  - !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubRecoveryEnvironment}'
       Policies:
         - PolicyName: ReadRunEvidence
           PolicyDocument:
@@ -461,6 +473,50 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub '${Artifacts.Arn}/runs/*/outputs/*'
+
+  GitHubCleanup:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-cleanup'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: !Ref OidcAudience
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubRecoveryEnvironment}'
+      Policies:
+        - PolicyName: DeleteOwnedRuns
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+              - Effect: Allow
+                Action: cloudformation:DeleteStack
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ResourcePrefix}-run-*/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Artifacts.Arn
+                Condition: {StringLike: {'s3:prefix': ['runs/*']}}
+              - Effect: Allow
+                Action: [s3:GetBucketVersioning, s3:ListBucketMultipartUploads]
+                Resource: !GetAtt Artifacts.Arn
+              - Effect: Allow
+                Action: [s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub '${Artifacts.Arn}/runs/*'
 
   ExpiryRole:
     Type: AWS::IAM::Role
@@ -575,6 +631,8 @@ Outputs:
     Value: !GetAtt GitHubOrchestrator.Arn
   DiagnosticsRoleArn:
     Value: !GetAtt GitHubDiagnostics.Arn
+  CleanupRoleArn:
+    Value: !GetAtt GitHubCleanup.Arn
   CloudFormationExecutionRoleArn:
     Value: !GetAtt CloudFormationExecution.Arn
   RuntimeBoundaryArn:
@@ -612,5 +670,7 @@ Outputs:
     Value: !Sub '${RepositoryOwner}/${RepositoryName}'
   GitHubEnvironmentName:
     Value: !Ref GitHubEnvironment
+  GitHubRecoveryEnvironmentName:
+    Value: !Ref GitHubRecoveryEnvironment
   TemporaryArtifactRetentionDays:
     Value: !Ref TemporaryArtifactExpirationDays

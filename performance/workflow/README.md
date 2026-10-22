@@ -15,6 +15,11 @@ The [complete local rehearsal](../local/README.md) is implemented and its
 [lifecycle verification](../local/VERIFICATION.md) satisfies the prerequisite before
 AWS validation in Task 6.1.
 
+Only provisioning/execution requires review in `sendium-performance`.
+Diagnostics and cleanup use `sendium-performance-recovery` without required
+reviewers, with separate read-only and deletion-only roles. See
+[recovery environment configuration](REPORTING.md#configuration).
+
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)

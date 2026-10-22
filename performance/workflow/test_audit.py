@@ -40,7 +40,9 @@ class PermissionAuditTests(unittest.TestCase):
             with self.subTest(job=name):
                 expected = {"contents": "read", **({"id-token": "write"} if name in protected else {})}
                 self.assertEqual(job["permissions"], expected)
-                self.assertEqual(job.get("environment"), "sendium-performance" if name in protected else None)
+                environments = {"aws-execution": "sendium-performance", "diagnostics": "sendium-performance-recovery",
+                                "cleanup": "sendium-performance-recovery"}
+                self.assertEqual(job.get("environment"), environments.get(name))
                 self.assertNotIn("self-hosted", str(job["runs-on"]))
                 self.assertNotIn("secrets.", json.dumps(job))
                 for step in job["steps"]:
@@ -50,6 +52,15 @@ class PermissionAuditTests(unittest.TestCase):
                     installs = [index for index, step in enumerate(job["steps"]) if "pip install" in step.get("run", "")]
                     self.assertTrue(all(index < auth for index in installs))
                     self.assertFalse(any(re.search(r"\bmvnw\b|\bjava\s+-jar|\bdocker\s+(build|run)", step.get("run", "")) for step in job["steps"]))
+
+    def test_automatic_cleanup_never_receives_the_provisioning_role(self):
+        jobs = test_prepare.WORKFLOW["jobs"]
+        cleanup = jobs["cleanup"]
+        self.assertIn("AWS_CLEANUP_ROLE_ARN", cleanup["env"])
+        self.assertNotIn("AWS_ORCHESTRATOR_ROLE_ARN", json.dumps(cleanup))
+        auth = next(step for step in cleanup["steps"] if "configure-aws" in step.get("uses", ""))
+        self.assertEqual(auth["with"]["role-to-assume"], "${{ vars.AWS_CLEANUP_ROLE_ARN }}")
+        self.assertEqual(jobs["aws-execution"]["environment"], "sendium-performance")
 
     def test_cleanup_and_publication_conditions_cover_failure_and_cancellation(self):
         jobs = test_prepare.WORKFLOW["jobs"]

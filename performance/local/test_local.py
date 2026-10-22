@@ -5,10 +5,12 @@ import copy
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import agent
 import build_application
@@ -17,8 +19,36 @@ import rehearse
 from public_artifacts import redact_known
 from scenarios import DEFAULT, LOAD, select
 
+sys.path.insert(0, str(rehearse.ROOT / "performance/deployment"))
+from backend import LocalAws
+from aws_cli import AwsError
+
 
 class LocalBoundaryTests(unittest.TestCase):
+    def test_application_overlay_preserves_the_base_controller_recovery_version(self):
+        original = b'context = {"ref": "refs/heads/local-rehearsal", "applicationCommit": lab.source["baseCommit"]}\nlegacy_recovery_api()\n'
+        updated = build_application.application_provenance(original)
+        self.assertIn(b'lab.source.get("applicationCommit", lab.source["baseCommit"])', updated)
+        self.assertTrue(updated.endswith(b'legacy_recovery_api()\n'))
+        self.assertEqual(build_application.application_provenance(updated), updated)
+        with self.assertRaisesRegex(ValueError, "does not support selected application provenance"):
+            build_application.application_provenance(b"unknown_controller()")
+
+    def test_local_cleanup_mode_cannot_provision_or_read_objects(self):
+        lab = SimpleNamespace(simulation={}, calls=[], roots={}, real=Mock())
+        aws = LocalAws(lab, "gh-12345-1", "cleanup")
+        for service, operation in (("cloudformation", "create-stack"), ("ssm", "send-command"),
+                                   ("s3api", "get-object"), ("s3api", "put-object")):
+            with self.subTest(operation=operation), self.assertRaises(AwsError):
+                aws.call(service, operation)
+        with self.assertRaises(AwsError):
+            aws.get("bucket", "runs/gh-12345-1/inputs/private", "unused")
+        lab.real.call.assert_not_called()
+        identity = aws.call("sts", "get-caller-identity")
+        self.assertIn("assumed-role/local-perf-cleanup/", identity["Arn"])
+        aws.call("s3api", "list-objects-v2", bucket="bucket", prefix="runs/gh-12345-1/")
+        lab.real.call.assert_called_once_with("s3api", "list-objects-v2", bucket="bucket", prefix="runs/gh-12345-1/")
+
     def test_comparison_rejects_different_workloads_harness_and_runtime(self):
         document = {"provenance": {"artifacts": [{"name": name, "sha256": "ab" * 32} for name in
                     ("harness", "sendiumJre", "harnessJre", "node", "transport", "sampler", "preset", "network", "runTemplate")]},
