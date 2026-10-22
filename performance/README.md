@@ -58,6 +58,34 @@ artifact bucket and expiry service persist between runs. The
 [local rehearsal](local/README.md) runs the traffic against real Sendium and
 PostgreSQL in containers, while explicitly modeling AWS control-plane operations.
 
+## Workflow parameters
+
+The [Performance Tests Action](../.github/workflows/performance-tests.yml) exposes
+the following inputs. Each run tests one ingress protocol.
+
+| Parameter | Default | What it controls |
+|---|---|---|
+| `ingress_mode` | `http` | How the test client submits messages to Sendium: `http` or `smpp`. Sendium's outgoing provider connection uses SMPP in both cases. |
+| `sendium_instance_type` | `t4g.small` | EC2 instance type for the Sendium application. |
+| `harness_instance_type` | `t4g.small` | EC2 instance type for the test tool, including the generator, simulated provider and DLR receiver. |
+| `offered_rate` | `30` | Average messages per second the generator attempts to submit **to Sendium**; positive fractional rates are supported. |
+| `worker_tps` | `0` | Sendium's outgoing worker rate cap. `0` means unlimited; a positive integer sets the cap. This is separate from the generator's offered rate. |
+| `warmup_seconds` | `120` | Warm-up duration before measured traffic: 0–600 seconds. |
+| `measurement_seconds` | `600` | Duration of measured traffic: 1–3,600 seconds. |
+| `drain_seconds` | `120` | Maximum time to wait for outstanding messages and DLRs after generation stops: 0–600 seconds. |
+| `dlr_enabled` | `true` | Whether messages request delivery receipts and the test checks their return. Keep enabled for DLR-inclusive performance comparisons. |
+| `provider_response_delay_ms` | `5` | Intentional delay before the simulated provider sends its submission response: 0–10,000 milliseconds. |
+| `provider_dlr_delay_ms` | `1000` | Intentional delay from provider response completion to simulated DLR generation: 0–60,000 milliseconds. It is separate from Sendium's receipt-forwarding time. |
+
+The **Use workflow from** branch selector determines the application revision
+being tested. The maintained test tool and controller are pinned separately from
+the default branch. Instance compatibility and regional availability are checked
+before provisioning.
+
+Database sizing, JVM heap, protocol windows and networking remain defined by the
+[shared preset](presets/README.md); they are not Action inputs. AWS region and role
+configuration come from the protected GitHub environment.
+
 ## Metrics collected
 
 ### Did the test tool supply the requested load?
