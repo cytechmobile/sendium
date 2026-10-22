@@ -45,8 +45,8 @@ public final class FixedRateGenerator implements AutoCloseable {
 
     public FixedRateGenerator(RunConfig config, MessageLedger ledger, Target target) {
         this(config, ledger, target, new Lifecycle.Clock() {
-            public long nanoTime() { return System.nanoTime(); }
-            public void sleepNanos(long nanos) throws InterruptedException { TimeUnit.NANOSECONDS.sleep(nanos); }
+            @Override public long nanoTime() { return System.nanoTime(); }
+            @Override public void sleepNanos(long nanos) throws InterruptedException { TimeUnit.NANOSECONDS.sleep(nanos); }
         });
     }
 

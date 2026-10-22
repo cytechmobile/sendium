@@ -387,21 +387,21 @@ class SmppAdmissionClientTest {
             SmppServerConfiguration config = new SmppServerConfiguration();
             config.setHost("127.0.0.1"); config.setPort(port); config.setDefaultWindowSize(10);
             server = new DefaultSmppServer(config, new SmppServerHandler() {
-                public void sessionBindRequested(Long id, SmppSessionConfiguration configuration, BaseBind request)
+                @Override public void sessionBindRequested(Long id, SmppSessionConfiguration configuration, BaseBind request)
                         throws SmppProcessingException {
                     if (!"secret".equals(request.getPassword())) { throw new SmppProcessingException(SmppConstants.STATUS_INVPASWD); }
                     configuration.getLoggingOptions().setLogPdu(false);
                     configuration.getLoggingOptions().setLogBytes(false);
                 }
-                public void sessionCreated(Long id, SmppServerSession created, BaseBindResp response) {
+                @Override public void sessionCreated(Long id, SmppServerSession created, BaseBindResp response) {
                     session.set(created);
                     created.serverReady(new DefaultSmppSessionHandler() {
-                        public PduResponse firePduRequestReceived(PduRequest request) {
+                        @Override public PduResponse firePduRequestReceived(PduRequest request) {
                             return request instanceof SubmitSm ? handler.handle(Gateway.this, request) : request.createResponse();
                         }
                     });
                 }
-                public void sessionDestroyed(Long id, SmppServerSession destroyed) { }
+                @Override public void sessionDestroyed(Long id, SmppServerSession destroyed) { }
             }, null, boss, worker);
             server.start();
         }
@@ -416,7 +416,7 @@ class SmppAdmissionClientTest {
             assertTrue(future.await(3000));
             return future.getResponse().getCommandStatus();
         }
-        public void close() {
+        @Override public void close() {
             tasks.shutdownNow();
             server.destroy(0, 100);
             boss.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS).syncUninterruptibly();

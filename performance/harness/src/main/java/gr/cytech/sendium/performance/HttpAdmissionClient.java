@@ -57,7 +57,7 @@ public final class HttpAdmissionClient implements AutoCloseable {
             var transport = client.sendAsync(request, HttpResponse.BodyHandlers.limiting(
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8), 4096));
             var future = transport.copy().orTimeout(config.admissionTimeoutMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
-            future.whenComplete((response, error) -> { if (error != null) { transport.cancel(true); } });
+            future.whenComplete((_, error) -> { if (error != null) { transport.cancel(true); } });
             pending.put(token, future);
             var completion = future.handle((response, error) -> {
                 try {
