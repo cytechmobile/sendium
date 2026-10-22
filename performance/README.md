@@ -53,6 +53,10 @@ Each run has three traffic phases:
 | **GitHub Actions and AWS orchestration** | Build the exact application/test-tool revisions, provision resources, execute through Systems Manager, collect evidence, clean up and publish reports. |
 | **Expiry service** | Independently attempts cleanup of expired or abandoned runs if normal cleanup did not complete. |
 
+Only provisioning/execution requires environment approval. Evidence collection
+and cleanup proceed automatically afterward using separate read-only and
+deletion-only roles; cleanup cannot create new benchmark resources.
+
 Run-owned EC2, RDS and networking resources are temporary. The bootstrap roles,
 artifact bucket and expiry service persist between runs. The
 [local rehearsal](local/README.md) runs the traffic against real Sendium and

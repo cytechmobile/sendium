@@ -77,6 +77,7 @@ class Lab:
     def bootstrap(self):
         outputs = {"ArtifactBucketName": self.bucket, "RepositoryTag": "cytechmobile/sendium", "GitHubEnvironmentName": "sendium-performance",
             "RunStackPrefix": PREFIX + "-run-", "OrchestratorRoleArn": ROLE + PREFIX + "-orchestrator", "DiagnosticsRoleArn": ROLE + PREFIX + "-diagnostics",
+            "CleanupRoleArn": ROLE + PREFIX + "-cleanup", "GitHubRecoveryEnvironmentName": "sendium-performance-recovery",
             "CloudFormationExecutionRoleArn": ROLE + PREFIX + "-cloudformation", "RuntimeBoundaryArn": "arn:aws:iam::" + ACCOUNT + ":policy/local-boundary",
             "RunResourceTtlMinutes": "240", "ExpiryHandlerInstalled": "true", "ExpiryFunctionName": "local-perf-expiry", "ExpiryFunctionArn": FUNCTION,
             "ExpiryExpectedCodeSha256": "local-modeled-package", "ExpiryRoleArn": ROLE + PREFIX + "-expiry", "ExpiryScheduleName": "local-perf-expiry", "ExpiryScheduleArn": RULE}
@@ -225,11 +226,18 @@ class LocalAws:
         return self.lab.real.put(bucket, key, path, immutable)
 
     def get(self, bucket, key, path):
+        if self.mode == "cleanup":
+            raise AwsError("Cleanup cannot read private objects", code="AccessDenied")
         if self.mode == "diagnostics" and "/outputs/" not in key or self.mode == "expiry" and not key.endswith("/control/run.json"):
             raise AwsError("Local role cannot read private input", code="AccessDenied")
         return self.lab.real.get(bucket, key, path)
 
     def call(self, service, operation, **p):
+        if self.mode == "cleanup" and (service, operation) not in {
+                ("sts", "get-caller-identity"), ("cloudformation", "describe-stacks"), ("cloudformation", "delete-stack"),
+                ("s3api", "get-bucket-versioning"), ("s3api", "list-objects-v2"), ("s3api", "list-multipart-uploads"),
+                ("s3api", "delete-objects"), ("s3api", "abort-multipart-upload")}:
+            raise AwsError("Deletion-only cleanup role", code="AccessDenied")
         self.lab.calls.append({"role": self.mode, "service": service, "operation": operation})
         root = self.lab.roots.get(self.identity)
         if service == "s3api":
@@ -259,7 +267,7 @@ class LocalAws:
                 if self.fault == "abandoned":
                     raise AwsError("Injected lost controller after creation", code="LocalRunnerLost")
                 return {"StackId": found["StackId"]}
-            if operation == "delete-stack" and self.mode in ("orchestrator", "expiry"):
+            if operation == "delete-stack" and self.mode in ("orchestrator", "cleanup", "expiry"):
                 self.lab.delete(self.lab.find(p["stack_name"]))
                 return {}
             if operation == "describe-stack-events":

@@ -59,6 +59,34 @@ class RegionalAws:
 
 
 class ResolutionTests(unittest.TestCase):
+    def test_s3_gateway_and_interface_records_do_not_overwrite_each_other(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                aws = RegionalAws()
+                details = aws.responses["describe-vpc-endpoint-services"]["ServiceDetails"]
+                gateway = details[-1]
+                gateway.pop("PrivateDnsName")
+                interface = {"ServiceName": gateway["ServiceName"], "ServiceType": [{"ServiceType": "Interface"}],
+                             "AvailabilityZones": [], "PrivateDnsName": "*.s3.eu-west-1.amazonaws.com"}
+                details.append(interface)
+                if reverse:
+                    details.reverse()
+                result = resolve_aws.resolve(aws, PRESET, "eu-west-1")
+                self.assertEqual(result["placement"]["primary"], "eu-west-1a")
+                self.assertEqual(len(result["endpointServices"]), 4)
+
+    def test_missing_gateway_and_ambiguous_interface_records_are_rejected(self):
+        for mutation in ("missing-gateway", "ambiguous-interface"):
+            with self.subTest(mutation=mutation):
+                aws = RegionalAws()
+                details = aws.responses["describe-vpc-endpoint-services"]["ServiceDetails"]
+                if mutation == "missing-gateway":
+                    details[-1]["ServiceType"] = [{"ServiceType": "Interface"}]
+                else:
+                    details.append(deepcopy(details[0]))
+                with self.assertRaisesRegex(ValueError, "endpoint type is unavailable or ambiguous"):
+                    resolve_aws.resolve(aws, PRESET, "eu-west-1")
+
     def test_small_defaults_resolve_ami_minimum_and_latest_numeric_postgres(self):
         aws = RegionalAws()
         result = resolve_aws.resolve(aws, PRESET, "eu-west-1")

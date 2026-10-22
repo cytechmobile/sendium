@@ -73,10 +73,16 @@ def resolve(aws, preset, region):
     common &= set(available)
     details = aws.call("ec2", "describe-vpc-endpoint-services",
                        service_names=["com.amazonaws." + region + "." + service for service in ("ssm", "ssmmessages", "secretsmanager", "s3")])["ServiceDetails"]
-    services = {item["ServiceName"]: item for item in details}
+    services = {}
+    for service in ("ssm", "ssmmessages", "secretsmanager", "s3"):
+        name = "com.amazonaws." + region + "." + service
+        required_type = "Gateway" if service == "s3" else "Interface"
+        matching = [item for item in details if item["ServiceName"] == name
+                    and any(kind.get("ServiceType") == required_type for kind in item["ServiceType"])]
+        require(len(matching) == 1, "Required VPC endpoint type is unavailable or ambiguous: " + name)
+        services[name] = matching[0]
     for service in ("ssm", "ssmmessages", "secretsmanager", "s3"):
         info = services["com.amazonaws." + region + "." + service]
-        require({"ServiceType": "Gateway" if service == "s3" else "Interface"} in info["ServiceType"], "Required VPC endpoint type is unavailable")
         if service != "s3":
             require(info.get("PrivateDnsName") or info.get("PrivateDnsNames"), "Private endpoint DNS is unavailable")
             common &= set(info["AvailabilityZones"])

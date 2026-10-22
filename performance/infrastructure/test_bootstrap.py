@@ -18,7 +18,7 @@ def resolve(value, existing=False, maximum=False):
     parameters["AWS::StackId"] = "arn:aws:cloudformation:eu-west-1:123456789012:stack/" + "b" * 128 + "/bootstrap-id"
     if maximum:
         parameters.update(ResourcePrefix="p" * 24, RepositoryOwner="o" * 39, RepositoryName="r" * 100,
-                          GitHubEnvironment="e" * 100)
+                          GitHubEnvironment="e" * 100, GitHubRecoveryEnvironment="x" * 100)
     bucket = "b" * 63
     provider = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
     parameters["ExistingOidcProviderArn"] = provider if existing else ""
@@ -114,19 +114,22 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(allowed("GitHubOrchestrator", "lambda:UpdateFunctionCode"))
 
     def test_oidc_trust_requires_exact_repository_environment_and_audience(self):
-        for name in ("GitHubOrchestrator", "GitHubDiagnostics"):
+        protected = "repo:cytechmobile/sendium:environment:sendium-performance"
+        recovery = "repo:cytechmobile/sendium:environment:sendium-performance-recovery"
+        subjects = {"GitHubOrchestrator": protected, "GitHubDiagnostics": [protected, recovery], "GitHubCleanup": recovery}
+        for name in subjects:
             for existing in (False, True):
                 trust = resolve(TEMPLATE["Resources"][name]["Properties"]["AssumeRolePolicyDocument"], existing=existing)
                 statement = trust["Statement"][0]
                 self.assertEqual("sts:AssumeRoleWithWebIdentity", statement["Action"])
                 self.assertEqual("arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com", statement["Principal"]["Federated"])
                 expected = statement["Condition"]["StringEquals"]
-                valid = {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-                         "token.actions.githubusercontent.com:sub": "repo:cytechmobile/sendium:environment:sendium-performance"}
-                self.assertTrue(all(valid.get(key) == value for key, value in expected.items()))
+                self.assertEqual(expected["token.actions.githubusercontent.com:aud"], "sts.amazonaws.com")
+                self.assertEqual(expected["token.actions.githubusercontent.com:sub"], subjects[name])
                 for replacement in ("repo:other/sendium:environment:sendium-performance", "repo:cytechmobile/sendium:environment:production",
                                     "repo:cytechmobile/sendium:ref:refs/heads/main"):
-                    self.assertNotEqual(replacement, expected["token.actions.githubusercontent.com:sub"])
+                    allowed_subjects = subjects[name] if isinstance(subjects[name], list) else [subjects[name]]
+                    self.assertNotIn(replacement, allowed_subjects)
                 self.assertNotEqual("wrong-audience", expected["token.actions.githubusercontent.com:aud"])
 
     def test_diagnostics_and_runtime_boundary_cannot_provision_or_control_other_instances(self):
@@ -159,7 +162,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertFalse(any(fnmatch.fnmatchcase("arn:aws:iam::123456789012:role/sendium-perf-cloudformation", pattern) for pattern in resources))
 
     def test_cleanup_and_ssm_commands_require_owned_repository_tags_and_prefix(self):
-        for name in ("GitHubOrchestrator", "ExpiryRole"):
+        for name in ("GitHubOrchestrator", "GitHubCleanup", "ExpiryRole"):
             delete = allowed(name, "cloudformation:DeleteStack")[0]
             self.assertIn("stack/sendium-perf-run-", delete["Resource"])
             tags = delete["Condition"]["StringEquals"]
@@ -168,6 +171,16 @@ class BootstrapTests(unittest.TestCase):
         target = [statement for statement in allowed("GitHubOrchestrator", "ssm:SendCommand") if ":ec2:" in statement["Resource"]][0]
         self.assertEqual("performance-tests", target["Condition"]["StringEquals"]["ssm:resourceTag/sendium:managed-by"])
         self.assertFalse(allowed("GitHubOrchestrator", "ssm:CancelCommand"))
+
+    def test_automatic_cleanup_is_deletion_only_without_private_input_access(self):
+        for action in ("cloudformation:CreateStack", "cloudformation:UpdateStack", "ec2:RunInstances", "ssm:SendCommand",
+                       "iam:PassRole", "iam:CreateRole", "secretsmanager:GetSecretValue", "s3:GetObject", "s3:PutObject", "s3:DeleteBucket"):
+            self.assertFalse(allowed("GitHubCleanup", action), action)
+        self.assertTrue(allowed("GitHubCleanup", "cloudformation:DescribeStacks"))
+        self.assertTrue(allowed("GitHubCleanup", "s3:AbortMultipartUpload"))
+        self.assertTrue(allowed("GitHubCleanup", "s3:DeleteObject")[0]["Resource"].endswith("/runs/*"))
+        self.assertEqual(resolve(TEMPLATE["Outputs"]["CleanupRoleArn"]["Value"]),
+                         "arn:aws:iam::123456789012:role/sendium-perf-cleanup")
 
     def test_storage_is_private_encrypted_temporary_and_retained_bootstrap_is_explicit(self):
         bucket = TEMPLATE["Resources"]["Artifacts"]

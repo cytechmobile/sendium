@@ -231,7 +231,7 @@ def finish_witness(lab, witness):
     identity, req, base = witness["identity"], witness["request"], witness["base"]
     diag = recover.run(LocalAws(lab, identity, "diagnostics"), req, REGION, BOOT, ROLE + PREFIX + "-diagnostics",
                        base / "diagnostics", True, credits=LocalAws(lab, identity, "diagnostics"))
-    clean = recover.run(LocalAws(lab, identity), req, REGION, BOOT, ROLE + PREFIX + "-orchestrator", base / "cleanup", False)
+    clean = recover.run(LocalAws(lab, identity, "cleanup"), req, REGION, BOOT, ROLE + PREFIX + "-cleanup", base / "cleanup", False)
     require(clean["exitCode"] == 0, "Concurrent witness cleanup failed")
     assert_no_run_resources(lab, identity)
     prepare_publication(lab, identity, base, req, witness["inputs"], base / "bundles",
@@ -299,10 +299,10 @@ def run_case(lab, identity, scenario):
         Sweeper(sweep, sweep_settings, 60, now=future + timedelta(minutes=15)).run()
         require(root["StackStatus"] == "DELETE_COMPLETE", "Independent expiry did not remove local resources")
         root["checks"]["independentExpiryRecovered"] = True
-    cleanup = recover.run(LocalAws(lab, identity), request, REGION, BOOT, ROLE + PREFIX + "-orchestrator", base / "cleanup", False)
+    cleanup = recover.run(LocalAws(lab, identity, "cleanup"), request, REGION, BOOT, ROLE + PREFIX + "-cleanup", base / "cleanup", False)
     require(cleanup["exitCode"] == 0, "Local cleanup failed")
     assert_no_run_resources(lab, identity)
-    repeated = recover.run(LocalAws(lab, identity), request, REGION, BOOT, ROLE + PREFIX + "-orchestrator", base / "cleanup-repeat", False)
+    repeated = recover.run(LocalAws(lab, identity, "cleanup"), request, REGION, BOOT, ROLE + PREFIX + "-cleanup", base / "cleanup-repeat", False)
     require(repeated["exitCode"] == 0, "Repeated cleanup was not idempotent")
     if witness:
         other = lab.roots[witness["identity"]]

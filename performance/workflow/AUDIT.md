@@ -65,7 +65,7 @@ so real credential values cannot appear in an opt-in test failure message.
 | Trigger/input handling | Manual-only, individual schema/budget-checked controls; inputs are JSON/environment data, not shell substitutions. |
 | Application source | Exact dispatch SHA; maintained harness/controller SHA captured separately and pinned downstream. |
 | Build isolation | Native hosted build runners, repository read only, no environment/OIDC/secrets, no persisted checkout credentials/shared Maven cache. |
-| Protected jobs | Only execution, diagnostics and cleanup receive OIDC; fixed protected environment and appropriate role selection. Trusted dependency installation precedes authentication. |
+| AWS jobs | Only execution, diagnostics and cleanup receive OIDC. Execution uses the approval-gated environment; diagnostics/cleanup use a branch-restricted automatic recovery environment with read-only/deletion-only roles. Trusted dependency installation precedes authentication. |
 | Artifact boundary | Fixed names/paths, exact attempt/source/architecture and fresh size/SHA checks; protected jobs do not execute downloaded application/harness code. |
 | AWS ownership | Scoped bootstrap roles plus code checks on account/region/repository/run/source/role; no ad-hoc deletion outside the owned root/prefix. |
 | Publication | No environment/OIDC/cloud session; verified maintained JAR only, fixed evidence paths, immutable workload data/reasons and schema/semantic checks. |

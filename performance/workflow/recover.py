@@ -27,7 +27,7 @@ def require(condition, message):
 def ownership(aws, request, region, bootstrap, role, diagnostic):
     description = deploy.stack(aws, bootstrap)
     outputs = deploy.outputs(description)
-    expected_role = outputs["DiagnosticsRoleArn" if diagnostic else "OrchestratorRoleArn"]
+    expected_role = outputs["DiagnosticsRoleArn" if diagnostic else "CleanupRoleArn"]
     require(outputs["RepositoryTag"] == request["repository"] and expected_role == role
             and description["StackId"].split(":")[3] == region, "Recovery bootstrap/role/region mismatch")
     caller = aws.call("sts", "get-caller-identity")
@@ -114,7 +114,7 @@ def main():
                                      prepare.read(HERE.parent / "presets/aws-private-jvm-v1.json"))
         require(request == expected, "Recovery request differs from dispatch")
         diagnostic = args.mode == "diagnostics"
-        role = os.environ["AWS_DIAGNOSTICS_ROLE_ARN" if diagnostic else "AWS_ORCHESTRATOR_ROLE_ARN"]
+        role = os.environ["AWS_DIAGNOSTICS_ROLE_ARN" if diagnostic else "AWS_CLEANUP_ROLE_ARN"]
         return run(AwsCli(os.environ["AWS_REGION"]), request, os.environ["AWS_REGION"], os.environ["AWS_BOOTSTRAP_STACK"],
                    role, args.output, diagnostic)["exitCode"]
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, prepare.ValidationError):

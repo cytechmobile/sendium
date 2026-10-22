@@ -375,7 +375,7 @@ jobs:
     if: always() && needs.validate.result == 'success' && needs.aws-execution.result != 'skipped'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: sendium-performance
+    environment: sendium-performance-recovery
     permissions:
       contents: read
       id-token: write
@@ -429,14 +429,14 @@ jobs:
     if: always() && needs.validate.result == 'success' && needs.aws-execution.result != 'skipped'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    environment: sendium-performance
+    environment: sendium-performance-recovery
     permissions:
       contents: read
       id-token: write
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
-      AWS_ORCHESTRATOR_ROLE_ARN: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+      AWS_CLEANUP_ROLE_ARN: ${{ vars.AWS_CLEANUP_ROLE_ARN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -453,7 +453,7 @@ jobs:
           path: ${{ runner.temp }}/request
       - uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_CLEANUP_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: sendium-clean-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 3600

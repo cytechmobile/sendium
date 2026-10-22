@@ -5,7 +5,7 @@ The manual workflow finishes with three separate jobs:
 ```text
 aws-execution (orchestration role)
     → diagnostics (read-only diagnostics role)
-    → cleanup (fresh orchestration-role session)
+    → cleanup (dedicated deletion-only role)
     → publish (no environment, OIDC or AWS credentials)
 ```
 
@@ -16,11 +16,27 @@ they are not converted into an apparently valid workload/report.
 
 ## Configuration
 
-Add **`AWS_DIAGNOSTICS_ROLE_ARN`**, using bootstrap output `DiagnosticsRoleArn`, to
-the existing `sendium-performance` environment variables. Apply the current
-bootstrap template: the diagnostic role additionally reads only its own bootstrap
-stack's outputs. Its EC2/CloudWatch reads and `runs/*/outputs/*` object reads remain
-separate from provisioning, deletion, SSM control and database-secret access.
+Keep required review on `sendium-performance`, used only by provisioning/execution.
+Create **`sendium-performance-recovery`** (bootstrap parameter
+`GitHubRecoveryEnvironment`) with branch restrictions but **no required reviewers**.
+Both recovery jobs use it, so neither evidence collection nor deletion waits for
+another human approval after the run. Configure these environment variables:
+
+| Variable | Value |
+|---|---|
+| `AWS_REGION` | Same region as the bootstrap/provisioning environment |
+| `AWS_BOOTSTRAP_STACK` | Same bootstrap stack name |
+| `AWS_DIAGNOSTICS_ROLE_ARN` | Bootstrap output `DiagnosticsRoleArn` |
+| `AWS_CLEANUP_ROLE_ARN` | Bootstrap output `CleanupRoleArn` |
+
+Apply the updated bootstrap before running the updated workflow. Diagnostics is
+read-only, with EC2/CloudWatch reads, bootstrap outputs and `runs/*/outputs/*`
+object reads. Cleanup can describe/delete owned run stacks and list/delete/abort
+temporary run objects/uploads. It cannot create infrastructure, pass roles, issue
+SSM commands, read private objects/secrets or modify bootstrap resources. The
+provisioning role trusts only the approval-gated environment; it is not exposed to
+the automatic recovery environment. The diagnostics role also retains its old
+environment subject to allow existing workflow attempts to finish during migration.
 
 Both recovery jobs pin the maintained controller SHA, download the normalized
 request and install trusted dependencies before OIDC authentication. They
@@ -50,7 +66,7 @@ The diagnostic job has a 15-minute bound.
 ## Immediate cleanup
 
 Cleanup waits for diagnostic recovery, including a failed/cancelled diagnostic
-job, then uses a fresh orchestration-role session. `recover.py cleanup` rebuilds
+job, then uses a fresh deletion-only cleanup-role session. `recover.py cleanup` rebuilds
 the minimal identity from the validated request/bootstrap and invokes the shared
 cleanup engine. It handles success, failure, cancellation and partial provisioning
 without requiring a healthy application or a previously uploaded plan.
