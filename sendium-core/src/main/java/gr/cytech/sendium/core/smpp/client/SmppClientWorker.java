@@ -39,6 +39,8 @@ import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.core.worker.WorkerType;
 import gr.cytech.sendium.external.HealthCheckReport;
 import gr.cytech.sendium.external.WorkerResourceProvider;
+import gr.cytech.sendium.external.filter.FilterException;
+import gr.cytech.sendium.external.filter.FilterStatusCodes;
 import gr.cytech.sendium.util.MessageFlexValue;
 import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SecurityUtils;
@@ -59,6 +61,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -539,6 +543,146 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         return null;
+    }
+
+    /** Applies worker preparation before an initial or replacement provider attempt. */
+    public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry)
+            throws Exception {
+        if (!keepOnRunning || isPause()) {
+            throw new IllegalStateException("Worker is stopped or paused: " + getFullName());
+        }
+        applyRateLimit();
+        if (!keepOnRunning || isPause()) {
+            throw new IllegalStateException("Worker stopped or paused while awaiting rate limit: " + getFullName());
+        }
+        String stat = stats.checkGetStats();
+        if (stat != null) {
+            logger.info("{}", stat);
+        }
+        message.outgateway = getFullName();
+        String originalBody = doCharMap(message);
+        try {
+            if (printMsgs) {
+                logger.info("{}", message);
+            }
+            checkBeforeDoMessageFilters(message);
+            return submitCoordinated(message, retry);
+        } catch (FilterException failure) {
+            message.body = originalBody;
+            var submission = new CoordinatedSmppSubmission<M>();
+            var part = submission.add(message);
+            submission.seal();
+            part.claimResponse();
+            if (failure.getStatusCode() == FilterStatusCodes.DROP) {
+                part.finish(() -> CompletableFuture.completedStage(null));
+            } else {
+                M replacement = (M) Objects.requireNonNull(failure.getMessageObj(), "filter replacement");
+                replacement.body = originalBody;
+                boolean enqueueInstead = failure.getStatusCode() != FilterStatusCodes.RETRY;
+                part.finish(() -> coordinatePreparationFailure(replacement, enqueueInstead, (payload, router) ->
+                        retry.retry(payload, router ? NackHandlePolicy.RETRY_ROUTER : NackHandlePolicy.RETRY_WORKER)));
+            }
+            return submission;
+        } catch (Exception failure) {
+            message.body = originalBody;
+            throw failure;
+        }
+    }
+
+    /**
+     * Submits lifecycle-owned work explicitly. Retry callbacks must retain the parent's ownership
+     * and return a stage covering the replacement attempt, not merely its queue insertion.
+     */
+    public CoordinatedSmppSubmission<M> submitCoordinated(M message, CoordinatedRetry<M> retry)
+            throws SmppInvalidArgumentException {
+        Objects.requireNonNull(retry, "retry");
+        List<SubmitSm> requests = generateSubmitRequest(message);
+        var submission = new CoordinatedSmppSubmission<M>();
+        for (SubmitSm request : requests) {
+            M payload = (M) request.getReferenceObject();
+            var part = submission.add(payload);
+            request.setReferenceObject(new CoordinatedResponse<>(part, retry));
+        }
+        submission.seal();
+        for (int index = 0; index < requests.size(); index++) {
+            SubmitSm request = requests.get(index);
+            try {
+                sendCoordinatedRequest(request);
+            } catch (Exception failure) {
+                var response = (CoordinatedResponse<M>) request.getReferenceObject();
+                if (response.part.claimResponse()) {
+                    if (index == 0) {
+                        response.part.finish(() -> coordinateFailure(message, true, (payload, router) ->
+                                retry.retry(payload, router ? NackHandlePolicy.RETRY_ROUTER : NackHandlePolicy.RETRY_WORKER)));
+                        for (int unsent = 1; unsent < requests.size(); unsent++) {
+                            var replacement = (CoordinatedResponse<M>) requests.get(unsent).getReferenceObject();
+                            replacement.part.claimResponse();
+                            replacement.part.finish(response.part::completion);
+                        }
+                        break;
+                    }
+                    response.part.finish(() -> retry.retry(response.part.message, NackHandlePolicy.RETRY_WORKER));
+                }
+            }
+        }
+        return submission;
+    }
+
+    protected void sendCoordinatedRequest(SubmitSm request) throws Exception {
+        getAvailableHandlerForSending().getSession().sendRequestPdu(
+                request, configurationProvider.getLongPrpt(_requestTout), false);
+    }
+
+    boolean handleCoordinatedResponse(Object reference, int status, String responseMessageId) {
+        if (!(reference instanceof CoordinatedResponse<?>)) {
+            return false;
+        }
+        var response = (CoordinatedResponse<M>) reference;
+        if (!response.part.claimResponse()) {
+            return true;
+        }
+        M message = response.part.message;
+        NackHandlePolicy policy = status == SmppConstants.STATUS_OK ? NackHandlePolicy.FAIL : findPolicyForStatusCode(status);
+        if (status != SmppConstants.STATUS_OK && policy != NackHandlePolicy.FAIL) {
+            if (policy == NackHandlePolicy.RETRY_ROUTER && retryRouterRemoveHlr && message.cnetwork > 0) {
+                message.cnetwork = 0;
+                message.outgateway = "";
+            }
+            response.part.finish(() -> coordinateFailure(message, policy == NackHandlePolicy.RETRY_WORKER,
+                    (payload, router) -> response.retry.retry(payload,
+                            router ? NackHandlePolicy.RETRY_ROUTER : NackHandlePolicy.RETRY_WORKER)));
+        } else {
+            response.part.finish(() -> coordinatedProviderHandoff(message, status, responseMessageId));
+        }
+        return true;
+    }
+
+    protected CompletionStage<Void> coordinatedProviderHandoff(M message, int status, String responseMessageId) {
+        if (message.msgId < 0) {
+            return CompletableFuture.completedStage(null);
+        }
+        String providerMessageId = getProviderMessageId(responseMessageId);
+        String hashed = getHashedMessageID(providerMessageId);
+        if (status == SmppConstants.STATUS_OK) {
+            if (message.dlrReturnMetadata != null && providerMessageId == null) {
+                throw new IllegalStateException("Provider acceptance has no usable correlation ID");
+            }
+            message.extrid = providerMessageId;
+            message.field1 = hashed;
+            return messageTracker.handoffProviderAccepted(hashed, message, providerMessageId).thenCompose(ignored -> {
+                try {
+                    onMessageSuccess(message);
+                    return CompletableFuture.completedStage(null);
+                } catch (IOException failure) {
+                    return CompletableFuture.failedStage(failure);
+                }
+            });
+        } else {
+            String errorCode = respErrCodeMap == null ? String.valueOf(StandardMessage.DLR_ERR_SMS_FAILED) :
+                    respErrCodeMap.getOrDefault(String.valueOf(status), String.valueOf(StandardMessage.DLR_ERR_SMS_FAILED));
+            return messageTracker.handoffSubmissionFailure(message, providerMessageId, hashed,
+                    String.valueOf(status), StandardMessage.DLR_STAT_FAILED, errorCode);
+        }
     }
 
     public boolean checkConnectivity() {
@@ -1853,6 +1997,15 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         return extracted.isEmpty() ? null : extracted;
+    }
+
+    @FunctionalInterface
+    public interface CoordinatedRetry<M extends StandardMessage> {
+        CompletionStage<Void> retry(M message, NackHandlePolicy policy);
+    }
+
+    private record CoordinatedResponse<M extends StandardMessage>(CoordinatedSmppSubmission.Part<M> part,
+                                                                  CoordinatedRetry<M> retry) {
     }
 
     public enum MsgIdType {

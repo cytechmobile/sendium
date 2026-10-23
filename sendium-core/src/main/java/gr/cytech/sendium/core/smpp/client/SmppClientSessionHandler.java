@@ -152,6 +152,10 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                 //if I have saved a message object as a reference object
                 //then just re-enqueue the msg
                 if (pduRequest.getReferenceObject() != null) {
+                    if (smppClientWorker.handleCoordinatedResponse(pduRequest.getReferenceObject(),
+                            SmppConstants.STATUS_DELIVERYFAILURE, null)) {
+                        return;
+                    }
                     StandardMessage msg = (StandardMessage) pduRequest.getReferenceObject();
                     smppClientWorker.handleResponse(this, SmppConstants.STATUS_DELIVERYFAILURE, null, msg);
 
@@ -204,6 +208,11 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
         switch (pduAsyncResponse.getRequest().getCommandId()) {
             case SmppConstants.CMD_ID_SUBMIT_SM:
                 SubmitSm submit = (SubmitSm) pduAsyncResponse.getRequest();
+                if (smppClientWorker.handleCoordinatedResponse(submit.getReferenceObject(),
+                        pduAsyncResponse.getResponse().getCommandStatus(),
+                        pduAsyncResponse.getResponse() instanceof SubmitSmResp response ? response.getMessageId() : null)) {
+                    return;
+                }
                 SubmitSmResp resp = (SubmitSmResp) pduAsyncResponse.getResponse();
                 int statusCode = resp.getCommandStatus();
                 StandardMessage msg = (StandardMessage) submit.getReferenceObject();
@@ -270,6 +279,11 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
         logger.warn("{}: received: {}", this, e);
 
         PartialPdu partialPdu = (PartialPdu) e.getPartialPdu();
+        if (smppClientWorker.handleCoordinatedResponse(partialPdu.getReferenceObject(),
+                partialPdu.getCommandStatus() == SmppConstants.STATUS_OK ? SmppConstants.STATUS_UNKNOWNERR :
+                        partialPdu.getCommandStatus(), null)) {
+            return;
+        }
         if (partialPdu.getReferenceObject() != null && partialPdu.getReferenceObject() instanceof StandardMessage) {
             StandardMessage msg = (StandardMessage) partialPdu.getReferenceObject();
             int commandStatus = partialPdu.getCommandStatus();
