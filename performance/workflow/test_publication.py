@@ -44,6 +44,48 @@ def measured():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_rds_evidence_is_preserved_and_passed_to_offline_finalizer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            req, report = measured()
+            path = root / "retrieved/harness"
+            path.mkdir(parents=True)
+            prepare.write(path / "results.json", report)
+            raw = {"schemaVersion": 1, "collectionIssues": ["RDS_METRIC_MISSING_BUCKETS"]}
+            prepare.write(root / "rds-metrics.json", raw)
+            with patch.object(publish, "finalize", return_value=(deepcopy(report), "# Results\n")) as finalize:
+                publish.publish(req, root, root, root, root, {}, {}, root / "published")
+            resources = finalize.call_args.args[5]
+            self.assertEqual(prepare.read(resources["rdsMetrics"]), raw)
+            self.assertIn("evidence/rds-metrics.json", prepare.read(root / "published/results.json")["diagnostics"])
+
+    def test_required_rds_collection_survives_credit_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            req, report = measured()
+            infrastructure = report["configuration"]["infrastructure"]
+            infrastructure["region"] = "eu-west-1"
+            infrastructure["database"].update(identifier="sendium-perf-run-" + req["runIdentity"],
+                                               instanceType="db.t4g.small", resourceMetricsRequired=True)
+            report["validity"]["reasons"].append({"code": "RDS_RESOURCES_MISSING", "scope": "resources",
+                "severity": "INCONCLUSIVE", "message": "Awaiting offline collection"})
+            path = root / "retrieved/harness"
+            path.mkdir(parents=True)
+            prepare.write(path / "results.json", report)
+            plan = {"region": "eu-west-1", "accountId": "123456789012", "partition": "aws"}
+            aws = Mock(timeout_seconds=120)
+            raw = {"schemaVersion": 1, "collectionIssues": []}
+            with patch.object(recover.deploy, "retrieve", return_value={}), \
+                    patch.object(recover.collect_rds_metrics, "collect", return_value=raw) as collect:
+                result = recover.diagnostics(aws, Mock(), plan, req, root)
+            self.assertEqual(prepare.read(root / "rds-metrics.json"), raw)
+            self.assertEqual(aws.timeout_seconds, 120)
+            self.assertIn("CREDIT_COLLECTION_UNAVAILABLE", result["issues"])
+            context = collect.call_args.args[1]
+            recover.collect_rds_metrics.validate_context(context)
+            self.assertEqual(context["database"]["accountId"], plan["accountId"])
+            self.assertEqual(context["phases"]["measurement"]["end"], context["phases"]["drain"]["start"])
+
     def test_native_setup_failure_preserves_mode_and_heap_without_fabricating_build_identity(self):
         req = request({"application_runtime": "native"})
         report = publish.unavailable(req, "NATIVE_BUILD_UNAVAILABLE")
@@ -275,6 +317,8 @@ class PublicationWorkflowTests(unittest.TestCase):
         self.assertFalse(any("configure-aws" in step.get("uses", "") for step in jobs["publish"]["steps"]))
         diagnostic_role = next(step for step in jobs["diagnostics"]["steps"] if "configure-aws" in step.get("uses", ""))
         self.assertIn("AWS_DIAGNOSTICS_ROLE_ARN", diagnostic_role["with"]["role-to-assume"])
+        uploads = [step for step in jobs["diagnostics"]["steps"] if "upload-artifact" in step.get("uses", "")]
+        self.assertTrue(any("diagnostics/rds-metrics.json" in step["with"]["path"] for step in uploads))
 
 
 if __name__ == "__main__":

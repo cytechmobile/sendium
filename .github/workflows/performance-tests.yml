@@ -415,7 +415,7 @@ jobs:
           role-session-name: sendium-diag-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 3600
           unset-current-credentials: true
-      - name: Recover public evidence and collect instance credit observations
+      - name: Recover public evidence and collect EC2 credit and RDS metrics
         env:
           DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
         run: |
@@ -430,6 +430,7 @@ jobs:
           path: |
             ${{ runner.temp }}/diagnostics/diagnostics-outcome.json
             ${{ runner.temp }}/diagnostics/cpu-credits.json
+            ${{ runner.temp }}/diagnostics/rds-metrics.json
             ${{ runner.temp }}/diagnostics/retrieved/**
           if-no-files-found: ignore
           retention-days: 30

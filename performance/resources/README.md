@@ -94,8 +94,13 @@ return nonzero; per-instance issues are preserved for classification.
 ## Read-only standard RDS collector
 
 `collect_rds_metrics.py` collects standard `AWS/RDS` instance metrics. It is a
-standalone collector at this stage. Offline JSON/Markdown report import is
-supported below; automatic workflow collection is the following integration step.
+collector used automatically by the AWS workflow diagnostics job before cleanup.
+New AWS reports require RDS evidence. Diagnostics derive the database identity and
+phase windows from the verified report and trusted bootstrap identity, collect with
+bounded retries, and retain `rds-metrics.json` even if EC2 credit collection fails.
+Publication imports that file offline into JSON/Markdown and preserves the raw file
+in the final evidence artifact. Missing or partial required evidence is inconclusive,
+never zero utilization. JVM and native application runs use the same collection path.
 
 ```sh
 python3 performance/resources/collect_rds_metrics.py \
@@ -222,8 +227,8 @@ workload counts, rates, latency distributions, event/cohort intervals and drain 
 
 The result schema and independent Python semantic validator check attribution,
 coverage, bucket selection, statistical calculations and classification separately
-from the JVM report implementation. Workflow collection, evidence transfer and
-enabling the requirement for new AWS runs follow in the next integration step.
+from the JVM report implementation. The Actions summary includes the database
+section, while `results.json` retains all metric series and their full timeline.
 
 ## Process/EC2 import, summary, and validity
 
