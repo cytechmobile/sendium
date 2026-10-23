@@ -200,15 +200,67 @@ Resources:
                   - rds:ListTagsForResource
                 Resource: '*'
                 Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
-              - Sid: CreateTaggedNetworkResources
+              - Sid: CreateTaggedVpc
                 Effect: Allow
-                Action: [ec2:CreateVpc, ec2:CreateSubnet, ec2:CreateRouteTable, ec2:CreateSecurityGroup, ec2:CreateVpcEndpoint]
-                Resource: '*'
+                Action: ec2:CreateVpc
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: CreateTaggedSubnet
+                Effect: Allow
+                Action: ec2:CreateSubnet
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: CreateTaggedRouteTable
+                Effect: Allow
+                Action: ec2:CreateRouteTable
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: CreateTaggedSecurityGroup
+                Effect: Allow
+                Action: ec2:CreateSecurityGroup
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: CreateTaggedVpcEndpoint
+                Effect: Allow
+                Action: ec2:CreateVpcEndpoint
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc-endpoint/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/sendium:managed-by: performance-tests
+                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: UseOwnedVpcForNetworkCreation
+                Effect: Allow
+                Action: [ec2:CreateSubnet, ec2:CreateRouteTable, ec2:CreateSecurityGroup, ec2:CreateVpcEndpoint]
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref AWS::Region
-                    aws:RequestTag/sendium:managed-by: performance-tests
-                    aws:RequestTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
+              - Sid: UseOwnedEndpointDependencies
+                Effect: Allow
+                Action: ec2:CreateVpcEndpoint
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+                    aws:ResourceTag/sendium:managed-by: performance-tests
+                    aws:ResourceTag/sendium:repository: !Sub '${RepositoryOwner}/${RepositoryName}'
               - Sid: ManageOwnedNetworkResources
                 Effect: Allow
                 Action:

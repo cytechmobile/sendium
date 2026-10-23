@@ -59,6 +59,8 @@ branch-only or wildcard repository subject. This template does not create or
 configure the GitHub environment.
 
 Use `sendium-performance` for approval-gated provisioning/execution. Configure
+its required reviewer as the repository's Maintainers team so any eligible member
+can approve; an individual maintainer account is not required. Configure
 `sendium-performance-recovery` (parameter `GitHubRecoveryEnvironment`) with the
 appropriate branch restrictions and no required reviewers. Recovery uses the
 read-only diagnostics and deletion-only cleanup roles, not the provisioning role.
@@ -131,6 +133,14 @@ specific S3 bundle/output keys, and only Sendium's database-secret access. There
 is no account-wide Parameter Store read or `SendCommand` permission in the
 runtime boundary. Secrets decryption is service-mediated. The RDS account-level
 service-linked role may be created on first use and is not a run-owned role.
+
+Network creation is authorized per resource, following the
+[EC2 service authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonec2.html).
+Each new resource type requires ownership **request tags** and a matching
+account/region ARN. Separately, creation must be allowed to reference the existing
+owned VPC, and endpoint creation must be allowed to reference owned subnets,
+security groups and route tables, using their **resource tags**. New-resource tags
+must not authorize use of an unrelated VPC or endpoint dependency.
 
 The diagnostic role can describe EC2/type/credit metadata, query CloudWatch metric
 statistics, and read `runs/*/outputs/*`; it cannot provision, delete, control

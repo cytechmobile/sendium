@@ -84,7 +84,60 @@ def allowed(role, action):
                 for pattern in ([statement["Action"]] if isinstance(statement["Action"], str) else statement["Action"]))]
 
 
+def network_creation_allowed(action, resource, context):
+    """Limited allow matching for network-creation cases, not a general IAM evaluator."""
+    for statement in allowed("CloudFormationExecution", action):
+        patterns = statement["Resource"] if isinstance(statement["Resource"], list) else [statement["Resource"]]
+        if not any(fnmatch.fnmatchcase(resource, pattern) for pattern in patterns):
+            continue
+        conditions = statement.get("Condition", {})
+        if set(conditions) - {"StringEquals"}:
+            raise AssertionError("Review unsupported creation-policy condition")
+        if all(context.get(key) in (value if isinstance(value, list) else [value])
+               for key, value in conditions.get("StringEquals", {}).items()):
+            return True
+    return False
+
+
 class BootstrapTests(unittest.TestCase):
+    def test_new_network_resources_require_request_tags_and_matching_account_region(self):
+        context = {"aws:RequestTag/sendium:managed-by": "performance-tests",
+                   "aws:RequestTag/sendium:repository": "cytechmobile/sendium", "aws:RequestedRegion": "eu-west-1"}
+        for action, kind in (("CreateVpc", "vpc"), ("CreateSubnet", "subnet"), ("CreateRouteTable", "route-table"),
+                             ("CreateSecurityGroup", "security-group"), ("CreateVpcEndpoint", "vpc-endpoint")):
+            resource = "arn:aws:ec2:eu-west-1:123456789012:" + kind + "/test"
+            with self.subTest(action=action):
+                self.assertTrue(network_creation_allowed("ec2:" + action, resource, context))
+                self.assertFalse(network_creation_allowed("ec2:" + action, resource, {}))
+                self.assertFalse(network_creation_allowed("ec2:" + action, resource,
+                                 {**context, "aws:RequestTag/sendium:repository": "other/repository"}))
+                self.assertFalse(network_creation_allowed("ec2:" + action, resource.replace("eu-west-1", "us-east-1"), context))
+                self.assertFalse(network_creation_allowed("ec2:" + action, resource.replace("123456789012", "999999999999"), context))
+
+    def test_existing_vpc_authorization_uses_resource_tags_not_new_resource_tags(self):
+        resource = "arn:aws:ec2:eu-west-1:123456789012:vpc/existing"
+        context = {"aws:ResourceTag/sendium:managed-by": "performance-tests",
+                   "aws:ResourceTag/sendium:repository": "cytechmobile/sendium", "aws:RequestedRegion": "eu-west-1"}
+        for action in ("CreateSubnet", "CreateRouteTable", "CreateSecurityGroup", "CreateVpcEndpoint"):
+            with self.subTest(action=action):
+                self.assertTrue(network_creation_allowed("ec2:" + action, resource, context))
+                request_tags_only = {"aws:RequestTag/sendium:managed-by": "performance-tests",
+                                     "aws:RequestTag/sendium:repository": "cytechmobile/sendium", "aws:RequestedRegion": "eu-west-1"}
+                self.assertFalse(network_creation_allowed("ec2:" + action, resource, request_tags_only))
+                self.assertFalse(network_creation_allowed("ec2:" + action, resource,
+                                 {**context, **request_tags_only, "aws:ResourceTag/sendium:repository": "other/repository"}))
+
+    def test_endpoint_dependency_authorization_is_limited_to_owned_network_objects(self):
+        context = {"aws:ResourceTag/sendium:managed-by": "performance-tests",
+                   "aws:ResourceTag/sendium:repository": "cytechmobile/sendium", "aws:RequestedRegion": "eu-west-1"}
+        for kind in ("subnet", "security-group", "route-table"):
+            resource = "arn:aws:ec2:eu-west-1:123456789012:" + kind + "/existing"
+            with self.subTest(kind=kind):
+                self.assertTrue(network_creation_allowed("ec2:CreateVpcEndpoint", resource, context))
+                self.assertFalse(network_creation_allowed("ec2:CreateVpcEndpoint", resource,
+                                 {**context, "aws:ResourceTag/sendium:managed-by": "other-system"}))
+                self.assertFalse(network_creation_allowed("ec2:CreateVpcEndpoint", resource, {}))
+
     def test_template_decodes_and_expiry_installation_is_conditional(self):
         self.assertFalse(ERRORS)
         types = {resource["Type"] for resource in TEMPLATE["Resources"].values()}
