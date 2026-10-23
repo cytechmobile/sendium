@@ -54,7 +54,19 @@ jobs:
         run: |
           export QUARKUS_LOG_LEVEL=ERROR
           chmod +x ./mvnw
-          ./mvnw verify
+          ./mvnw -B -ntp -V -e verify
+      - name: Upload backend failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            sendium-core/target/surefire-reports/
+            sendium-core/target/failsafe-reports/
+            sendium-app/target/surefire-reports/
+            sendium-app/target/failsafe-reports/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Build quick-start test image
         run: docker build -t sendium:quick-start-test -f sendium-app/src/main/docker/Dockerfile.jvm sendium-app
       - name: Test generated container startup
@@ -77,16 +89,6 @@ jobs:
         run: |
           echo "result=${{job.status}}" >> "$GITHUB_ENV"
           echo "result=${{job.status}}" >> "$GITHUB_OUTPUT"
-      - name: Cancel current workflow run
-        if: failure()
-        uses: actions/github-script@v9
-        with:
-          script: |
-            github.rest.actions.cancelWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: context.runId
-            })
       - name: Google Chat Notification
         uses: jchrist/google-chat-github-action@v1
         with:
