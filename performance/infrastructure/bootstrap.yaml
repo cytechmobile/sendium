@@ -523,6 +523,10 @@ Resources:
                 Resource: '*'
                 Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
               - Effect: Allow
+                Action: [rds:DescribeDBInstances, rds:ListTagsForResource]
+                Resource: !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${ResourcePrefix}-run-*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub '${Artifacts.Arn}/runs/*/outputs/*'
 

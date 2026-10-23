@@ -196,6 +196,17 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(allowed("GitHubDiagnostics", "cloudwatch:GetMetricStatistics"))
         self.assertFalse(allowed("GitHubDiagnostics", "secretsmanager:GetSecretValue"))
 
+    def test_rds_diagnostics_can_only_describe_and_read_tags_in_the_run_database_namespace(self):
+        for action in ("rds:DescribeDBInstances", "rds:ListTagsForResource"):
+            statements = allowed("GitHubDiagnostics", action)
+            self.assertEqual(len(statements), 1)
+            statement = statements[0]
+            self.assertEqual(statement["Resource"], "arn:aws:rds:eu-west-1:123456789012:db:sendium-perf-run-*")
+            self.assertEqual(statement["Condition"]["StringEquals"]["aws:RequestedRegion"], "eu-west-1")
+        for action in ("rds:ModifyDBInstance", "rds:DeleteDBInstance", "rds:StartDBInstance", "rds:StopDBInstance",
+                       "rds:CreateDBSnapshot", "rds:DownloadDBLogFilePortion", "pi:GetResourceMetrics"):
+            self.assertFalse(allowed("GitHubDiagnostics", action))
+
     def test_orchestrator_delegates_infrastructure_and_runtime_roles_require_boundary(self):
         self.assertFalse(allowed("GitHubOrchestrator", "ec2:RunInstances"))
         self.assertFalse(allowed("GitHubOrchestrator", "rds:CreateDBInstance"))

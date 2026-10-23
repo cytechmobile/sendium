@@ -91,6 +91,83 @@ burstability, mode, samples, and collection issues. Errors are sanitized; AWS
 stderr/credentials are not copied into it. Global collection/output failures
 return nonzero; per-instance issues are preserved for classification.
 
+## Read-only standard RDS collector
+
+`collect_rds_metrics.py` collects standard `AWS/RDS` instance metrics. It is a
+standalone collector at this stage; automatic workflow collection and database
+report sections are the following integration steps.
+
+```sh
+python3 performance/resources/collect_rds_metrics.py \
+  --context rds-context.json --output rds-metrics.json
+```
+
+The public context identifies the database and the observation's contiguous,
+half-open UTC phase windows. The example below includes partial minute buckets:
+
+```json
+{
+  "database": {
+    "identifier": "sendium-perf-run-gh-12345-1",
+    "instanceClass": "db.t4g.small",
+    "partition": "aws",
+    "region": "eu-west-1",
+    "accountId": "123456789012",
+    "repository": "cytechmobile/sendium",
+    "runIdentity": "gh-12345-1"
+  },
+  "phases": {
+    "warmup": {"start": "2026-10-23T12:00:10Z", "end": "2026-10-23T12:01:10Z"},
+    "measurement": {"start": "2026-10-23T12:01:10Z", "end": "2026-10-23T12:03:20Z"},
+    "drain": {"start": "2026-10-23T12:03:20Z", "end": "2026-10-23T12:03:50Z"}
+  }
+}
+```
+
+Before any metric request, the collector verifies the database identifier, exact
+ARN/account/region, instance class, PostgreSQL engine and run/repository ownership
+tags. Identity mismatch or unavailable identity produces explicit evidence with
+`database.verified: false` and no metric queries. It never reads database secrets
+or connects to PostgreSQL. It requires `rds:DescribeDBInstances` and
+`rds:ListTagsForResource`, scoped to the bootstrap's run-database ARN prefix and
+region, plus the existing `cloudwatch:GetMetricStatistics` permission. Existing
+bootstrap installations need the updated diagnostics policy before live use.
+
+| Metrics | Unit | Period | Statistics |
+|---|---|---:|---|
+| CPU utilization | Percent | 60 s | Average, minimum, maximum, sample count |
+| Freeable memory, swap, free storage | Bytes | 60 s | Same |
+| Database connections, disk queue depth | Count | 60 s | Same |
+| Read/write IOPS | Count/Second | 60 s | Same |
+| Read/write throughput | Bytes/Second | 60 s | Same |
+| Read/write storage I/O latency | Seconds | 60 s | Same |
+| CPU credit balance, surplus credit balance | Count | 300 s | Same |
+| CPU credit usage, surplus credits charged | Count | 300 s | Sum |
+
+Credits apply to supported burstable RDS classes. Non-burstable classes explicitly
+mark these series not applicable; T2 does not require surplus metrics. An unknown
+T-family leaves credit applicability unknown instead of assuming it is absent.
+
+The schema-v1 evidence records identity, collection start, exact phase boundaries,
+per-series query boundaries, units/statistics, sorted timestamped datapoints,
+attempt history and coverage. Each datapoint timestamp starts a whole CloudWatch
+bucket of `periodSeconds`; query boundaries round outward. Phase coverage counts
+overlapping buckets, so a bucket crossing phases can appear in more than one
+phase's coverage. These are not interpolated one-second samples or exact
+phase-only observations. Storage I/O latency is not SQL-query latency, and
+freeable memory is not database heap usage.
+
+Collection allows at most three attempts per applicable metric, retries only
+incomplete/problematic series, and waits at most 30 seconds between attempts.
+A 180-second deadline stops new metric requests; the CLI bounds each in-flight
+AWS request to ten seconds. Each metric has a 1,440-bucket budget. Publication
+lag can still leave missing data. Good samples survive later failures, while
+missing/invalid samples and interrupted/deadline-limited collection remain explicit.
+Recovered attempt errors are retained separately from current collection issues.
+No missing value becomes zero. No raw AWS error text is published. Partial metric
+evidence returns zero from the CLI for later resource-validity classification;
+identity or context/output failure returns nonzero.
+
 ## Java import, summary, and validity
 
 `ResourceEvidence.load` strictly validates shape, values, and byte/sample bounds.
