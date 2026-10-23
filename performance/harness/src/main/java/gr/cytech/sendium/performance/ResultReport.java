@@ -297,7 +297,7 @@ public final class ResultReport {
         }
         out.append("\n### Outstanding work at each interval's end\n\n")
                 .append("These counts are inferred from observed message progress, not direct readings of Sendium's internal queues. Provider completion means the simulator completed its response write, not proof that Sendium consumed it.\n\n")
-                .append("| Phase | Interval end (s) | Requests awaiting Sendium acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |\n|---|---:|---:|---:|---:|---:|\n");
+                .append("| Phase | Interval end (s) | Requests awaiting Sendium acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |\n|---|---:|---:|---:|---:|\n");
         for (var interval : root.path("eventIntervals")) {
             double end = interval.path("startOffsetSeconds").asDouble() + interval.path("durationSeconds").asDouble();
             out.append('|').append(interval.path("phase").asText()).append('|').append(String.format(Locale.ROOT, "%.3f", end));

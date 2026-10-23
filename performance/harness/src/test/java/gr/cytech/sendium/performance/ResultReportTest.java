@@ -77,6 +77,15 @@ class ResultReportTest {
         assertTrue(report.markdown().contains("Messages reaching simulated provider/s"));
         assertTrue(report.markdown().contains("Forwarded DLRs received by test tool/s"));
         assertTrue(report.markdown().contains("Outstanding work at each interval's end"));
+        var outstandingTable = report.markdown()
+                .split("### Outstanding work at each interval's end", 2)[1]
+                .split("## Drain", 2)[0];
+        var tableRows = outstandingTable.lines().filter(line -> line.startsWith("|")).toList();
+        assertEquals(2 + json.path("eventIntervals").size(), tableRows.size());
+        for (String row : tableRows) {
+            assertEquals(6, row.chars().filter(character -> character == '|').count(),
+                    "Outstanding-work table must have five columns: " + row);
+        }
         assertTrue(report.markdown().contains("not direct readings of Sendium's internal queues"));
         assertTrue(report.markdown().contains("|drain|135.000|5.000|0.000|0.000|0.200|"));
         assertTrue(report.markdown().contains("|drain|140.000|0|1|1|"));
