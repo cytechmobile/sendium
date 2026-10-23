@@ -61,6 +61,15 @@ def deployment_outputs():
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_native_requests_cannot_stage_or_provision_before_launcher_integration(self):
+        state = staged()
+        state["preset"]["runtime"]["applicationRuntime"] = "native"
+        aws = MemoryAws()
+        with self.assertRaisesRegex(deploy.DeploymentError, "Native application deployment is not enabled"):
+            deploy.stage(aws, state, state["preset"], Path("unused"))
+        self.assertEqual(aws.calls, [])
+        self.assertEqual(aws.uploads, [])
+
     def test_preset_cannot_silently_change_fixed_network_ports(self):
         state = staged()
         state["preset"]["deployment"]["httpPort"] = 8082

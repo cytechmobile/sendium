@@ -32,6 +32,7 @@
     "securityGroupModel": "role-to-role"
   },
   "runtime": {
+    "applicationRuntime": "jvm",
     "os": "amazon-linux-2023",
     "amiParameters": {
       "x86_64": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
@@ -48,6 +49,11 @@
       "artifactResolution": "resolve-and-checksum-before-provisioning",
       "sendiumArguments": ["-Xms512m", "-Xmx512m", "-XX:+UseG1GC"],
       "harnessArguments": ["-Xms512m", "-Xmx512m", "-XX:+UseG1GC"]
+    },
+    "native": {
+      "builderImage": "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image@sha256:73db3e481a32bcf244dc3ea7d92abffdcf64b0f5c62234e895071424c57eff12",
+      "buildArguments": ["-march=compatibility"],
+      "arguments": ["-Xms512m", "-Xmx512m"]
     },
     "requiredTools": ["python3", "aws", "tar", "gzip"],
     "clockSynchronization": "amazon-time-sync-service",

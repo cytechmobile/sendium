@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from jsonschema import Draft202012Validator, ValidationError
 from preset_validation import validate_preset
+from application_runtime import RUNTIMES, runtime_mode, validate_native_build, verify_elf_header
 
 
 INPUT_FIELDS = {
@@ -74,9 +75,12 @@ def boolean(value):
 
 
 def normalize(inputs, context, preset):
-    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled"}
+    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime"}
     require(isinstance(inputs, dict) and set(inputs) <= allowed, "Unknown dispatch input")
     result = json.loads(json.dumps(preset))
+    mode = inputs.get("application_runtime", runtime_mode(result))
+    require(mode in RUNTIMES, "Application runtime must be jvm or native")
+    result["runtime"]["applicationRuntime"] = mode
     workload = result["workload"]
     for name, field in INPUT_FIELDS.items():
         workload[field] = number(inputs.get(name, workload[field]), integral=name != "offered_rate")
@@ -125,6 +129,22 @@ def archive_application(directory, target):
             archive.add(path, arcname="quarkus-app/" + path.relative_to(directory).as_posix(), recursive=False)
 
 
+def archive_native_application(directory, target, architecture):
+    directory = Path(directory)
+    require(directory.is_dir() and not directory.is_symlink(), "Native target directory is unavailable")
+    candidates = list(directory.glob("*-runner"))
+    require(len(candidates) == 1 and candidates[0].is_file() and not candidates[0].is_symlink(), "Expected one native application executable")
+    binary = candidates[0]
+    require(0 < binary.stat().st_size <= MAX_ARTIFACT_BYTES, "Native executable exceeds transport budget")
+    with binary.open("rb") as stream:
+        verify_elf_header(stream.read(64), architecture)
+    with tarfile.open(target, "w:gz") as archive:
+        entry = tarfile.TarInfo("native/application")
+        entry.size, entry.mode = binary.stat().st_size, 0o755
+        with binary.open("rb") as stream:
+            archive.addfile(entry, stream)
+
+
 def build_bundle(request, component, architecture, checkout, output, java_version, machine=None):
     require(component in FILES and architecture in ARCHITECTURES, "Unknown build target")
     observed = machine_architecture(machine)
@@ -135,8 +155,13 @@ def build_bundle(request, component, architecture, checkout, output, java_versio
     require(head == revision(request, component), "Build checkout does not match captured revision")
     output.mkdir(exist_ok=False)
     target = output / FILES[component]
+    native_build = None
     if component == "application":
-        archive_application(checkout / "sendium-app/target/quarkus-app", target)
+        if runtime_mode(request["preset"]) == "native":
+            native_build = validate_native_build(read(checkout / "sendium-app/target/performance-native-build.json"), request["preset"], architecture)
+            archive_native_application(checkout / "sendium-app/target", target, architecture)
+        else:
+            archive_application(checkout / "sendium-app/target/quarkus-app", target)
     else:
         candidates = [path for path in (checkout / "performance/harness/target").glob("sendium-performance-harness-*.jar")
                       if not path.name.endswith(("-shaded.jar", "-sources.jar", "-javadoc.jar", "-tests.jar"))]
@@ -146,6 +171,8 @@ def build_bundle(request, component, architecture, checkout, output, java_versio
     manifest = {"schemaVersion": 1, "runIdentity": request["runIdentity"], "component": component,
                 "sourceRevision": head, "architecture": architecture, "javaVersion": java_version,
                 "file": target.name, "sha256": digest(target), "size": target.stat().st_size}
+    if native_build is not None:
+        manifest.update(applicationRuntime="native", nativeBuild=native_build)
     write(output / "build-manifest.json", manifest)
     return manifest
 
@@ -156,8 +183,14 @@ def verify_bundle(request, directory, component, architecture):
     bundle = Path(directory) / relative
     require(bundle.is_dir() and not bundle.is_symlink() and not (bundle / "build-manifest.json").is_symlink(), "Invalid artifact directory")
     manifest = read(bundle / "build-manifest.json")
-    require(isinstance(manifest, dict) and set(manifest) == {"schemaVersion", "runIdentity", "component", "sourceRevision",
-            "architecture", "javaVersion", "file", "sha256", "size"}, "Build manifest fields mismatch")
+    native = component == "application" and runtime_mode(request["preset"]) == "native"
+    fields = {"schemaVersion", "runIdentity", "component", "sourceRevision", "architecture", "javaVersion", "file", "sha256", "size"}
+    if native:
+        fields.update(("applicationRuntime", "nativeBuild"))
+    require(isinstance(manifest, dict) and set(manifest) == fields, "Build manifest fields mismatch")
+    if native:
+        require(manifest["applicationRuntime"] == "native", "Native application runtime mismatch")
+        validate_native_build(manifest["nativeBuild"], request["preset"], architecture)
     require(manifest.get("schemaVersion") == 1 and manifest.get("runIdentity") == request["runIdentity"]
             and manifest.get("component") == component and manifest.get("architecture") == architecture
             and manifest.get("sourceRevision") == revision(request, component)
@@ -180,6 +213,7 @@ def summary(request, path, ready=False):
     provenance = request["provenance"]
     lines = ["## Performance test build preparation", "", "| Setting | Value |", "|---|---|"]
     fields = {"Run": request["runIdentity"], "Application branch": provenance["branch"],
+              "Application runtime": runtime_mode(request["preset"]),
               "Application commit": provenance["applicationCommit"], "Harness/controller revision": request["controllerRevision"],
               "Workflow revision": request["workflowRevision"], **request["preset"]["aws"]["instanceDefaults"], **request["preset"]["workload"]}
     for key, value in fields.items():
