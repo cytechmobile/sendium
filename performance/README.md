@@ -70,6 +70,7 @@ the following inputs. Each run tests one ingress protocol.
 
 | Parameter | Default | What it controls |
 |---|---|---|
+| `application_runtime` | `jvm` | Runs Sendium as JVM Java or a compiled `native` executable. The test tool remains JVM-based. |
 | `ingress_mode` | `http` | How the test client submits messages to Sendium: `http` or `smpp`. Sendium's outgoing provider connection uses SMPP in both cases. |
 | `sendium_instance_type` | `t4g.small` | EC2 instance type for the Sendium application. |
 | `harness_instance_type` | `t4g.small` | EC2 instance type for the test tool, including the generator, simulated provider and DLR receiver. |
@@ -87,7 +88,12 @@ being tested. The maintained test tool and controller are pinned separately from
 the default branch. Instance compatibility and regional availability are checked
 before provisioning.
 
-Database sizing, JVM heap, protocol windows and networking remain defined by the
+Native mode builds both Linux architectures using a digest-pinned Mandrel compiler
+and runs the matching executable directly on the Sendium instance. Reports record
+the runtime, native compiler/build identity and separate native heap settings.
+A Java runtime is retained on that instance for configuration generation.
+
+Database sizing, JVM/native heap, protocol windows and networking remain defined by the
 [shared preset](presets/README.md); they are not Action inputs. AWS region and role
 configuration come from the protected GitHub environment.
 

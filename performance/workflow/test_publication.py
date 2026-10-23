@@ -44,6 +44,37 @@ def measured():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_native_setup_failure_preserves_mode_and_heap_without_fabricating_build_identity(self):
+        req = request({"application_runtime": "native"})
+        report = publish.unavailable(req, "NATIVE_BUILD_UNAVAILABLE")
+        publish.validate(report, req)
+        application = report["configuration"]["application"]
+        self.assertEqual(application["runtime"], "native")
+        self.assertEqual(application["jvmArguments"], [])
+        self.assertNotIn("nativeBuild", application)
+        self.assertIn("Application runtime: **native**", publish.fallback_markdown(report))
+        application["runtime"] = "jvm"
+        with self.assertRaisesRegex(ValueError, "runtime mismatch"):
+            publish.validate(report, req)
+
+    def test_measured_native_reports_require_matching_build_and_arguments(self):
+        from test_native_contracts import identity
+        req, report = measured()
+        req["preset"]["runtime"]["applicationRuntime"] = "native"
+        application = report["configuration"]["application"]
+        application.update(runtime="native", jvmArguments=[], nativeArguments=req["preset"]["runtime"]["native"]["arguments"],
+                           nativeBuild=identity("arm64"))
+        report["configuration"]["infrastructure"]["sendium"]["architecture"] = "arm64"
+        publish.validate(report, req)
+        self.assertIn("Native compiler:", publish.fallback_markdown(report))
+        application["nativeBuild"]["architecture"] = "x86_64"
+        with self.assertRaisesRegex(ValueError, "architecture/version mismatch"):
+            publish.validate(report, req)
+        application["nativeBuild"]["architecture"] = "arm64"
+        application["nativeArguments"] = ["-Xmx1g"]
+        with self.assertRaisesRegex(ValueError, "arguments mismatch"):
+            publish.validate(report, req)
+
     def test_setup_failure_has_null_rates_no_intervals_and_no_fabricated_observation(self):
         with tempfile.TemporaryDirectory() as directory:
             req = request()

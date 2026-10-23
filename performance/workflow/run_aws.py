@@ -125,12 +125,17 @@ def run(aws, downloads, request, inputs, bundles, settings, directory, verify_bu
         preset["database"]["engineVersion"] = resolved["database"]["engineVersion"]
         preset["runtime"]["java"]["release"] = details["java"]["sendium"]["release"]
         artifacts = dict(runtime)
+        native_build = None
         for source, component in (("sendium", "application"), ("harness", "harness")):
             node = resolved["nodes"][source]
             preset["runtime"]["amiIds"][node["architecture"]] = node["imageId"]
             item, = [item for item in inputs["artifacts"] if item["component"] == component and item["architecture"] == node["architecture"]]
             artifacts[component] = {"path": str((Path(bundles) / item["path"]).resolve()), "sha256": item["sha256"]}
+            if component == "application":
+                native_build = item.get("nativeBuild")
         plan = {**cleanup_plan, "provenance": request["provenance"], "artifacts": artifacts, "resolution": resolved}
+        if native_build is not None:
+            plan["nativeBuild"] = native_build
         prepare.write(directory / "deployment-plan.json", plan)
         prepare.write(directory / "resolved-preset.json", preset)
         outcome["phase"] = "staging"

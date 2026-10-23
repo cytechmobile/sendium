@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 import prepare
-from application_runtime import CREDENTIAL_ENVIRONMENT
+from application_runtime import CREDENTIAL_ENVIRONMENT, runtime_mode, validate_native_build
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from semantics import validate_results
@@ -42,6 +42,15 @@ def validate(document, request):
     for key in ("runIdentity", "applicationCommit", "harnessRevision", "branch"):
         prepare.require(document["provenance"][key] == request["provenance"][key], "Published report provenance mismatch")
     prepare.require(document["configuration"]["workload"] == request["preset"]["workload"], "Published workload mismatch")
+    application = document["configuration"]["application"]
+    mode = runtime_mode(request["preset"])
+    prepare.require(application.get("runtime", "jvm") == mode, "Published application runtime mismatch")
+    if mode == "native":
+        prepare.require(application["jvmArguments"] == [] and application.get("nativeArguments") == request["preset"]["runtime"]["native"]["arguments"],
+                        "Published native runtime arguments mismatch")
+        if document["measurementMetadata"].get("observationAvailable", True):
+            architecture = document["configuration"]["infrastructure"]["sendium"]["architecture"]
+            validate_native_build(application.get("nativeBuild"), request["preset"], architecture)
 
 
 def unavailable(request, code):
@@ -54,7 +63,10 @@ def unavailable(request, code):
     preset = request["preset"]
     return {"schemaVersion": 1, "provenance": {**request["provenance"], "artifacts": []},
             "configuration": {"workload": preset["workload"],
-                "application": {"jvmArguments": preset["runtime"]["java"]["sendiumArguments"], "connections": {}, "dlrStorage": "postgresql"},
+                "application": {"runtime": runtime_mode(preset),
+                    "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if runtime_mode(preset) == "jvm" else [],
+                    **({"nativeArguments": preset["runtime"]["native"]["arguments"]} if runtime_mode(preset) == "native" else {}),
+                    "connections": {}, "dlrStorage": "postgresql"},
                 "infrastructure": {"preset": preset["id"], "region": "unresolved",
                     "sendium": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["sendium"]},
                     "harness": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["harness"]},
@@ -110,7 +122,12 @@ def fallback_markdown(report):
     lines = ["# Sendium performance results", "", "**Status:** " + report["validity"]["status"], "",
              "Run: <code>" + text(report["provenance"]["runIdentity"]) + "</code>",
              "Branch: <code>" + text(report["provenance"]["branch"]) + "</code>",
-             "Application: <code>" + report["provenance"]["applicationCommit"] + "</code>; harness: <code>" + report["provenance"]["harnessRevision"] + "</code>", ""]
+              "Application: <code>" + report["provenance"]["applicationCommit"] + "</code>; harness: <code>" + report["provenance"]["harnessRevision"] + "</code>", ""]
+    application = report["configuration"]["application"]
+    lines.append("Application runtime: **" + text(application.get("runtime", "jvm")) + "**; harness runtime: **jvm**")
+    if "nativeBuild" in application:
+        lines.extend(["Native builder: <code>" + text(application["nativeBuild"]["builderImage"]) + "</code>",
+                      "Native compiler: <code>" + text(application["nativeBuild"]["compilerVersion"]) + "</code>"])
     for reason in report["validity"]["reasons"]:
         lines.append("- **" + text(reason["code"]) + ":** " + text(reason["message"]))
     if report["measurementMetadata"].get("observationAvailable") is False:

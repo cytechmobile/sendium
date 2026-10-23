@@ -58,6 +58,14 @@ class LocalBoundaryTests(unittest.TestCase):
                                        "database": {key: 1 for key in ("poolMinSize", "poolMaxSize", "acquisitionTimeoutMillis", "claimDurationSeconds", "sslMode")}}}}
         self.assertEqual(len(compare_load.matched_configuration(document, copy.deepcopy(document))), 9)
         changed = copy.deepcopy(document)
+        changed["configuration"]["application"]["runtime"] = "native"
+        with self.assertRaisesRegex(ValueError, "Application runtime differs"):
+            compare_load.matched_configuration(document, changed)
+        changed = copy.deepcopy(document)
+        changed["configuration"]["application"]["nativeBuild"] = {"compilerVersion": "different compiler"}
+        with self.assertRaisesRegex(ValueError, "runtime setting differs: nativeBuild"):
+            compare_load.matched_configuration(document, changed)
+        changed = copy.deepcopy(document)
         changed["provenance"]["artifacts"][0]["sha256"] = "cd" * 32
         with self.assertRaisesRegex(ValueError, "artifact differs: harness"):
             compare_load.matched_configuration(document, changed)
