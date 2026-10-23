@@ -12,6 +12,11 @@ Install/update [bootstrap](../infrastructure/README.md) and its
 policy includes the regional `ec2:DescribeVpcEndpointServices` preflight read.
 Configure environment **`sendium-performance`** with maintainer-controlled access:
 
+Use the repository's **Maintainers team** as the required reviewer, rather than an
+individual account. One eligible team member can approve provisioning/execution;
+the preceding build verification is automatic. Diagnostics and cleanup do not
+require a second approval.
+
 | Environment variable | Value |
 |---|---|
 | `AWS_REGION` | Explicit benchmark/bootstrap region; no inferred default |

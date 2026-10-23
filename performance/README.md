@@ -53,7 +53,8 @@ Each run has three traffic phases:
 | **GitHub Actions and AWS orchestration** | Build the exact application/test-tool revisions, provision resources, execute through Systems Manager, collect evidence, clean up and publish reports. |
 | **Expiry service** | Independently attempts cleanup of expired or abandoned runs if normal cleanup did not complete. |
 
-Only provisioning/execution requires environment approval. Evidence collection
+Only provisioning/execution requires environment approval from one member of the
+**Maintainers** team; build verification is automatic. Evidence collection
 and cleanup proceed automatically afterward using separate read-only and
 deletion-only roles; cleanup cannot create new benchmark resources.
 
