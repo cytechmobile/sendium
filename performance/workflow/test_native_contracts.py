@@ -13,7 +13,6 @@ from unittest.mock import patch
 import prepare
 import test_prepare
 from application_runtime import validate_native_build, validate_native_settings
-from test_prepare import PRESET, request
 
 
 def elf(architecture):
@@ -25,7 +24,7 @@ def elf(architecture):
 
 def identity(architecture):
     return {"schemaVersion": 1, "architecture": architecture,
-            "builderImage": PRESET["runtime"]["native"]["builderImage"],
+            "builderImage": test_prepare.PRESET["runtime"]["native"]["builderImage"],
             "compilerVersion": "native-image 25.0.1 Mandrel Distribution",
             "buildArguments": ["-march=compatibility"]}
 
@@ -38,7 +37,7 @@ class NativeContractTests(unittest.TestCase):
         target.mkdir(parents=True)
         (target / "sendium-runner").write_bytes(elf(architecture))
         (target / "performance-native-build.json").write_text(json.dumps(identity(architecture)))
-        req = request({"application_runtime": "native"})
+        req = test_prepare.request({"application_runtime": "native"})
         output = root / "bundles" / ("application-" + architecture)
         output.parent.mkdir()
         return req, checkout, target, output
@@ -48,11 +47,11 @@ class NativeContractTests(unittest.TestCase):
             return prepare.build_bundle(req, "application", architecture, checkout, output, "25.0.1", machine=architecture)
 
     def test_jvm_remains_default_and_unknown_runtime_cannot_become_a_command(self):
-        self.assertEqual(request()["preset"]["runtime"]["applicationRuntime"], "jvm")
-        self.assertTrue(request({"application_runtime": "native"})["preset"]["workload"]["dlrEnabled"])
+        self.assertEqual(test_prepare.request()["preset"]["runtime"]["applicationRuntime"], "jvm")
+        self.assertTrue(test_prepare.request({"application_runtime": "native"})["preset"]["workload"]["dlrEnabled"])
         for value in ("docker", "native; false", "", True, ["native"]):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                request({"application_runtime": value})
+                test_prepare.request({"application_runtime": value})
 
     def test_native_package_has_fixed_executable_path_and_architecture_identity(self):
         for architecture in ("x86_64", "arm64"):
@@ -67,13 +66,13 @@ class NativeContractTests(unittest.TestCase):
                     self.assertEqual(archive.extractfile("native/application").read(), elf(architecture))
                 self.assertEqual(prepare.verify_bundle(req, output.parent, "application", architecture)["sha256"], manifest["sha256"])
                 with self.assertRaisesRegex(ValueError, "manifest fields"):
-                    prepare.verify_bundle(request(), output.parent, "application", architecture)
+                    prepare.verify_bundle(test_prepare.request(), output.parent, "application", architecture)
 
     def test_jvm_application_cannot_be_substituted_for_requested_native_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             _, output = test_prepare.ArtifactTests().fixtures(directory)
             with self.assertRaisesRegex(ValueError, "manifest fields"):
-                prepare.verify_bundle(request({"application_runtime": "native"}), output, "application", "arm64")
+                prepare.verify_bundle(test_prepare.request({"application_runtime": "native"}), output, "application", "arm64")
 
     def test_wrong_elf_architecture_and_script_are_rejected_before_archiving(self):
         for content in (elf("x86_64"), b"#!/bin/sh\nexit 0\n"):
@@ -89,12 +88,12 @@ class NativeContractTests(unittest.TestCase):
                        {"builderImage": "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25"},
                        {"buildArguments": ["-march=native"]}, {"unexpected": "field"}):
             with self.subTest(change=change), self.assertRaises(ValueError):
-                validate_native_build({**identity("arm64"), **change}, request({"application_runtime": "native"})["preset"], "arm64")
+                validate_native_build({**identity("arm64"), **change}, test_prepare.request({"application_runtime": "native"})["preset"], "arm64")
 
     def test_native_runtime_has_explicit_bounded_heap_without_jvm_gc_flags(self):
         for arguments in (["-Xmx2048m"], ["-Xmx512m", "-Xms1g"], ["-Xmx512m", "-Xmx256m"],
                           ["-Xmx512m", "-XX:+UseG1GC"], []):
-            preset = deepcopy(PRESET)
+            preset = deepcopy(test_prepare.PRESET)
             preset["runtime"]["native"]["arguments"] = arguments
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 validate_native_settings(preset)
