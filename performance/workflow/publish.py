@@ -15,6 +15,7 @@ from application_runtime import CREDENTIAL_ENVIRONMENT, runtime_mode, validate_n
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from semantics import validate_results
+from rds_markdown import database_markdown
 
 
 HERE = Path(__file__).resolve().parent
@@ -169,7 +170,7 @@ def fallback_markdown(report):
                      + " | ".join("n/a" if value is None else str(value) for value in counts) + " |")
     lines.extend(["", "## Resources", "", "Available raw samples and resource summaries are in results.json; absent evidence is not zero utilization.",
                   "", "## Drain", "", "Duration seconds: " + number(report["drain"]["durationSeconds"]) + "; unfinished accepted: " + str(report["drain"]["unfinishedAccepted"])])
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + database_markdown(report)
 
 
 def copy_evidence(path, target, issues, maximum=64 * 1024 * 1024):

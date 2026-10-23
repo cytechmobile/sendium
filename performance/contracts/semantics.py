@@ -2,6 +2,7 @@
 
 import math
 from decimal import Decimal, ROUND_CEILING
+from rds_semantics import validate_rds_resources
 
 
 ADDITIVE = (
@@ -52,6 +53,7 @@ def distributions(measurement):
 
 
 def validate_results(document):
+    validate_rds_resources(document)
     if any(reason.get("severity") == "FAILED" for reason in document["validity"].get("reasons", [])):
         require(document["validity"]["status"] == "failed", "Failed reasons must retain failed classification")
     workload = document["configuration"]["workload"]

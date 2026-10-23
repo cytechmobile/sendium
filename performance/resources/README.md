@@ -94,8 +94,8 @@ return nonzero; per-instance issues are preserved for classification.
 ## Read-only standard RDS collector
 
 `collect_rds_metrics.py` collects standard `AWS/RDS` instance metrics. It is a
-standalone collector at this stage; automatic workflow collection and database
-report sections are the following integration steps.
+standalone collector at this stage. Offline JSON/Markdown report import is
+supported below; automatic workflow collection is the following integration step.
 
 ```sh
 python3 performance/resources/collect_rds_metrics.py \
@@ -168,7 +168,64 @@ No missing value becomes zero. No raw AWS error text is published. Partial metri
 evidence returns zero from the CLI for later resource-validity classification;
 identity or context/output failure returns nonzero.
 
-## Java import, summary, and validity
+## RDS report import, summaries, and coverage
+
+The offline `finalize-report` command accepts the collector file through the
+optional `rdsMetrics` field in `resource-inputs.json`, alongside existing process
+samples and EC2 credits:
+
+```json
+{
+  "schemaVersion": 1,
+  "sendiumSamples": "sendium-resources.jsonl",
+  "harnessSamples": "harness-resources.jsonl",
+  "cpuCredits": "cpu-credits.json",
+  "rdsMetrics": "rds-metrics.json",
+  "sampleBudget": 8192
+}
+```
+
+Paths are relative to the input document. `rdsMetrics` points to the standalone
+collector output, not the enriched subsection from a previously published report.
+Import is offline and has an 8-MiB/16-series/1,440-points-per-series budget. It
+rejects malformed values, wrong units/periods/statistics, duplicate timestamps,
+scalar coercion and trailing JSON. Good process/credit sources survive an invalid
+database source. Supplied coverage counts are recomputed from samples.
+
+Results add `resources.database`, including the collector identity and raw values,
+whole-bucket ends, overlapping phases, boundary flags, per-phase coverage and
+per-phase statistical summaries. The primary and fallback Markdown renderers show
+the same database section: measurement averages/minima/maxima or sums, bucket
+coverage, and a collapsible warm-up/measurement/drain timeline. Markdown displays
+bytes as MiB, bytes/second as MiB/s and seconds as milliseconds; JSON retains AWS
+units. At most 240 timeline rows are shown in Markdown, with a notice pointing to
+the complete JSON when truncated.
+
+**Phase-only statistics use complete buckets fully contained in that phase.**
+Gauge averages use CloudWatch `SampleCount` weights, extrema use the returned
+`Minimum`/`Maximum`, and credit usage/charges use `Sum`. Crossing buckets remain in
+the timeline and overlap-based coverage, but are not prorated into phase-only
+statistics. For example, a two-minute measurement may have complete five-minute
+credit coverage while its phase-only credit sum is `null`/`n/a`, because no whole
+credit bucket fits inside it. An observed zero remains zero.
+
+The public report context opts into required RDS evidence with
+`configuration.infrastructure.database.resourceMetricsRequired: true`. Missing,
+unverified or incomplete required evidence is **inconclusive**. A report-source
+database/run/region/class mismatch or a measurement-window mismatch is **failed**,
+so measurements are never silently attributed to another run. Timestamp envelopes
+may expand outward by at most two microseconds to bridge Python microsecond and
+Java nanosecond precision. An optional context `database.accountId` is also checked.
+Legacy/local reports without the requirement flag remain compatible. No utilization
+threshold is a performance pass/fail gate, and resource finalization preserves
+workload counts, rates, latency distributions, event/cohort intervals and drain data.
+
+The result schema and independent Python semantic validator check attribution,
+coverage, bucket selection, statistical calculations and classification separately
+from the JVM report implementation. Workflow collection, evidence transfer and
+enabling the requirement for new AWS runs follow in the next integration step.
+
+## Process/EC2 import, summary, and validity
 
 `ResourceEvidence.load` strictly validates shape, values, and byte/sample bounds.
 `loadAvailable` retains good sources when another artifact is missing/invalid and

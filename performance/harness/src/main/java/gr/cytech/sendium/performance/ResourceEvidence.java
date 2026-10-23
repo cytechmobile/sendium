@@ -13,7 +13,7 @@ import java.util.List;
 
 /** Bounded samples imported from per-instance agents; no AWS credentials in the load JVM. */
 public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<Credits> cpuCredits,
-        List<String> collectionIssues, int sampleBudget) {
+        List<String> collectionIssues, int sampleBudget, RdsResourceEvidence database) {
     public static final int DEFAULT_SAMPLE_BUDGET = 4096;
     public record Window(Instant start, Instant end) {
         public Window { if (end.isBefore(start)) { throw new IllegalArgumentException("Invalid resource window"); } }
@@ -67,10 +67,19 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
         collectionIssues = List.copyOf(collectionIssues);
     }
 
+    public ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<Credits> cpuCredits,
+            List<String> collectionIssues, int sampleBudget) {
+        this(sendium, harness, cpuCredits, collectionIssues, sampleBudget, null);
+    }
+
     public static ResourceEvidence empty() { return new ResourceEvidence(List.of(), List.of(), List.of(), List.of(), DEFAULT_SAMPLE_BUDGET); }
 
     /** Reporting must retain available sources even when another diagnostic artifact is missing. */
     public static ResourceEvidence loadAvailable(Path sendiumFile, Path harnessFile, Path creditFile, int budget) {
+        return loadAvailable(sendiumFile, harnessFile, creditFile, null, budget);
+    }
+
+    public static ResourceEvidence loadAvailable(Path sendiumFile, Path harnessFile, Path creditFile, Path databaseFile, int budget) {
         if (budget < 1) { throw new IllegalArgumentException("Invalid resource sample budget"); }
         ObjectMapper mapper = new ObjectMapper();
         List<String> issues = new ArrayList<>();
@@ -83,7 +92,12 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
                 credits = imported.cpuCredits(); issues.addAll(imported.collectionIssues());
             } catch (Exception exception) { issues.add("CPU_CREDIT_IMPORT_FAILED"); }
         }
-        return new ResourceEvidence(sendium, harness, credits, issues, budget);
+        RdsResourceEvidence database = null;
+        if (databaseFile != null) {
+            try { database = RdsResourceEvidence.load(databaseFile); }
+            catch (Exception exception) { issues.add("RDS_RESOURCE_IMPORT_FAILED"); }
+        }
+        return new ResourceEvidence(sendium, harness, credits, issues, budget, database);
     }
 
     private static List<Sample> availableSamples(String source, Path file, int budget, ObjectMapper mapper, List<String> issues) {
@@ -156,6 +170,7 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
         ObjectNode result = mapper.createObjectNode();
         result.set("sendium", mapper.valueToTree(sendium)); result.set("harness", mapper.valueToTree(harness));
         result.set("cpuCredits", mapper.valueToTree(cpuCredits)); result.set("collectionIssues", mapper.valueToTree(collectionIssues));
+        if (database != null) { result.set("database", database.json(mapper)); }
         result.put("sampleBudgetPerSource", sampleBudget).put("processCpuPercentBasis", "100 percent is one logical CPU core")
                 .put("hostCpuPercentBasis", "100 percent is aggregate host CPU capacity");
         if (window != null) { result.putObject("window").put("start", window.start().toString()).put("end", window.end().toString()); }
