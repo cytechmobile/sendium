@@ -360,6 +360,7 @@ objects remain outside the run stack for explicit cleanup/lifecycle expiration.
 Deletion recovery for partial provisioning uses the deployment cleanup helper. A stack's expiry timestamp
 does not itself perform deletion; execution requires the installed expiry handler
 and matching live configuration. This template has only offline validation so far.
+
 ### Permanent results storage
 
 Updating the bootstrap stack creates `ResultsArchiveBucketName` and `ArchiveRoleArn`.
@@ -376,5 +377,5 @@ bootstrap stack's outputs. It cannot delete objects, read temporary run inputs o
 database secrets, or execute SSM commands. Existing runtime, orchestration,
 diagnostics, cleanup and expiry policies do not grant archive access.
 
-This infrastructure prepares permanent storage; automatic packaging/upload is
-tracked in `living_docs/PerformanceResultsArchive.md` and is not enabled yet.
+This infrastructure prepares permanent storage. [Offline packaging](../workflow/ARCHIVE.md)
+is available; automatic workflow upload is not enabled yet.
