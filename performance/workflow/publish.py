@@ -214,6 +214,8 @@ def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, 
         resources[source + "Samples"] = copy_evidence(path, evidence / filename, evidence_issues)
     credit = first_file([Path(diagnostic) / "cpu-credits.json"])
     resources["cpuCredits"] = copy_evidence(credit, evidence / "cpu-credits.json", evidence_issues)
+    rds = first_file([Path(diagnostic) / "rds-metrics.json"])
+    resources["rdsMetrics"] = copy_evidence(rds, evidence / "rds-metrics.json", evidence_issues, 8 * 1024 * 1024)
     for base, names in ((Path(controller), ("controller-outcome.json", "stack-events.json", "resolution.json")),
                         (Path(diagnostic), ("diagnostics-outcome.json",)), (Path(cleanup), ("cleanup-outcome.json",))):
         for name in names:

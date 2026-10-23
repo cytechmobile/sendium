@@ -239,7 +239,8 @@ def documents(staged, result, instances, timeout):
         application.update(nativeArguments=preset["runtime"]["native"]["arguments"], nativeBuild=staged["nativeBuild"])
     infrastructure = {"preset": preset["id"], "region": staged["region"], "database": {
         **preset["database"], "identifier": result["DatabaseIdentifier"], "availabilityZone": result["PrimaryAvailabilityZone"],
-        "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"]}}
+        "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"],
+        "resourceMetricsRequired": True}}
     infrastructure["resolution"] = staged.get("resolution", {})
     for source in ("sendium", "harness"):
         instance = instances[result[source.title() + "InstanceId"]]

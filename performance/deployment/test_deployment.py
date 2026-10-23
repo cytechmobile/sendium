@@ -231,6 +231,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("jdbc:", json.dumps(documents["harness"]))
         self.assertIn("sslmode=verify-full", documents["sendium"]["deployment"]["database"]["jdbcUrl"])
         self.assertEqual(documents["harness"]["execution"]["context"]["infrastructure"]["database"]["version"], "17.6")
+        self.assertTrue(documents["harness"]["execution"]["context"]["infrastructure"]["database"]["resourceMetricsRequired"])
 
     def test_retrieval_is_allowlisted_and_preserves_sources_when_one_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:

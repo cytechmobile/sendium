@@ -79,6 +79,7 @@ class NativeDeploymentTests(unittest.TestCase):
         self.assertEqual(context["application"]["nativeBuild"], state["nativeBuild"])
         self.assertEqual(context["infrastructure"]["sendium"]["execution"], "ec2-native")
         self.assertEqual(context["infrastructure"]["harness"]["execution"], "ec2-jvm")
+        self.assertTrue(context["infrastructure"]["database"]["resourceMetricsRequired"])
         self.assertNotIn("nativeArguments", documents["harness"])
         state["nativeBuild"]["architecture"] = "x86_64"
         with self.assertRaises(ValueError):

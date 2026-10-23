@@ -16,6 +16,7 @@ sys.path.insert(0, str(HERE.parent / "resources"))
 from aws_cli import AwsCli
 from cleanup import Cleaner
 import collect_cpu_credits
+import collect_rds_metrics
 import deploy
 
 
@@ -36,7 +37,23 @@ def ownership(aws, request, region, bootstrap, role, diagnostic):
             + ":assumed-role/" + role.split("/")[-1] + "/"), "Recovery requires the configured assumed role")
     return {"schemaVersion": 1, "region": region, "repository": request["repository"], "bootstrapStack": bootstrap,
             "runIdentity": request["runIdentity"], "runStack": outputs["RunStackPrefix"] + request["runIdentity"],
-            "bucket": outputs["ArtifactBucketName"], "preset": request["preset"]}
+            "bucket": outputs["ArtifactBucketName"], "preset": request["preset"], "accountId": account, "partition": partition}
+
+
+def rds_context(document, plan, request):
+    metadata = document["measurementMetadata"]
+    start = collect_rds_metrics.utc(metadata["measurementStartUtc"])
+    end = start + timedelta(microseconds=(metadata["observedDurationNanos"] + 999) // 1000 + 1)
+    warmup = document["configuration"]["workload"]["warmupSeconds"]
+    drain = document["drain"]["durationSeconds"]
+    database = document["configuration"]["infrastructure"]["database"]
+    return {"database": {"identifier": database["identifier"], "instanceClass": database["instanceType"],
+            "region": plan["region"], "accountId": plan["accountId"], "partition": plan["partition"],
+            "repository": request["repository"], "runIdentity": request["runIdentity"]},
+            "phases": {phase: {"start": collect_rds_metrics.text(first), "end": collect_rds_metrics.text(last)}
+                       for phase, first, last in (("warmup", start - timedelta(seconds=warmup), start),
+                                                 ("measurement", start, end),
+                                                 ("drain", end, end + timedelta(seconds=drain)))}}
 
 
 def diagnostics(aws, credits, plan, request, directory):
@@ -63,6 +80,19 @@ def diagnostics(aws, credits, plan, request, directory):
         # Java Instant keeps nanoseconds; datetime truncates to microseconds. Expand outward,
         # otherwise an apparently matching credit envelope can end before the exact report window.
         end = start + timedelta(microseconds=(metadata["observedDurationNanos"] + 999) // 1000 + 1)
+        # Collect independently: a failed EC2 credit query must not discard database evidence.
+        if document["configuration"]["infrastructure"]["database"].get("resourceMetricsRequired", False):
+            timeout = aws.timeout_seconds
+            try:
+                aws.timeout_seconds = 10
+                context = rds_context(document, plan, request)
+                evidence = collect_rds_metrics.collect(aws, context)
+                prepare.write(Path(directory) / "rds-metrics.json", evidence)
+            except (Exception, KeyboardInterrupt):
+                result["issues"].append("RDS_COLLECTION_UNAVAILABLE")
+                result["exitCode"] = 1
+            finally:
+                aws.timeout_seconds = timeout
         instances = {source: document["configuration"]["infrastructure"][source]["instanceId"] for source in ("sendium", "harness")}
         require(len(set(instances.values())) == 2, "Distinct instance IDs required")
         described = aws.call("ec2", "describe-instances", instance_ids=list(instances.values()))
