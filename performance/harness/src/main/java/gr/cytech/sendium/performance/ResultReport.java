@@ -267,7 +267,7 @@ public final class ResultReport {
         }
         latencyTable(out, "Overall latency (milliseconds)", overall.path("latencies"));
         out.append("\n## One-minute submission cohorts\n\nCounts follow scheduled-time cohorts through drain; cohort completion rates are intentionally not reported.\n\n")
-                .append("| Scheduled interval (s) | Observed (s) | Attempted | Accepted | Rejected | Failed | Timed out | Missed | Awaiting provider | Awaiting receipt |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+                .append("| Scheduled interval (s) | Observed (s) | Attempted | Accepted | Rejected | Failed | Timed out | Missed | Accepted awaiting provider completion | Accepted awaiting forwarded DLR |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (var interval : root.path("cohortIntervals")) {
             out.append('|').append(number(interval.path("startOffsetSeconds"))).append('–').append(number(interval.path("endOffsetSeconds")))
                     .append('|').append(number(interval.path("durationSeconds")));
@@ -276,12 +276,23 @@ public final class ResultReport {
         }
         out.append("\n<details><summary>Per-cohort latency percentiles</summary>\n\n");
         for (var interval : root.path("cohortIntervals")) { latencyTable(out, "Cohort " + number(interval.path("startOffsetSeconds")) + "–" + number(interval.path("endOffsetSeconds")) + " seconds", interval.path("latencies")); }
-        out.append("\n</details>\n\n## One-minute event-time output and backlog\n\n")
-                .append("| Phase | Start (s) | Duration (s) | Provider arrivals/s | Provider responses/s | Receipts/s | Pending admission | Awaiting provider | Awaiting receipt |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.append("\n</details>\n\n## Processing rates and outstanding work\n\n")
+                .append("Rates describe events during each interval; outstanding counts describe its end. The provider is simulated, and forwarded DLRs are received by the test tool.\n\n")
+                .append("During drain, no new messages are generated: responses and DLRs for previously submitted messages can still arrive. Drain is a bounded completion period, not another sustained-load test.\n\n")
+                .append("### Processing rates during each interval\n\n")
+                .append("| Phase | Start (s) | Duration (s) | Messages reaching simulated provider/s | Simulated provider responses completed/s | Forwarded DLRs received by test tool/s |\n|---|---:|---:|---:|---:|---:|\n");
         for (var interval : root.path("eventIntervals")) {
             out.append('|').append(interval.path("phase").asText()).append('|').append(number(interval.path("startOffsetSeconds")))
                     .append('|').append(number(interval.path("durationSeconds")));
             for (String field : List.of("providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond")) { out.append('|').append(number(interval.path("rates").path(field))); }
+            out.append("|\n");
+        }
+        out.append("\n### Outstanding work at each interval's end\n\n")
+                .append("These counts are inferred from observed message progress, not direct readings of Sendium's internal queues. Provider completion means the simulator completed its response write, not proof that Sendium consumed it.\n\n")
+                .append("| Phase | Interval end (s) | Requests awaiting Sendium acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |\n|---|---:|---:|---:|---:|---:|\n");
+        for (var interval : root.path("eventIntervals")) {
+            double end = interval.path("startOffsetSeconds").asDouble() + interval.path("durationSeconds").asDouble();
+            out.append('|').append(interval.path("phase").asText()).append('|').append(String.format(Locale.ROOT, "%.3f", end));
             for (String field : List.of("pendingAdmission", "acceptedAwaitingProvider", "acceptedAwaitingReceipt")) { out.append('|').append(interval.path("outstanding").path(field).asLong()); }
             out.append("|\n");
         }
