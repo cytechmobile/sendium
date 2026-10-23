@@ -7,7 +7,11 @@ import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
@@ -19,7 +23,10 @@ import jakarta.enterprise.inject.Vetoed;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -32,6 +39,11 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.spy;
 
 class MessageLifecycleHttpTest {
     @RegisterExtension
@@ -52,14 +64,25 @@ class MessageLifecycleHttpTest {
     @Inject
     InMemoryQueueProvider legacy;
 
+    @Inject
+    PendingMessageStore<StandardMessage> pending;
+
+    @AfterEach
+    void clearAdmissionFaults() {
+        reset(pending);
+    }
+
     @Test
-    void httpUsesTheExplicitCoordinatorBeanAndReturnsBackpressureAtCapacity() throws Exception {
+    void successReferencesAcceptedHandle() throws Exception {
         URI requestUri = URI.create(endpoint + "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello" +
                 "&dlr-url=https%3A%2F%2Fcallback.test%2Fdlr");
         try (HttpClient client = HttpClient.newHttpClient()) {
             var request = HttpRequest.newBuilder(requestUri).timeout(Duration.ofSeconds(5)).GET().build();
             var accepted = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertThat(accepted.statusCode()).isEqualTo(202);
+            var retained = pending.find(new SourceId(UUID.fromString(accepted.body()))).orElseThrow();
+            assertThat(retained.serial).isEqualTo(accepted.body());
+            assertThat(retained.body).isEqualTo("Hello");
             var full = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertThat(full.statusCode()).isEqualTo(503);
             assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
@@ -75,12 +98,54 @@ class MessageLifecycleHttpTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"UNAVAILABLE", "CAPACITY_EXCEEDED", "OWNERSHIP_CONFLICT", "UNSUPPORTED", "INVALID_TRANSITION"})
+    void rejectsPendingAdmissionFailures(String reasonName) throws Exception {
+        // Strings cross QuarkusExtensionTest's class-loader boundary; application enum instances do not.
+        var reason = OutboundStorageException.Reason.valueOf(reasonName);
+        doThrow(new OutboundStorageException(OutboundStage.Role.PENDING, reason, "private storage details"))
+                .when(pending).admit(any(), any());
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            var request = HttpRequest.newBuilder(URI.create(endpoint +
+                    "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello"))
+                    .timeout(Duration.ofSeconds(5)).GET().build();
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            int expected = switch (reason) {
+                case UNSUPPORTED -> 400;
+                case INVALID_TRANSITION -> 500;
+                default -> 503;
+            };
+            assertThat(response.statusCode()).isEqualTo(expected);
+            assertThat(response.body()).doesNotContain("private storage details");
+            assertThat(pending.sourcesAfter(null, 1)).isEmpty();
+            assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
+        }
+    }
+
+    @Test
+    void unconfirmedPendingHandleIsNeverAcknowledged() throws Exception {
+        doReturn(null).when(pending).admit(any(), any());
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            var request = HttpRequest.newBuilder(URI.create(endpoint +
+                    "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello"))
+                    .timeout(Duration.ofSeconds(5)).GET().build();
+            assertThat(client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(503);
+            assertThat(pending.sourcesAfter(null, 1)).isEmpty();
+            assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
+        }
+    }
+
     @Singleton
     public static class Beans {
         @Produces
         @Singleton
-        OutboundCoordinator<StandardMessage> coordinator() {
-            var pending = new MemoryPendingMessageStore<StandardMessage>(1, Beans::snapshot);
+        MemoryPendingMessageStore<StandardMessage> pending() {
+            return spy(new MemoryPendingMessageStore<StandardMessage>(1, Beans::snapshot));
+        }
+
+        @Produces
+        @Singleton
+        OutboundCoordinator<StandardMessage> coordinator(MemoryPendingMessageStore<StandardMessage> pending) {
             var router = new MemorySelectedRouterStore<>(pending, 1);
             var routed = new MemoryRoutedWorkStore<StandardMessage>(1, Beans::snapshot);
             var coordinator = new DefaultOutboundCoordinator<>(pending, router, routed);

@@ -8,6 +8,7 @@ import com.cloudhopper.smpp.pdu.PduResponse;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.tlv.Tlv;
 import com.cloudhopper.smpp.type.Address;
+import com.google.common.util.concurrent.RateLimiter;
 import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.AbstractOutWorker;
@@ -50,6 +51,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SmppClientWorkerTest {
@@ -119,31 +122,35 @@ class SmppClientWorkerTest {
     @Test
     void legacyAndCoordinatedMessagesShareTheConfiguredWorkerRateLimit() throws Exception {
         var worker = new LegacyRateWorker();
+        var limiter = mock(RateLimiter.class);
         var queue = new Queue<StandardMessage>();
         queue.enqueue(messageWithNetwork());
         worker.useQueue(queue);
         var container = mock(ArcContainer.class);
         when(container.requestContext()).thenReturn(mock(ManagedContext.class));
-        try (var arc = mockStatic(Arc.class)) {
+        try (var limiterFactory = mockStatic(RateLimiter.class); var arc = mockStatic(Arc.class)) {
+            limiterFactory.when(() -> RateLimiter.create(2.0)).thenReturn(limiter);
             arc.when(Arc::container).thenReturn(container);
-            // Start the limiter after mock instrumentation, which otherwise accrues stored permits.
             worker.configureRate(2);
             worker.new Worker(0).run();
-        }
-        assertThat(worker.legacySends).isEqualTo(1);
-        assertThat(worker.permits).isEqualTo(1);
-        worker.keepOnRunning = true;
+            assertThat(worker.legacySends).isEqualTo(1);
+            assertThat(worker.permits).isEqualTo(1);
+            verify(limiter).acquire();
+            worker.keepOnRunning = true;
 
-        for (int i = 0; i < 2; i++) {
-            worker.submitPreparedCoordinated(messageWithNetwork(), (payload, policy) -> {
-                throw new AssertionError("Successful submission must not schedule a retry");
-            });
-        }
+            for (int i = 0; i < 2; i++) {
+                worker.submitPreparedCoordinated(messageWithNetwork(), (payload, policy) -> {
+                    throw new AssertionError("Successful submission must not schedule a retry");
+                });
+            }
 
-        assertThat(worker.permits).isEqualTo(3);
-        assertThat(worker.coordinatedSendTime - worker.legacySendTime)
-                .isGreaterThanOrEqualTo(Duration.ofMillis(800).toNanos());
-        assertThat(worker.getTransactionsPerSecond()).isEqualTo(2);
+            // Verify shared gating directly: a real burst-permitting limiter cannot promise a fixed send interval.
+            limiterFactory.verify(() -> RateLimiter.create(2.0), times(1));
+            verify(limiter, times(3)).acquire();
+            assertThat(worker.permits).isEqualTo(3);
+            assertThat(worker.coordinatedSends).isEqualTo(2);
+            assertThat(worker.getTransactionsPerSecond()).isEqualTo(2);
+        }
     }
 
     @Test
@@ -1109,8 +1116,7 @@ class SmppClientWorkerTest {
     private static final class LegacyRateWorker extends TestSmppClientWorker {
         private int permits;
         private int legacySends;
-        private long legacySendTime;
-        private long coordinatedSendTime;
+        private int coordinatedSends;
         private Runnable afterPermit = () -> { };
 
         private LegacyRateWorker() {
@@ -1141,14 +1147,13 @@ class SmppClientWorkerTest {
         @Override
         public StandardMessage doMessage(int threadIndex, StandardMessage message) {
             legacySends++;
-            legacySendTime = System.nanoTime();
             keepOnRunning = false;
             return null;
         }
 
         @Override
         protected void sendCoordinatedRequest(SubmitSm request) {
-            coordinatedSendTime = System.nanoTime();
+            coordinatedSends++;
         }
     }
 

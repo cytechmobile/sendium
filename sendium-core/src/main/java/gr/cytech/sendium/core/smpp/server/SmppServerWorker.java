@@ -30,6 +30,9 @@ import gr.cytech.sendium.core.smpp.server.tasks.PrintStatisticsTask;
 import gr.cytech.sendium.core.smpp.util.SmppServerUtil;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 import gr.cytech.sendium.core.worker.FailDelayPolicy;
 import gr.cytech.sendium.core.worker.FailDelayPolicyAction;
 import gr.cytech.sendium.core.worker.WorkerType;
@@ -47,6 +50,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -148,7 +152,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     protected MessagePartsHandler<M> messagePartsHandler;
     protected boolean isFastUnsafeStop = false;
     private final ReentrantReadWriteLock ingressLifecycleLock = new ReentrantReadWriteLock(true);
-    private final Map<M, Set<SourceId>> pendingPartSources = Collections.synchronizedMap(new IdentityHashMap<>());
+    private final Map<M, MultipartMembership> pendingPartSources = Collections.synchronizedMap(new IdentityHashMap<>());
     private volatile OutboundCoordinator<M> ingressCoordinator;
     private volatile boolean ingressStarted;
 
@@ -221,6 +225,19 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
     }
 
+    /** Reconstruct accepted work before startup; this neither opens a backend nor enables a durable profile. */
+    public void reconstructPendingParts(PendingMessageStore<M> pending, int pageSize) {
+        ingressLifecycleLock.writeLock().lock();
+        try {
+            if (ingressStarted || inExecutor != null || ingressCoordinator == null) {
+                throw new IllegalStateException("Pending reconstruction requires a selected coordinator before startup/admission");
+            }
+            messagePartsHandler.reconstruct(pending, pageSize, ingressCoordinator::makeHeldReady);
+        } finally {
+            ingressLifecycleLock.writeLock().unlock();
+        }
+    }
+
     @Override
     public String getType() {
         return TYPE_SMPP_SERVER;
@@ -230,6 +247,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public Thread start() {
         ingressLifecycleLock.writeLock().lock();
         try {
+            requirePendingRecoveryReady();
             ingressStarted = true;
         } finally {
             ingressLifecycleLock.writeLock().unlock();
@@ -625,6 +643,10 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     protected void configReassemblingTimeout() {
         long timeout = configurationProvider.getLongPrpt(_timeoutMillis);
+        if (messagePartsHandler != null && messagePartsHandler.isRecordDriven()) {
+            messagePartsHandler.setTimeoutInMilliseconds(timeout > 0 ? timeout : 30000L);
+            return;
+        }
         if (timeout > 0) {
             setMessagePartsHandler(new MessagePartsHandler<M>(new CcatMessagePartsEventsListener(), configurationProvider.getLongPrpt(_timeoutMillis)));
             logger.warn("configReassemblingTimeout|warn|set:{}", timeout);
@@ -1018,22 +1040,29 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     private boolean admitToLifecycle(InEvent<M> event, UUID gatewayMessageId) {
         try {
+            requirePendingRecoveryReady();
             SourceId source = new SourceId(gatewayMessageId);
             if (event.submitSm != null && !Strings.isNullOrEmpty(event.pMsg.binheader)) {
                 if (!messagePartsHandler.isSupportedMessagePart(event.pMsg)) {
                     throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNSUPPORTED,
                             "Unsupported multipart header");
                 }
-                ingressCoordinator.acceptHeld(source, event.pMsg);
-                synchronized (pendingPartSources) {
-                    pendingPartSources.computeIfAbsent(event.pMsg, ignored -> new HashSet<>()).add(source);
+                var membership = ingressCoordinator.acceptPart(source, event.pMsg,
+                        Duration.ofMillis(messagePartsHandler.getTimeoutInMilliseconds()));
+                SourceId acceptedSource = membership.source();
+                event.pMsg.serial = acceptedSource.value().toString();
+                if (!messagePartsHandler.isRecordDriven()) {
+                    synchronized (pendingPartSources) {
+                        pendingPartSources.put(event.pMsg, membership);
+                    }
                 }
                 InEvent<M> accepted = new InEvent<>(event.pMsg, event.submitSm, event.mpid, event.localTimestamp,
-                        false, event.responseMessageId, Set.of(source));
+                        false, event.responseMessageId, Set.of(acceptedSource));
                 accepted.notifyClient = event.notifyClient;
                 inEventQueue.add(accepted);
             } else {
-                ingressCoordinator.accept(source, event.pMsg);
+                SourceId acceptedSource = ingressCoordinator.accept(source, event.pMsg);
+                event.pMsg.serial = acceptedSource.value().toString();
             }
             if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
                 logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(), MessageTrace.identifiers(event.pMsg));
@@ -1059,6 +1088,13 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         if (event.submitSm != null) {
             enqueueOut(SmppServerUtil.createSubmitRsp(event.submitSm, status, null));
             event.waitingForResponse = false;
+        }
+    }
+
+    private void requirePendingRecoveryReady() {
+        if (messagePartsHandler != null && messagePartsHandler.isRecordDriven() && !messagePartsHandler.isRecoveryReady()) {
+            throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNAVAILABLE,
+                    "Pending multipart reconstruction is not ready");
         }
     }
 
@@ -1091,8 +1127,13 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                     }
                     if (event.submitSm == null) {
                         ingressCoordinator.makeHeldReady(event.sourceIds, event.pMsg);
-                    } else if (pendingPartSources.containsKey(event.pMsg)) {
-                        messagePartsHandler.addMessagePart(event.pMsg);
+                    } else if (messagePartsHandler.isRecordDriven()) {
+                        event.sourceIds.forEach(messagePartsHandler::addAcceptedSource);
+                    } else {
+                        var membership = pendingPartSources.get(event.pMsg);
+                        if (membership != null) {
+                            messagePartsHandler.addAcceptedPart(event.pMsg, membership);
+                        }
                     }
                     // A replayed raw event may already have handed its sources to a retained part or ready event.
                     continue;
@@ -1410,19 +1451,6 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
 
     public class CcatMessagePartsEventsListener implements MessagePartsEventsListener<M> {
         @Override
-        public void onDuplicateMessagePart(M original, M duplicate) {
-            if (ingressCoordinator == null || original == duplicate) {
-                return;
-            }
-            synchronized (pendingPartSources) {
-                Set<SourceId> originalSources = requirePartSources(original);
-                Set<SourceId> duplicateSources = requirePartSources(duplicate);
-                originalSources.addAll(duplicateSources);
-                pendingPartSources.remove(duplicate);
-            }
-        }
-
-        @Override
         public void onMessagePartsHandlingEvent(MessagePartsHandler.MessagePartsEventType type, List<M> parts) {
 
             List<Set<SourceId>> sources = new ArrayList<>();
@@ -1435,11 +1463,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             }
             if (type == MessagePartsHandler.MessagePartsEventType.COMPLETE) {
                 //The first part contains the id that we need to send to the provider
-                M message = parts.getFirst();
-                //we make sure that the filter will not process again the reassembled message
-                message.binheader = null;
-                message.body = parts.stream().map(m -> m.body).collect(Collectors.joining(""));
-                message.reassembledParts = parts.stream().map(m -> m.serial).collect(Collectors.toCollection(ArrayList::new));
+                M message = PendingMultipartRecovery.assemble(parts);
 
                 Set<SourceId> allSources = sources.stream().flatMap(Set::stream).collect(Collectors.toSet());
                 InEvent<M> event = new InEvent<>(message, null, message.onetwork, new Timestamp(message.ctstamp),
@@ -1462,11 +1486,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         private Set<SourceId> requirePartSources(M part) {
-            Set<SourceId> sources = pendingPartSources.get(part);
-            if (sources == null || sources.isEmpty()) {
+            var membership = pendingPartSources.get(part);
+            if (membership == null) {
                 throw new IllegalStateException("Reassembled part has no lifecycle source ownership");
             }
-            return sources;
+            return Set.of(membership.source());
         }
 
         @Override

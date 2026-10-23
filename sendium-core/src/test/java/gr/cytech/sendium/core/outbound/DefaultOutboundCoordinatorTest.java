@@ -103,7 +103,7 @@ class DefaultOutboundCoordinatorTest {
     }
 
     @Test
-    void successfulHandoffCleansUpInOrderAndLateCompletionCannotRecreateWork() throws Exception {
+    void retainsSourceUntilRequiredHandoff() throws Exception {
         try (var h = new Harness().start()) {
             var delivery = h.delivery();
             h.coordinator.complete(new OutboundWork.WorkId(UUID.randomUUID()), new CompletableFuture<>())
@@ -113,6 +113,8 @@ class DefaultOutboundCoordinatorTest {
             CompletionStage<Void> result = h.coordinator.complete(delivery.work.id(), handoff);
             assertThat(result.toCompletableFuture()).isNotDone();
             assertThat(h.pending.find(delivery.source())).isPresent();
+            verify(h.pending, never()).complete(any());
+            assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
             assertThat((Object) h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null))).isSameAs(result);
             fails(() -> h.coordinator.returnToRouted(delivery.work), INVALID_TRANSITION);
             handoff.complete(null);
@@ -154,7 +156,7 @@ class DefaultOutboundCoordinatorTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"routed", "pending", "selected", "forget"})
-    void cleanupFailureCanBeRetriedWithoutAnotherHandoffOrDispatch(String boundary) throws Exception {
+    void cleanupRetryDoesNotRepeatProviderAttempt(String boundary) throws Exception {
         try (var h = new Harness().start()) {
             var delivery = h.delivery();
             var failure = new IllegalStateException("cleanup failed");
@@ -167,6 +169,9 @@ class DefaultOutboundCoordinatorTest {
             }
             var result = h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null));
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
+            assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
+            assertThat(h.coordinator.selectToRouter(1)).isZero();
+            assertThat(h.coordinator.takeForRouting(Duration.ZERO)).isEmpty();
             fails(h.coordinator::close, UNAVAILABLE);
             doCallRealMethod().when(h.routed).complete(delivery.work.id());
             doCallRealMethod().when(h.pending).complete(delivery.selected.sources());
@@ -175,6 +180,11 @@ class DefaultOutboundCoordinatorTest {
             h.coordinator.complete(delivery.work.id(), new CompletableFuture<>()).toCompletableFuture().join();
             assertThat(h.pending.find(delivery.source())).isEmpty();
             verify(h.routed, never()).release(any());
+            verify(h.routed, times(1)).record(any());
+            verify(h.routed, times(boundary.equals("routed") ? 2 : 1)).complete(delivery.work.id());
+            verify(h.pending, times(boundary.equals("pending") ? 2 : 1)).complete(delivery.selected.sources());
+            verify(h.router, times(boundary.equals("selected") ? 2 : 1)).complete(delivery.selected.id());
+            verify(h.routed, times(boundary.equals("forget") ? 2 : 1)).forget(delivery.selected.id());
         }
     }
 
