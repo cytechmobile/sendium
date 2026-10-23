@@ -4,7 +4,7 @@
     <parent>
         <groupId>gr.cytech</groupId>
         <artifactId>sendium</artifactId>
-        <version>0.6.0</version> <!-- x-release-please-version -->
+        <version>0.6.1-SNAPSHOT</version> <!-- x-release-please-version -->
         <relativePath>../../pom.xml</relativePath>
     </parent>
     <artifactId>sendium-performance-harness</artifactId>
