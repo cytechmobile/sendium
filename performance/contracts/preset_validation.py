@@ -4,6 +4,8 @@ import ipaddress
 import math
 import re
 
+from application_runtime import runtime_mode, validate_native_settings
+
 
 def require(condition, message):
     if not condition:
@@ -16,6 +18,9 @@ def validate_preset(preset, workload_validator):
     workload = preset["workload"]
     workload_validator.validate(workload)
     aws, runtime, database = preset["aws"], preset["runtime"], preset["database"]
+    mode = runtime_mode(preset)
+    if mode == "native" or "native" in runtime:
+        validate_native_settings(preset)
     deployment, measurement, bounds = preset["deployment"], preset["measurement"], preset["bounds"]
     require(aws["regionEnvironmentVariable"] == "AWS_REGION", "AWS region must be explicitly supplied")
     require(set(aws["supportedArchitectures"]) == set(runtime["amiParameters"]), "AMI/architecture coverage differs")

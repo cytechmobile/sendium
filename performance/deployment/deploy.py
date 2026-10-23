@@ -19,6 +19,7 @@ from check_expiry import verify_expiry
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from preset_validation import validate_preset
+from application_runtime import runtime_mode
 from jsonschema import Draft202012Validator, ValidationError
 
 
@@ -65,6 +66,7 @@ def validate_plan(plan, preset):
     effective = json.loads(json.dumps(preset))
     effective["workload"].update(plan.get("workload", {}))
     validate_preset(effective, Draft202012Validator(read(HERE.parent / "contracts/run-config.schema.json")))
+    require(runtime_mode(effective) == "jvm", "Native application deployment is not enabled until its launcher is integrated")
     baseline = read(HERE.parent / "presets/aws-private-jvm-v1.json")
     require(effective["network"] == baseline["network"], "Preset network differs from the reviewed V1 template")
     require(effective["aws"]["burstableCreditMode"] == "standard", "V1 template requires Standard CPU credits")

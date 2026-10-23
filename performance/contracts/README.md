@@ -4,6 +4,33 @@ These contracts define the versioned configuration and result formats for the pe
 They describe JSON exchanged by orchestration, the harness, and reporting;
 they do not provision infrastructure or execute traffic.
 
+## Application runtime identity
+
+The effective preset records `runtime.applicationRuntime` as `jvm` (default) or
+`native`. The request normalizer accepts `application_runtime`; the Action choice
+will be exposed only after native build and launcher integration is complete.
+Until then, deployment rejects native requests before staging or provisioning.
+
+JVM application and harness manifests retain their existing fields. A native
+application manifest additionally requires `applicationRuntime: native` and a
+`nativeBuild` identity containing the schema version, target architecture, pinned
+UBI9/Mandrel builder image, actual Java 25 native-image compiler version and
+compatibility build arguments. These must match the normalized request. A JVM
+artifact cannot satisfy a native request, or vice versa; the harness remains JVM.
+
+The native archive has one executable at `native/application`, with an explicit
+executable mode and ELF64 architecture checked during unprivileged packaging.
+Artifact aggregation/orchestration validate manifests, sizes and SHA-256 values
+as data and never execute the native application. An ELF header check identifies
+the target format/architecture; it does not establish runtime-library compatibility
+or successful execution, which require the later node validation.
+
+Native runtime arguments use a separately validated heap configuration rather
+than copying JVM-specific garbage-collector options. JVM remains the default;
+the existing workload configuration and JSON measurement fields are unchanged.
+
+## Validation
+
 Validate both schemas and boundary examples with `python validate.py` from
 this directory after installing `requirements-dev.txt` in a development environment.
 After the Java report tests, also validate actual generated reports from the
