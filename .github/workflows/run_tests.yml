@@ -9,7 +9,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  classify:
+    # A release branch push is followed by a PR run; main always gets full CI.
+    if: >-
+      !(github.event_name == 'push' &&
+        github.actor == 'cytech-release-bot[bot]' &&
+        startsWith(github.ref, 'refs/heads/release-please--'))
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    outputs:
+      release-only: ${{ steps.classify.outputs.release-only }}
+    steps:
+      - name: Identify version-only release PR
+        id: classify
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            let releaseOnly = false;
+            if (pr && pr.user.login === 'cytech-release-bot[bot]' &&
+                pr.head.repo?.full_name === context.payload.repository.full_name &&
+                pr.head.ref.startsWith('release-please--') && pr.base.ref === 'main') {
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                ...context.repo,
+                pull_number: pr.number,
+                per_page: 100,
+              });
+              const poms = new Set([
+                'pom.xml', 'sendium-core/pom.xml', 'sendium-app/pom.xml',
+                'performance/harness/pom.xml',
+              ]);
+              releaseOnly = files.length > 0 && files.length === pr.changed_files && files.every(file => {
+                if (file.status !== 'modified' || !file.patch) return false;
+                if (file.filename === 'CHANGELOG.md') return true;
+                const changes = file.patch.split('\n').filter(line => /^[+-]/.test(line));
+                if (file.filename === '.release-please-manifest.json') {
+                  return changes.length > 0 && changes.every(line =>
+                    /^[+-]\s*"\.": "\d+\.\d+\.\d+(?:[-+][\w.-]+)?"\s*$/.test(line));
+                }
+                return poms.has(file.filename) && changes.length > 0 && changes.every(line =>
+                  /^[+-]\s*<version>\d+\.\d+\.\d+(?:[-+][\w.-]+)?<\/version>(?:\s*<!-- x-release-please-version -->)?\s*$/.test(line));
+              });
+            }
+            core.setOutput('release-only', String(releaseOnly));
+
   quick-start:
+    needs: classify
+    if: needs.classify.outputs.release-only != 'true'
     permissions:
       contents: read
     strategy:
@@ -23,6 +71,7 @@ jobs:
         run: sh tests/quick-start-test.sh
 
   tests:
+    needs: classify
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -68,12 +117,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Build quick-start test image
+        if: needs.classify.outputs.release-only != 'true'
         run: docker build -t sendium:quick-start-test -f sendium-app/src/main/docker/Dockerfile.jvm sendium-app
       - name: Test generated container startup
+        if: needs.classify.outputs.release-only != 'true'
         env:
           SENDIUM_TEST_IMAGE: sendium:quick-start-test
         run: sh tests/quick-start-test.sh
       - name: Test PostgreSQL restart behavior on JVM
+        if: needs.classify.outputs.release-only != 'true'
         env:
           SENDIUM_E2E_IMAGE: sendium:quick-start-test
           SENDIUM_DLR_POSTGRESQL_JDBC_URL: jdbc:postgresql://host.docker.internal:5432/sendium
