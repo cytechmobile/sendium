@@ -49,7 +49,7 @@ def staged():
             "preset": preset, "provenance": {"branch": "main", "applicationCommit": "ab" * 20, "harnessRevision": "cd" * 20,
                                            "workflowRunUrl": None},
             "artifacts": {name: {"key": "runs/gh-12345-1/inputs/common/" + name, "sha256": "ab" * 32, "size": 10}
-                          for name in ("application", "harness", "sendiumJre", "harnessJre", "rdsCa", "node", "transport", "sampler")}}
+                          for name in ("application", "harness", "sendiumJre", "harnessJre", "rdsCa", "node", "transport", "sampler", "applicationRuntime")}}
 
 
 def deployment_outputs():
@@ -61,11 +61,11 @@ def deployment_outputs():
 
 
 class DeploymentTests(unittest.TestCase):
-    def test_native_requests_cannot_stage_or_provision_before_launcher_integration(self):
+    def test_native_requests_require_verified_compiler_identity_before_staging(self):
         state = staged()
         state["preset"]["runtime"]["applicationRuntime"] = "native"
         aws = MemoryAws()
-        with self.assertRaisesRegex(deploy.DeploymentError, "Native application deployment is not enabled"):
+        with self.assertRaisesRegex(ValueError, "Native build identity fields mismatch"):
             deploy.stage(aws, state, state["preset"], Path("unused"))
         self.assertEqual(aws.calls, [])
         self.assertEqual(aws.uploads, [])
@@ -211,7 +211,7 @@ class DeploymentTests(unittest.TestCase):
             command = aws.calls[0][2]
             shell = command["parameters"]["commands"][0]
             self.assertIn("systemd-run", shell)
-            self.assertEqual(shell.count("sha256sum -c"), 3)
+            self.assertEqual(shell.count("sha256sum -c"), 4)
             self.assertNotIn("secret", shell.lower())
             self.assertNotIn("password", shell.lower())
             self.assertNotIn("-jar", shell)

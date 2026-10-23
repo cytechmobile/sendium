@@ -18,9 +18,18 @@ def matched_configuration(baseline, candidate):
         raise ValueError("This comparison requires delivery reports enabled")
     first, second = artifacts(baseline), artifacts(candidate)
     unchanged = ("harness", "sendiumJre", "harnessJre", "node", "transport", "sampler", "preset", "network", "runTemplate")
+    if "applicationRuntime" in first or "applicationRuntime" in second:
+        unchanged += ("applicationRuntime",)
     for name in unchanged:
         if name not in first or first[name] != second.get(name):
             raise ValueError("Comparison artifact differs: " + name)
+    before_application = baseline["configuration"]["application"]
+    after_application = candidate["configuration"]["application"]
+    if before_application.get("runtime", "jvm") != after_application.get("runtime", "jvm"):
+        raise ValueError("Application runtime differs; this application-revision comparison requires matching runtimes")
+    for field in ("nativeArguments", "nativeBuild"):
+        if before_application.get(field) != after_application.get(field):
+            raise ValueError("Application runtime setting differs: " + field)
     for field in ("jvmArguments", "connections", "dlrStorage"):
         if baseline["configuration"]["application"][field] != candidate["configuration"]["application"][field]:
             raise ValueError("Application runtime setting differs: " + field)

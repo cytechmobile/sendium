@@ -222,6 +222,14 @@ public final class ResultReport {
                 .append("Branch: `").append(text(provenance.path("branch").asText())).append("` · Application: `")
                 .append(provenance.path("applicationCommit").asText()).append("` · Harness: `").append(provenance.path("harnessRevision").asText()).append("`\n\n");
         var workload = root.path("configuration").path("workload");
+        var application = root.path("configuration").path("application");
+        out.append("Application runtime: **").append(text(application.path("runtime").asText("jvm")))
+                .append("** · Harness runtime: **jvm**\n\n");
+        if (application.has("nativeBuild")) {
+            out.append("Native builder: `").append(text(application.path("nativeBuild").path("builderImage").asText()))
+                    .append("`\n\nNative compiler: `").append(text(application.path("nativeBuild").path("compilerVersion").asText()))
+                    .append("`\n\n");
+        }
         out.append("Ingress: ").append(text(workload.path("ingressMode").asText())).append(" · DLR requested: ")
                 .append(workload.path("dlrEnabled").asBoolean()).append(" · Worker TPS: ")
                 .append(workload.path("workerTps").asLong() == 0 ? "unlimited (0)" : workload.path("workerTps").asText())

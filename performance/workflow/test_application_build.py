@@ -104,12 +104,12 @@ class ApplicationBuildTests(unittest.TestCase):
                     builder.build(request({"application_runtime": "native"}), checkout, "arm64", "25", machine="arm64", system="Linux")
             self.assertFalse(any(command[0] == "bash" for command in calls))
 
-    def test_workflow_uses_pinned_helper_without_exposing_native_execution_yet(self):
+    def test_workflow_uses_pinned_helper_and_exposes_native_runtime_choice(self):
         job = WORKFLOW["jobs"]["application"]
         build = next(step for step in job["steps"] if step.get("name") == "Build packaged application without AWS credentials")
         self.assertIn("control/performance/workflow/build_selected_application.py", build["run"])
         self.assertIn('"$BUILD_ARCHITECTURE"', build["run"])
-        self.assertNotIn("application_runtime", WORKFLOW["on"]["workflow_dispatch"]["inputs"])
+        self.assertEqual(WORKFLOW["on"]["workflow_dispatch"]["inputs"]["application_runtime"]["options"], ["jvm", "native"])
         self.assertNotIn("environment", job)
         self.assertEqual(job["permissions"], {"contents": "read"})
 

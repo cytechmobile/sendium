@@ -4,6 +4,12 @@ run-name: Performance · ${{ github.ref_name }} · ${{ inputs.ingress_mode }}
 on:
   workflow_dispatch:
     inputs:
+      application_runtime:
+        description: Sendium application runtime (harness always JVM)
+        type: choice
+        options: [jvm, native]
+        default: jvm
+        required: true
       ingress_mode:
         description: Ingress protocol
         type: choice

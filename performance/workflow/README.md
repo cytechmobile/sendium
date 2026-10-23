@@ -23,11 +23,12 @@ reviewers, with separate read-only and deletion-only roles. See
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
-allows 25 top-level dispatch inputs (checked 2026-10-16). All 11 required controls
+allows 25 top-level dispatch inputs (checked 2026-10-16). All 12 required controls
 therefore have individual fields; durations do not need a grouped string.
 
 | Input | Default | Validation |
 |---|---:|---|
+| `application_runtime` | `jvm` | `jvm` or `native`; harness remains JVM |
 | `ingress_mode` | `http` | `http` or `smpp` |
 | `sendium_instance_type` | `t4g.small` | EC2 type syntax; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
@@ -89,8 +90,21 @@ ELF validation, then incorporated into the application manifest. Failed builds
 cannot emit a successful build identity. Integration tests are not run as part of
 native compilation; DLR-inclusive execution is verified separately.
 
-The Action runtime selector remains hidden and native deployment remains rejected
-before staging until launcher integration is complete. The maintained harness uses `-Pperformance -pl
+Native deployment validates the selected build identity against the resolved EC2
+architecture before staging. The node checks the executable's ELF header and
+executable mode, then launches it directly with the preset's native heap arguments.
+It retains Java 25 for the configuration generator; the harness runs on Java in
+both modes. Sampling follows the actual application process ID. Reports include
+runtime/build provenance, and revision-comparison tooling rejects mixed runtimes.
+
+Local runtime verification used the x86_64 native build of application `ac105f6`
+on Amazon Linux 2023 with PostgreSQL 17. Short HTTP and SMPP cases each completed
+four measured messages and all four DLRs; readiness failure, sampling, configuration
+generation and redacted output collection also passed. This is startup/integration
+evidence. ARM64 compilation/execution, PostgreSQL TLS in native mode and full AWS
+performance workloads remain separate verification steps.
+
+The maintained harness uses `-Pperformance -pl
 performance/harness verify`, including its unit/socket tests. Ordinary repository
 CI and the local/AWS scenario checks remain separate acceptance evidence.
 

@@ -19,7 +19,7 @@ from check_expiry import verify_expiry
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from preset_validation import validate_preset
-from application_runtime import runtime_mode
+from application_runtime import runtime_mode, validate_native_build
 from jsonschema import Draft202012Validator, ValidationError
 
 
@@ -66,7 +66,11 @@ def validate_plan(plan, preset):
     effective = json.loads(json.dumps(preset))
     effective["workload"].update(plan.get("workload", {}))
     validate_preset(effective, Draft202012Validator(read(HERE.parent / "contracts/run-config.schema.json")))
-    require(runtime_mode(effective) == "jvm", "Native application deployment is not enabled until its launcher is integrated")
+    if runtime_mode(effective) == "native":
+        architecture = plan.get("resolution", {}).get("nodes", {}).get("sendium", {}).get("architecture")
+        validate_native_build(plan.get("nativeBuild"), effective, architecture)
+    else:
+        require("nativeBuild" not in plan, "JVM deployment cannot contain native build identity")
     baseline = read(HERE.parent / "presets/aws-private-jvm-v1.json")
     require(effective["network"] == baseline["network"], "Preset network differs from the reviewed V1 template")
     require(effective["aws"]["burstableCreditMode"] == "standard", "V1 template requires Standard CPU credits")
@@ -138,6 +142,7 @@ def stage(aws, plan, preset, directory):
     for name, path, key in (
             ("node", HERE / "node.py", "inputs/common/node.py"),
             ("transport", HERE / "aws_cli.py", "inputs/common/aws_cli.py"),
+            ("applicationRuntime", HERE.parent / "contracts/application_runtime.py", "inputs/common/application_runtime.py"),
             ("sampler", HERE.parent / "resources/sample_process.py", "inputs/common/sample_process.py"),
             ("network", HERE.parent / "infrastructure/network.yaml", "templates/network.yaml"),
             ("runTemplate", HERE.parent / "infrastructure/run.yaml", "templates/run.yaml")):
@@ -148,7 +153,8 @@ def stage(aws, plan, preset, directory):
     # No local artifact paths or credentials are needed after staging.
     return {key: plan[key] for key in ("schemaVersion", "region", "runIdentity", "runStack", "bootstrapStack", "repository", "provenance")} | {
         "bucket": bucket, "artifacts": descriptors, "preset": effective,
-        "createdAt": marker["createdAt"], "expiresAt": marker["expiresAt"], "resolution": plan.get("resolution", {})}
+        "createdAt": marker["createdAt"], "expiresAt": marker["expiresAt"], "resolution": plan.get("resolution", {}),
+        **({"nativeBuild": plan["nativeBuild"]} if runtime_mode(effective) == "native" else {})}
 
 
 def inspect_run(aws, staged):
@@ -224,6 +230,13 @@ def inspect_run(aws, staged):
 
 def documents(staged, result, instances, timeout):
     preset = staged["preset"]
+    mode = runtime_mode(preset)
+    application = {"runtime": mode, "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if mode == "jvm" else [],
+                   "connections": {"outgoingTransceivers": 1}, "dlrStorage": "postgresql"}
+    if mode == "native":
+        architecture = instances[result["SendiumInstanceId"]]["Architecture"]
+        validate_native_build(staged.get("nativeBuild"), preset, architecture)
+        application.update(nativeArguments=preset["runtime"]["native"]["arguments"], nativeBuild=staged["nativeBuild"])
     infrastructure = {"preset": preset["id"], "region": staged["region"], "database": {
         **preset["database"], "identifier": result["DatabaseIdentifier"], "availabilityZone": result["PrimaryAvailabilityZone"],
         "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"]}}
@@ -236,12 +249,13 @@ def documents(staged, result, instances, timeout):
                                   "blockDeviceMappings": instance["BlockDeviceMappings"],
                                   "rootVolume": instance["resolvedRootVolume"], "execution": staged.get("resolution", {}).get("executionKind", "ec2-jvm"),
                                   "creditMode": "standard" if instance["burstable"] else "not-applicable"}
+        if source == "sendium" and mode == "native":
+            infrastructure[source]["execution"] = infrastructure[source]["execution"].replace("-jvm", "-native")
     execution = {"schemaVersion": 1, "readinessTimeoutSeconds": preset["measurement"]["readinessTimeoutSeconds"],
                  "retentionSeconds": preset["measurement"]["retentionSeconds"], "intervalBudget": preset["measurement"]["intervalBudget"],
                  "context": {"provenance": {**staged["provenance"], "runIdentity": staged["runIdentity"],
                      "artifacts": [{"name": name, "sha256": artifact["sha256"]} for name, artifact in staged["artifacts"].items()]},
-                     "application": {"jvmArguments": preset["runtime"]["java"]["sendiumArguments"],
-                                     "connections": {"outgoingTransceivers": 1}, "dlrStorage": "postgresql"},
+                     "application": application,
                      "infrastructure": infrastructure, "diagnostics": ["lifecycle.jsonl", "process.log"]},
                  "resources": {"schemaVersion": 1, "sendiumSamples": None, "harnessSamples": None,
                                "cpuCredits": None, "sampleBudget": preset["measurement"]["sampleBudgetPerSource"]}, "sampling": None}
@@ -261,6 +275,11 @@ def documents(staged, result, instances, timeout):
             "jvmArguments": preset["runtime"]["java"][source + "Arguments"], "timeoutSeconds": timeout,
             "sampleIntervalSeconds": preset["measurement"]["sampleIntervalSeconds"], "sampleBudget": preset["measurement"]["sampleBudgetPerSource"]}
     result_documents["sendium"].update(databaseSecretArn=result["DatabaseCredentialsArn"], deployment=deployment, workload=preset["workload"])
+    result_documents["sendium"]["applicationRuntime"] = mode
+    if mode == "native":
+        result_documents["sendium"].update(nativeArguments=application["nativeArguments"],
+                                           architecture=application["nativeBuild"]["architecture"])
+        result_documents["sendium"]["jvmArguments"] = []
     result_documents["harness"]["execution"] = execution
     return result_documents
 
@@ -293,6 +312,7 @@ class Controller:
         for name, key, expected in (
                 ("node.py", staged["artifacts"]["node"]["key"], staged["artifacts"]["node"]["sha256"]),
                 ("aws_cli.py", staged["artifacts"]["transport"]["key"], staged["artifacts"]["transport"]["sha256"]),
+                ("application_runtime.py", staged["artifacts"]["applicationRuntime"]["key"], staged["artifacts"]["applicationRuntime"]["sha256"]),
                 ("node.json", prefix + "inputs/" + source + "/node.json", self.staged["nodeDigests"][source])):
             shell.append(shlex.join(["aws", "s3api", "get-object", "--region", staged["region"], "--bucket", staged["bucket"], "--key", key, name]) + " >/dev/null")
             shell.append("printf '%s  %s\\n' " + shlex.quote(expected) + " " + shlex.quote(name) + " | sha256sum -c - >/dev/null")

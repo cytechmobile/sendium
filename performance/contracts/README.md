@@ -7,12 +7,10 @@ they do not provision infrastructure or execute traffic.
 ## Application runtime identity
 
 The effective preset records `runtime.applicationRuntime` as `jvm` (default) or
-`native`. The request normalizer accepts `application_runtime`; the Action choice
-will be exposed only after native build and launcher integration is complete.
-Until then, deployment rejects native requests before staging or provisioning.
-The unprivileged application build helper already selects the requested build
-mode and produces native compiler metadata; Linux runtime execution validation is
-the next integration step.
+`native`. The Action's `application_runtime` choice selects the application build
+and launch mode. Deployment requires matching native compiler metadata and resolved
+node architecture before staging. The node launches the checked executable directly;
+the configuration generator and harness continue to use Java 25.
 
 JVM application and harness manifests retain their existing fields. A native
 application manifest additionally requires `applicationRuntime: native` and a
@@ -26,7 +24,12 @@ executable mode and ELF64 architecture checked during unprivileged packaging.
 Artifact aggregation/orchestration validate manifests, sizes and SHA-256 values
 as data and never execute the native application. An ELF header check identifies
 the target format/architecture; it does not establish runtime-library compatibility
-or successful execution, which require the later node validation.
+or successful execution, which require runtime validation.
+
+Results record `configuration.application.runtime` (absent means legacy JVM),
+`nativeArguments` and `nativeBuild` for measured native runs. Native reports have
+an empty `jvmArguments` array. Setup-failure reports can lack a compiler identity
+when no selected build reached deployment; they do not claim a measured observation.
 
 Native runtime arguments use a separately validated heap configuration rather
 than copying JVM-specific garbage-collector options. JVM remains the default;

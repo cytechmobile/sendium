@@ -163,7 +163,7 @@ class WorkflowTests(unittest.TestCase):
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 11)
+        self.assertEqual(len(inputs), 12)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)

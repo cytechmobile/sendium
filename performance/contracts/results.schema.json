@@ -23,7 +23,27 @@
       "required": ["workload", "application", "infrastructure"],
       "properties": {
         "workload": { "$ref": "run-config.schema.json" },
-        "application": { "type": "object", "required": ["jvmArguments", "connections", "dlrStorage"], "properties": { "jvmArguments": { "type": "array", "items": { "type": "string" } }, "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled"] } } },
+        "application": {
+          "type": "object", "required": ["jvmArguments", "connections", "dlrStorage"],
+          "properties": {
+            "runtime": { "enum": ["jvm", "native"] },
+            "jvmArguments": { "type": "array", "items": { "type": "string" } },
+            "nativeArguments": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^-Xm[sx][1-9][0-9]*[mg]$" } },
+            "nativeBuild": {
+              "type": "object", "additionalProperties": false,
+              "required": ["schemaVersion", "architecture", "builderImage", "compilerVersion", "buildArguments"],
+              "properties": {
+                "schemaVersion": { "const": 1 }, "architecture": { "enum": ["arm64", "x86_64"] },
+                "builderImage": { "type": "string", "pattern": "^quay\\.io/quarkus/ubi9-quarkus-mandrel-builder-image@sha256:[a-f0-9]{64}$" },
+                "compilerVersion": { "type": "string", "minLength": 1, "maxLength": 8192 },
+                "buildArguments": { "const": ["-march=compatibility"] }
+              }
+            },
+            "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled"] }
+          },
+          "allOf": [{ "if": { "required": ["runtime"], "properties": { "runtime": { "const": "native" } } },
+                      "then": { "required": ["nativeArguments"], "properties": { "jvmArguments": { "maxItems": 0 } } } }]
+        },
         "infrastructure": { "type": "object", "required": ["preset", "region", "sendium", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object" } } }
       }
     },

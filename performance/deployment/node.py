@@ -5,6 +5,7 @@ from collections import deque
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import shutil
 import signal
@@ -15,6 +16,8 @@ import threading
 import time
 
 from aws_cli import AwsCli
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
+from application_runtime import validate_runtime_mode, verify_elf_header
 
 
 ROOT = Path("/var/lib/sendium-benchmark")
@@ -91,7 +94,7 @@ def extract(archive, destination, maximum_bytes):
 
 
 class CapturedProcess:
-    """Drain JVM output into a bounded in-memory tail, not an unbounded root-disk log."""
+    """Drain process output into a bounded in-memory tail, not an unbounded root-disk log."""
     def __init__(self, command, cwd, environment=None):
         self.parts = deque()
         self.size = 0
@@ -135,6 +138,9 @@ class Node:
     def __init__(self, document, root=ROOT, install=INSTALL, aws=None):
         self.document = document
         self.source = document["source"]
+        self.mode = validate_runtime_mode(document.get("applicationRuntime", "jvm"))
+        if self.source == "harness" and self.mode != "jvm":
+            raise ValueError("The performance harness requires JVM execution")
         self.identity = document["runIdentity"]
         self.root = Path(root) / self.identity / self.source
         self.install = Path(install) / self.identity / self.source
@@ -177,7 +183,9 @@ class Node:
         if self.source == "sendium":
             budget = shutil.disk_usage(self.install).free - 512 * 1024 * 1024
             extract(self.root / "application", self.install / "application", budget)
-            if not (self.install / "application/quarkus-app/quarkus-run.jar").is_file():
+            if self.mode == "native":
+                self.native_application()
+            elif not (self.install / "application/quarkus-app/quarkus-run.jar").is_file():
                 raise ValueError("Application archive must contain the complete quarkus-app tree")
         (INSTALL / "rds-ca").mkdir(parents=True, exist_ok=True)
         shutil.copyfile(self.root / "rdsCa", INSTALL / "rds-ca/global-bundle.pem")
@@ -185,6 +193,24 @@ class Node:
 
     def java(self):
         return read(self.root / "runtime.json")["java"]
+
+    def native_application(self):
+        architecture = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x86_64"}.get(platform.machine().lower())
+        if architecture != self.document["architecture"]:
+            raise ValueError("Native application architecture differs from the runtime node")
+        executable = self.install / "application/native/application"
+        if (not executable.is_file() or executable.is_symlink()
+                or (self.install / "application").resolve() not in executable.resolve().parents or not executable.stat().st_mode & 0o100):
+            raise ValueError("Native archive must contain an executable native/application")
+        with executable.open("rb") as stream:
+            verify_elf_header(stream.read(64), self.document["architecture"])
+        return str(executable)
+
+    def application_command(self):
+        if self.mode == "native":
+            return [self.native_application(), *self.document["nativeArguments"]]
+        return [self.java(), *self.document["jvmArguments"], "-jar",
+                str(self.install / "application/quarkus-app/quarkus-run.jar")]
 
     def configure(self):
         secret = self.aws.call("secretsmanager", "get-secret-value", secret_id=self.document["databaseSecretArn"])
@@ -240,8 +266,7 @@ class Node:
             else:
                 environment = child_environment()
                 environment.update(read(self.root / "generated/sendium/environment.json"))
-                command = [self.java(), *self.document["jvmArguments"], "-jar",
-                           str(self.install / "application/quarkus-app/quarkus-run.jar")]
+                command = self.application_command()
                 private_values = tuple(self.secrets())
                 captured = CapturedProcess(command, self.root / "generated/sendium", environment)
                 sampler = subprocess.Popen(["python3", str(self.root / "sampler"), "--pid", str(captured.process.pid),
@@ -265,7 +290,7 @@ class Node:
             if exit_code is None:
                 exit_code = 1 if self.source == "harness" else 0
         finally:
-            # Finish remote sampling while the JVM still exists, retaining its final interval.
+            # Finish remote sampling while the application still exists, retaining its final interval.
             if sampler and sampler.poll() is None:
                 sampler.terminate()
                 try:

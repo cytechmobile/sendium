@@ -19,6 +19,10 @@ def require(condition, message):
 
 def runtime_mode(preset):
     mode = preset["runtime"].get("applicationRuntime", "jvm")
+    return validate_runtime_mode(mode)
+
+
+def validate_runtime_mode(mode):
     require(mode in RUNTIMES, "Application runtime must be jvm or native")
     return mode
 
