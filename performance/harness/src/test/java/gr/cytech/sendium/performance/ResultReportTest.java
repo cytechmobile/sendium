@@ -73,7 +73,13 @@ class ResultReportTest {
         assertEquals(0.2, json.at("/eventIntervals/3/rates/receiptsForwardedPerSecond").asDouble());
         assertEquals(1, json.at("/drain/unfinishedAccepted").asLong());
         assertEquals(0, ledger.retiredSize()); // Retired correlation eviction must not erase interval totals.
-        assertTrue(report.markdown().contains("One-minute event-time output and backlog"));
+        assertTrue(report.markdown().contains("Processing rates and outstanding work"));
+        assertTrue(report.markdown().contains("Messages reaching simulated provider/s"));
+        assertTrue(report.markdown().contains("Forwarded DLRs received by test tool/s"));
+        assertTrue(report.markdown().contains("Outstanding work at each interval's end"));
+        assertTrue(report.markdown().contains("not direct readings of Sendium's internal queues"));
+        assertTrue(report.markdown().contains("|drain|135.000|5.000|0.000|0.000|0.200|"));
+        assertTrue(report.markdown().contains("|drain|140.000|0|1|1|"));
         assertTrue(report.markdown().contains("Per-cohort latency percentiles"));
         assertTrue(report.markdown().contains("test\\|&lt;branch&gt;"));
         assertEquals("inconclusive", json.at("/validity/status").asText());

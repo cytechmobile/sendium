@@ -126,16 +126,32 @@ def fallback_markdown(report):
         for name, value in measurements["latencies"].items():
             lines.append("| " + text(name) + " | " + str(value["count"]) + " | " + " | ".join(number(value[key]) for key in ("p50Millis", "p95Millis", "p99Millis")) + " |")
     latencies("Overall latency", report["overall"])
-    lines += ["", "## One-minute submission cohorts", "", "| Start s | Observed s | Attempted | Accepted | Awaiting provider | Awaiting receipt |", "|---:|---:|---:|---:|---:|---:|"]
+    lines += ["", "## One-minute submission cohorts", "", "| Start s | Observed s | Attempted | Accepted | Accepted awaiting provider completion | Accepted awaiting forwarded DLR |", "|---:|---:|---:|---:|---:|---:|"]
     for cohort in report["cohortIntervals"]:
         lines.append("| " + " | ".join(number(value) for value in (cohort["startOffsetSeconds"], cohort["durationSeconds"],
             *(cohort["counts"][key] for key in ("attempted", "accepted", "acceptedAwaitingProvider", "acceptedAwaitingReceipt")))) + " |")
     for cohort in report["cohortIntervals"]:
         latencies("Cohort " + str(cohort["startOffsetSeconds"]) + "s", cohort)
-    lines += ["", "## One-minute event-time output", "", "| Phase | Start s | Duration s | Provider responses/s | Receipts/s |", "|---|---:|---:|---:|---:|"]
+    lines += ["", "## Processing rates and outstanding work", "",
+              "Rates describe events during each interval; outstanding counts describe its end. The provider is simulated, and forwarded DLRs are received by the test tool.",
+              "During drain, no new messages are generated; responses and DLRs for earlier messages can still arrive.", "",
+              "### Processing rates during each interval", "",
+              "| Phase | Start s | Duration s | Messages reaching simulated provider/s | Simulated provider responses completed/s | Forwarded DLRs received by test tool/s |",
+              "|---|---:|---:|---:|---:|---:|"]
     for interval in report["eventIntervals"]:
         lines.append("| " + text(interval["phase"]) + " | " + " | ".join(number(value) for value in (interval["startOffsetSeconds"],
-            interval["durationSeconds"], interval.get("rates", {}).get("providerResponsesPerSecond"), interval.get("rates", {}).get("receiptsForwardedPerSecond"))) + " |")
+            interval["durationSeconds"], *(interval.get("rates", {}).get(key) for key in
+            ("providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond")))) + " |")
+    lines += ["", "### Outstanding work at each interval's end", "",
+              "Counts are inferred from observed message progress, not direct readings of Sendium's internal queues. Provider response completion is simulator-side write completion, not proof of application consumption.", "",
+              "| Phase | Interval end s | Requests awaiting Sendium acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |",
+              "|---|---:|---:|---:|---:|"]
+    for interval in report["eventIntervals"]:
+        end = interval["startOffsetSeconds"] + interval["durationSeconds"]
+        counts = [interval.get("outstanding", {}).get(key) for key in
+                  ("pendingAdmission", "acceptedAwaitingProvider", "acceptedAwaitingReceipt")]
+        lines.append("| " + text(interval["phase"]) + " | " + number(end) + " | "
+                     + " | ".join("n/a" if value is None else str(value) for value in counts) + " |")
     lines.extend(["", "## Resources", "", "Available raw samples and resource summaries are in results.json; absent evidence is not zero utilization.",
                   "", "## Drain", "", "Duration seconds: " + number(report["drain"]["durationSeconds"]) + "; unfinished accepted: " + str(report["drain"]["unfinishedAccepted"])])
     return "\n".join(lines) + "\n"

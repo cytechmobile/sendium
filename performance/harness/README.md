@@ -434,6 +434,15 @@ Reports contain two complementary minute views:
   and accepted work awaiting provider/receipt completion. Warm-up events are
   excluded, including those arriving during measurement or drain.
 
+The Markdown report separates event-time data into **Processing rates during each
+interval** and **Outstanding work at each interval's end**. Rates identify the
+simulated provider and the test-tool DLR receiver; counts identify requests awaiting
+Sendium acknowledgement and accepted messages awaiting provider completion or a
+forwarded DLR. Outstanding counts are inferred from message progress, not direct
+measurements of Sendium queue sizes. Drain can contain responses/receipts for
+earlier messages even though generation has stopped. JSON field names and measured
+values are unchanged by this display separation.
+
 Overall sending/receipt rates exclude drain completions. Cohort provider/receipt
 rate fields are null rather than misleading completion-derived throughput.
 Partial minutes use their actual observation duration. Empty distributions/rates
