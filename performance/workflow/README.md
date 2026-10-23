@@ -74,8 +74,23 @@ types, invalid durations/delays and non-finite values fail preparation.
   executes neither the selected application nor a downloaded harness. Privileged
   orchestration likewise must not execute those artifacts.
 
-The application uses `-DskipTests -pl sendium-app -am package` to produce its
-packaged JVM distribution. The maintained harness uses `-Pperformance -pl
+The maintained `build_selected_application.py` helper validates the exact selected
+checkout, Linux runner architecture, Java 25 and absence of cloud credential
+providers before building. JVM mode uses `-DskipTests -pl sendium-app -am package`
+to produce the existing packaged distribution, without pulling a native compiler.
+
+The native build path uses the existing `native` Maven profile and the preset's
+digest-pinned UBI9/Mandrel Java 25 builder, on a matching native ARM64/x86_64 runner.
+It uses compatibility CPU flags and remote-container copying so Docker daemon
+paths need not match the Maven process's filesystem. The actual compiler version,
+builder digest, architecture and explicit compatibility arguments are recorded in
+`sendium-app/target/performance-native-build.json` after successful compilation and
+ELF validation, then incorporated into the application manifest. Failed builds
+cannot emit a successful build identity. Integration tests are not run as part of
+native compilation; DLR-inclusive execution is verified separately.
+
+The Action runtime selector remains hidden and native deployment remains rejected
+before staging until launcher integration is complete. The maintained harness uses `-Pperformance -pl
 performance/harness verify`, including its unit/socket tests. Ordinary repository
 CI and the local/AWS scenario checks remain separate acceptance evidence.
 

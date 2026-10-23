@@ -10,6 +10,9 @@ The effective preset records `runtime.applicationRuntime` as `jvm` (default) or
 `native`. The request normalizer accepts `application_runtime`; the Action choice
 will be exposed only after native build and launcher integration is complete.
 Until then, deployment rejects native requests before staging or provisioning.
+The unprivileged application build helper already selects the requested build
+mode and produces native compiler metadata; Linux runtime execution validation is
+the next integration step.
 
 JVM application and harness manifests retain their existing fields. A native
 application manifest additionally requires `applicationRuntime: native` and a
