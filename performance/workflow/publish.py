@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 import prepare
+from application_runtime import CREDENTIAL_ENVIRONMENT
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from semantics import validate_results
@@ -18,10 +19,7 @@ from semantics import validate_results
 
 HERE = Path(__file__).resolve().parent
 IMMUTABLE = ("provenance", "configuration", "overall", "cohortIntervals", "eventIntervals", "drain")
-PRIVILEGED_ENVIRONMENT = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
-                          "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
-                          "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-                          "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+PRIVILEGED_ENVIRONMENT = CREDENTIAL_ENVIRONMENT
 
 
 def read(path):

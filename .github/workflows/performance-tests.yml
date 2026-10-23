@@ -240,8 +240,13 @@ jobs:
       - name: Install preparation dependencies
         run: python -m pip install -r control/performance/contracts/requirements-dev.txt
       - name: Build packaged application without AWS credentials
-        working-directory: application
-        run: bash ./mvnw -B -ntp -DskipTests -pl sendium-app -am package
+        env:
+          BUILD_ARCHITECTURE: ${{ matrix.architecture }}
+          BUILD_JAVA_VERSION: ${{ steps.java.outputs.version }}
+        run: |
+          python control/performance/workflow/build_selected_application.py \
+            --request "$RUNNER_TEMP/request/request.json" --checkout application \
+            --architecture "$BUILD_ARCHITECTURE" --java-version "$BUILD_JAVA_VERSION"
       - name: Package complete application and record its identity
         env:
           BUILD_ARCHITECTURE: ${{ matrix.architecture }}
