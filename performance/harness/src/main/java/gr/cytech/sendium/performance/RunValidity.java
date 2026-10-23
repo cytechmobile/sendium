@@ -68,6 +68,10 @@ public final class RunValidity {
             ResourceEvidence evidence, ResourceEvidence.Window window) {
         List<Reason> reasons = new ArrayList<>();
         for (String issue : evidence.collectionIssues()) { inconclusive(reasons, "RESOURCE_COLLECTION_ISSUE", issue); }
+        if (evidence.database() != null) { reasons.addAll(evidence.database().reasons(context, window)); }
+        else if (context.infrastructure().path("database").path("resourceMetricsRequired").asBoolean(false)) {
+            inconclusive(reasons, "RDS_RESOURCES_MISSING", "Required RDS resource evidence is unavailable; absent metrics are not zero.");
+        }
         if (window == null) {
             inconclusive(reasons, "RESOURCE_WINDOW_MISSING", "The UTC measurement resource window is unavailable.");
         } else {

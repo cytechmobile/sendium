@@ -44,19 +44,91 @@
           "allOf": [{ "if": { "required": ["runtime"], "properties": { "runtime": { "const": "native" } } },
                       "then": { "required": ["nativeArguments"], "properties": { "jvmArguments": { "maxItems": 0 } } } }]
         },
-        "infrastructure": { "type": "object", "required": ["preset", "region", "sendium", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object" } } }
+        "infrastructure": { "type": "object", "required": ["preset", "region", "sendium", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object", "properties": { "resourceMetricsRequired": { "type": "boolean" }, "accountId": { "type": "string", "pattern": "^[0-9]{12}$" } } } } }
       }
     },
     "validity": { "type": "object", "required": ["status", "reasons"], "properties": { "status": { "enum": ["valid", "inconclusive", "failed"] }, "reasons": { "type": "array", "items": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1 }, "message": { "type": "string", "minLength": 1 } } } } } },
     "overall": { "$ref": "#/$defs/measurements" },
     "cohortIntervals": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/measurements" }, { "type": "object", "required": ["startOffsetSeconds", "endOffsetSeconds"], "properties": { "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "endOffsetSeconds": { "$ref": "#/$defs/nonnegative" } } }] } },
     "eventIntervals": { "type": "array", "items": { "type": "object", "required": ["phase", "startOffsetSeconds", "durationSeconds", "providerResponses", "receiptsForwarded"], "properties": { "phase": { "enum": ["measurement", "drain"] }, "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "durationSeconds": { "type": "number", "exclusiveMinimum": 0 }, "providerArrivals": { "$ref": "#/$defs/count" }, "providerResponses": { "$ref": "#/$defs/count" }, "receiptsGenerated": { "$ref": "#/$defs/count" }, "receiptsForwarded": { "$ref": "#/$defs/count" }, "outstanding": { "$ref": "#/$defs/backlog" }, "rates": { "$ref": "#/$defs/outputRates" } } } },
-    "resources": { "type": "object", "required": ["sendium", "harness", "cpuCredits"], "properties": { "sendium": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "harness": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "cpuCredits": { "type": "array", "items": { "$ref": "#/$defs/creditState" } } } },
+    "resources": { "type": "object", "required": ["sendium", "harness", "cpuCredits"], "properties": { "sendium": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "harness": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "cpuCredits": { "type": "array", "items": { "$ref": "#/$defs/creditState" } }, "database": { "$ref": "#/$defs/rdsEvidence" } } },
     "drain": { "type": "object", "required": ["durationSeconds", "timeoutReached", "unfinishedAccepted", "pendingAdmission"], "properties": { "durationSeconds": { "$ref": "#/$defs/nonnegative" }, "timeoutReached": { "type": "boolean" }, "unfinishedAccepted": { "$ref": "#/$defs/count" }, "pendingAdmission": { "$ref": "#/$defs/count" } } },
     "measurementMetadata": { "type": "object", "required": ["histogramAlgorithm", "histogramPrecision", "histogramOverflowCount", "duplicateDetectionHorizonSeconds", "limitations"], "properties": { "histogramAlgorithm": { "type": "string" }, "histogramPrecision": { "type": "object" }, "histogramOverflowCount": { "$ref": "#/$defs/count" }, "duplicateDetectionHorizonSeconds": { "$ref": "#/$defs/nonnegative" }, "inputTiming": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/inputTiming" }] }, "generatorPhases": { "type": "array", "items": { "type": "object", "properties": { "pacingMode": { "type": "string" }, "delayedByAtLeastOnePeriod": { "$ref": "#/$defs/count" }, "submissionLateness": { "$ref": "#/$defs/distribution" } } } }, "limitations": { "type": "array", "items": { "type": "string" } } } },
     "diagnostics": { "type": "array", "items": { "type": "string" } }
   },
   "$defs": {
+    "rdsEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "namespace", "runIdentity", "collectionStartedUtc", "database", "phases", "metrics", "collectionIssues"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "namespace": { "const": "AWS/RDS" },
+        "runIdentity": { "type": "string", "pattern": "^gh-[0-9]+-[0-9]+$" },
+        "collectionStartedUtc": { "type": "string", "format": "date-time" },
+        "database": {
+          "type": "object", "additionalProperties": false,
+          "required": ["identifier", "instanceClass", "partition", "region", "accountId", "repository", "runIdentity", "verified", "arn"],
+          "properties": {
+            "identifier": { "type": "string", "maxLength": 63, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+            "instanceClass": { "type": "string", "pattern": "^db\\.[a-z][a-z0-9]*\\.[a-z0-9]+$" },
+            "partition": { "enum": ["aws", "aws-cn", "aws-us-gov"] }, "region": { "type": "string", "minLength": 3, "maxLength": 32 },
+            "accountId": { "type": "string", "pattern": "^[0-9]{12}$" }, "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+            "runIdentity": { "type": "string", "pattern": "^gh-[0-9]+-[0-9]+$" }, "verified": { "type": "boolean" },
+            "arn": { "type": ["string", "null"] }
+          }
+        },
+        "phases": {
+          "type": "object", "additionalProperties": false, "required": ["warmup", "measurement", "drain"],
+          "properties": { "warmup": { "$ref": "#/$defs/rdsPhase" }, "measurement": { "$ref": "#/$defs/rdsPhase" }, "drain": { "$ref": "#/$defs/rdsPhase" } }
+        },
+        "metrics": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/rdsMetric" } },
+        "collectionIssues": { "$ref": "#/$defs/rdsIssues" }
+      }
+    },
+    "rdsPhase": { "type": "object", "additionalProperties": false, "required": ["start", "end"], "properties": { "start": { "type": "string", "format": "date-time" }, "end": { "type": "string", "format": "date-time" } } },
+    "rdsIssues": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$" } },
+    "rdsNumber": { "type": ["number", "null"], "minimum": 0, "maximum": 1e100 },
+    "rdsCoverage": {
+      "type": "object", "required": ["expectedBuckets", "completeBuckets", "missingBucketStarts"],
+      "properties": {
+        "expectedBuckets": { "type": "integer", "minimum": 0, "maximum": 1440 }, "completeBuckets": { "type": "integer", "minimum": 0, "maximum": 1440 },
+        "missingBucketStarts": { "type": "array", "maxItems": 1440, "items": { "type": "string", "format": "date-time" } }
+      }
+    },
+    "rdsPhaseSummary": {
+      "allOf": [{ "$ref": "#/$defs/rdsCoverage" }, { "type": "object", "required": ["containedBuckets", "boundaryBuckets", "statisticsBasis", "average", "minimum", "maximum", "sum"],
+        "properties": {
+          "containedBuckets": { "type": "integer", "minimum": 0, "maximum": 1440 }, "boundaryBuckets": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "statisticsBasis": { "const": "complete buckets fully contained in phase; averages weighted by CloudWatch SampleCount" },
+          "average": { "$ref": "#/$defs/rdsNumber" }, "minimum": { "$ref": "#/$defs/rdsNumber" }, "maximum": { "$ref": "#/$defs/rdsNumber" },
+          "sum": { "type": ["number", "null"], "minimum": 0, "maximum": 1e104 }
+        }
+      }]
+    },
+    "rdsMetric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "unit", "periodSeconds", "statistics", "applicable", "queryStart", "queryEnd", "datapoints", "attempts", "attemptIssues", "collectionIssues", "coverage", "summary"],
+      "properties": {
+        "name": { "enum": ["CPUUtilization", "FreeableMemory", "SwapUsage", "DatabaseConnections", "ReadIOPS", "WriteIOPS", "ReadThroughput", "WriteThroughput", "ReadLatency", "WriteLatency", "DiskQueueDepth", "FreeStorageSpace", "CPUCreditBalance", "CPUCreditUsage", "CPUSurplusCreditBalance", "CPUSurplusCreditsCharged"] },
+        "unit": { "enum": ["Percent", "Bytes", "Count", "Count/Second", "Bytes/Second", "Seconds"] }, "periodSeconds": { "enum": [60, 300] },
+        "statistics": { "enum": [["Average", "Minimum", "Maximum", "SampleCount"], ["Sum"]] }, "applicable": { "type": ["boolean", "null"] },
+        "queryStart": { "type": "string", "format": "date-time" }, "queryEnd": { "type": "string", "format": "date-time" },
+        "datapoints": { "type": "array", "maxItems": 1440, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["timestamp", "bucketEnd", "phases", "crossesPhaseBoundary", "average", "minimum", "maximum", "sampleCount", "sum"],
+          "properties": {
+            "timestamp": { "type": "string", "format": "date-time" }, "bucketEnd": { "type": "string", "format": "date-time" },
+            "phases": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["warmup", "measurement", "drain"] } },
+            "crossesPhaseBoundary": { "type": "boolean" }, "average": { "$ref": "#/$defs/rdsNumber" }, "minimum": { "$ref": "#/$defs/rdsNumber" },
+            "maximum": { "$ref": "#/$defs/rdsNumber" }, "sampleCount": { "$ref": "#/$defs/rdsNumber" }, "sum": { "$ref": "#/$defs/rdsNumber" }
+          }
+        } },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "attemptIssues": { "type": "array", "maxItems": 3, "items": { "type": "object", "additionalProperties": false, "required": ["attempt", "issues"], "properties": { "attempt": { "type": "integer", "minimum": 1, "maximum": 3 }, "issues": { "$ref": "#/$defs/rdsIssues" } } } },
+        "collectionIssues": { "$ref": "#/$defs/rdsIssues" },
+        "coverage": { "allOf": [{ "$ref": "#/$defs/rdsCoverage" }, { "type": "object", "required": ["phases"], "properties": { "phases": { "type": "object", "additionalProperties": false, "required": ["warmup", "measurement", "drain"], "properties": { "warmup": { "$ref": "#/$defs/rdsCoverage" }, "measurement": { "$ref": "#/$defs/rdsCoverage" }, "drain": { "$ref": "#/$defs/rdsCoverage" } } } } }] },
+        "summary": { "type": "object", "additionalProperties": false, "required": ["warmup", "measurement", "drain"], "properties": { "warmup": { "$ref": "#/$defs/rdsPhaseSummary" }, "measurement": { "$ref": "#/$defs/rdsPhaseSummary" }, "drain": { "$ref": "#/$defs/rdsPhaseSummary" } } }
+      }
+    },
     "inputTiming": {
       "type": "object",
       "required": ["dispatchBoundary", "dispatchesDuringMeasurement", "dispatchesDuringDrain", "submissionToDispatch", "seconds"],

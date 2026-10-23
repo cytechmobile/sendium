@@ -35,6 +35,33 @@ Native runtime arguments use a separately validated heap configuration rather
 than copying JVM-specific garbage-collector options. JVM remains the default;
 the existing workload configuration and JSON measurement fields are unchanged.
 
+## Standard RDS resource evidence
+
+Reports can include `resources.database` containing standard CloudWatch `AWS/RDS`
+metrics, the verified database identity, contiguous UTC warm-up/measurement/drain
+windows, units/statistics, and complete timestamped buckets. Each series records
+independently recomputed coverage and per-phase summaries; each point records its
+bucket end, overlapping phases and whether it crosses a phase boundary.
+
+Measurement-only averages, extrema and sums use **complete, fully contained
+buckets**. Averages are weighted by the returned CloudWatch sample counts. Crossing
+buckets are visible but excluded from phase-only statistics. Their whole values
+must not be prorated or described as exact phase measurements. Thus short phases
+can have observed coarse buckets but `null` statistics. Missing data is not zero.
+Read/write latency describes storage I/O, not SQL-query latency.
+
+`configuration.infrastructure.database.resourceMetricsRequired` enables required
+RDS coverage for a run. Missing/incomplete evidence yields an inconclusive resource
+reason. Wrong database/run/region/class identity or a mismatched measurement window
+requires a failed resource reason. Source time envelopes allow at most two
+microseconds of outward precision padding. The flag is optional for legacy/local
+reports; workflow activation is a separate integration step.
+
+The JVM importer is bounded and the Python semantic validator independently
+recomputes summaries, coverage and attribution. See the
+[resource evidence documentation](../resources/README.md#rds-report-import-summaries-and-coverage)
+for the optional offline `rdsMetrics` input and display-unit conversions.
+
 ## Validation
 
 Validate both schemas and boundary examples with `python validate.py` from

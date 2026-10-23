@@ -338,9 +338,74 @@ public final class ResultReport {
                     .append('|').append(credit.path("samples").size()).append("|\n");
         }
         if (root.path("resources").path("cpuCredits").isEmpty()) { out.append("\nNo EC2 credit observations supplied. Local verification does not require them; AWS runs require matching instance credit metadata.\n"); }
+        databaseResources(out, root);
         out.append("\n## Limitations\n\n");
         for (var limitation : root.path("measurementMetadata").path("limitations")) { out.append("- ").append(text(limitation.asText())).append('\n'); }
         return out.toString();
+    }
+
+    private static void databaseResources(StringBuilder out, ObjectNode root) {
+        var database = root.path("resources").path("database");
+        if (database.isMissingNode() && !root.path("configuration").path("infrastructure").path("database").path("resourceMetricsRequired").asBoolean(false)) { return; }
+        out.append("\n## Database resources (RDS)\n\n");
+        if (database.isMissingNode() || database.isNull()) {
+            out.append("RDS resource evidence is unavailable. Utilization is **n/a**, not zero.\n");
+            return;
+        }
+        out.append("Database: `").append(text(database.path("database").path("identifier").asText()))
+                .append("` · Ownership verified: ").append(database.path("database").path("verified").asBoolean()).append(".\n\n")
+                .append("Measurement statistics use only complete CloudWatch buckets fully contained in measurement. Averages are weighted by CloudWatch SampleCount. Boundary buckets are excluded from statistics and retained in the timeline; a short phase can have coverage but no phase-only statistics.\n\n")
+                .append("Most metrics use 60-second buckets; CPU credits use 300-second buckets. Storage I/O latency is not SQL-query latency. Freeable memory is not heap usage. One CPU credit represents one vCPU-minute. Missing evidence is never zero-filled.\n\n")
+                .append("| Metric | Unit | Period s | Avg | Min | Max | Sum | Measurement buckets complete/expected | Contained complete buckets | Boundary buckets |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for (var metric : database.path("metrics")) {
+            var summary = metric.path("summary").path("measurement");
+            String applicability = metric.path("applicable").isNull() ? "unknown" : metric.path("applicable").asBoolean() ? "" : "not applicable";
+            out.append('|').append(text(metric.path("name").asText())).append('|').append(databaseUnit(metric))
+                    .append('|').append(metric.path("periodSeconds").asInt());
+            for (String field : List.of("average", "minimum", "maximum", "sum")) { out.append('|').append(databaseValue(metric, summary.path(field))); }
+            out.append('|').append(applicability.isEmpty() ? summary.path("completeBuckets").asInt() + "/" + summary.path("expectedBuckets").asInt() : applicability)
+                    .append('|').append(summary.path("containedBuckets").asInt()).append('|').append(summary.path("boundaryBuckets").asInt()).append("|\n");
+        }
+        out.append("\n<details><summary>Database timeline — whole CloudWatch buckets</summary>\n\n")
+                .append("Buckets can overlap multiple phases or extend outside observation. Their values describe the entire bucket, not a prorated phase value. Full phase summaries, coverage and collection issues are in results.json.\n\n")
+                .append("| Metric | Bucket start UTC | Period s | Overlapping phases | Crosses phase boundary | Avg | Min | Max | Sum |\n|---|---|---:|---|---|---:|---:|---:|---:|\n");
+        int shown = 0, total = 0;
+        for (var metric : database.path("metrics")) {
+            total += metric.path("datapoints").size();
+            for (var point : metric.path("datapoints")) {
+                if (shown >= 240) { break; }
+                shown++;
+                List<String> phases = new java.util.ArrayList<>();
+                point.path("phases").forEach(phase -> phases.add(phase.asText()));
+                out.append('|').append(text(metric.path("name").asText())).append(" (").append(databaseUnit(metric)).append(")|")
+                        .append(text(point.path("timestamp").asText())).append('|').append(metric.path("periodSeconds").asInt())
+                        .append('|').append(text(String.join(", ", phases))).append('|').append(point.path("crossesPhaseBoundary").asBoolean());
+                for (String field : List.of("average", "minimum", "maximum", "sum")) { out.append('|').append(databaseValue(metric, point.path(field))); }
+                out.append("|\n");
+            }
+        }
+        if (shown < total) { out.append("\nShowing ").append(shown).append(" of ").append(total).append(" buckets; the complete timeline is in results.json.\n"); }
+        out.append("\n</details>\n");
+        for (var issue : database.path("collectionIssues")) { out.append("- Database collection: ").append(text(issue.asText())).append('\n'); }
+        for (var metric : database.path("metrics")) {
+            for (var issue : metric.path("collectionIssues")) { out.append("- ").append(text(metric.path("name").asText())).append(": ").append(text(issue.asText())).append('\n'); }
+        }
+    }
+
+    private static String databaseUnit(com.fasterxml.jackson.databind.JsonNode metric) {
+        return switch (metric.path("unit").asText()) {
+            case "Bytes" -> "MiB";
+            case "Bytes/Second" -> "MiB/s";
+            case "Seconds" -> "ms";
+            case "Percent" -> "%";
+            default -> metric.path("name").asText().contains("Credit") ? "credits" : text(metric.path("unit").asText());
+        };
+    }
+
+    private static String databaseValue(com.fasterxml.jackson.databind.JsonNode metric, com.fasterxml.jackson.databind.JsonNode value) {
+        if (!value.isNumber()) { return "n/a"; }
+        double scale = switch (metric.path("unit").asText()) { case "Bytes", "Bytes/Second" -> 1 / 1_048_576.0; case "Seconds" -> 1000; default -> 1; };
+        return String.format(Locale.ROOT, "%.3f", value.asDouble() * scale);
     }
 
     private static void resourceRow(StringBuilder out, String label, com.fasterxml.jackson.databind.JsonNode summary) {

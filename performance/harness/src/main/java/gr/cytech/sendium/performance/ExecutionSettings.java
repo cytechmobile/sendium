@@ -11,18 +11,21 @@ public record ExecutionSettings(int schemaVersion, int readinessTimeoutSeconds, 
         }
         if (resources == null) { resources = ResourceFiles.empty(); }
     }
-    public record ResourceFiles(int schemaVersion, String sendiumSamples, String harnessSamples, String cpuCredits, int sampleBudget) {
+    public record ResourceFiles(int schemaVersion, String sendiumSamples, String harnessSamples, String cpuCredits, int sampleBudget, String rdsMetrics) {
         public ResourceFiles {
             if (schemaVersion != 1 || sampleBudget < 1) { throw new IllegalArgumentException("Invalid resource inputs"); }
-            for (String value : new String[]{sendiumSamples, harnessSamples, cpuCredits}) {
+            for (String value : new String[]{sendiumSamples, harnessSamples, cpuCredits, rdsMetrics}) {
                 if (value != null && value.isBlank()) { throw new IllegalArgumentException("Empty resource input path"); }
             }
+        }
+        public ResourceFiles(int schemaVersion, String sendiumSamples, String harnessSamples, String cpuCredits, int sampleBudget) {
+            this(schemaVersion, sendiumSamples, harnessSamples, cpuCredits, sampleBudget, null);
         }
         public static ResourceFiles empty() { return new ResourceFiles(1, null, null, null, ResourceEvidence.DEFAULT_SAMPLE_BUDGET); }
         public ResourceEvidence load(Path base, Path localHarnessSamples) {
             return ResourceEvidence.loadAvailable(resolve(base, sendiumSamples),
                     localHarnessSamples == null ? resolve(base, harnessSamples) : localHarnessSamples,
-                    resolve(base, cpuCredits), sampleBudget);
+                    resolve(base, cpuCredits), resolve(base, rdsMetrics), sampleBudget);
         }
     }
     public record Sampling(String pythonExecutable, String agentPath, double intervalSeconds, int maxSamples) {
