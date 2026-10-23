@@ -28,6 +28,8 @@ def resolve(value, existing=False, maximum=False):
             return parameters[name]
         if name == "Artifacts":
             return bucket
+        if name == "ResultsArchive":
+            return "sendium-results-archive"
         if name == "GitHubOidc":
             return provider
         resource = TEMPLATE["Resources"][name]
@@ -44,6 +46,8 @@ def resolve(value, existing=False, maximum=False):
         assert attribute_name == "Arn"
         if resource == "Artifacts":
             return "arn:aws:s3:::" + bucket
+        if resource == "ResultsArchive":
+            return "arn:aws:s3:::" + reference(resource)
         kind = TEMPLATE["Resources"][resource]["Type"]
         if kind == "AWS::IAM::Role":
             return "arn:aws:iam::123456789012:role/" + reference(resource)
@@ -100,6 +104,33 @@ def network_creation_allowed(action, resource, context):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_results_archive_is_private_retained_and_has_no_expiration(self):
+        archive = TEMPLATE["Resources"]["ResultsArchive"]
+        self.assertEqual(archive["DeletionPolicy"], "Retain")
+        self.assertEqual(archive["UpdateReplacePolicy"], "Retain")
+        properties = archive["Properties"]
+        self.assertEqual(properties["VersioningConfiguration"]["Status"], "Enabled")
+        self.assertTrue(all(properties["PublicAccessBlockConfiguration"].values()))
+        self.assertNotIn("LifecycleConfiguration", properties)
+        self.assertEqual(properties["BucketEncryption"]["ServerSideEncryptionConfiguration"][0]
+                         ["ServerSideEncryptionByDefault"]["SSEAlgorithm"], "AES256")
+        policy = resolve(TEMPLATE["Resources"]["ResultsArchivePolicy"]["Properties"]["PolicyDocument"])
+        self.assertEqual(policy["Statement"][0]["Condition"], {"Bool": {"aws:SecureTransport": "false"}})
+
+    def test_archive_role_is_separate_from_run_cleanup_and_runtime_access(self):
+        statements = allowed("GitHubArchive", "s3:PutObject")
+        self.assertEqual([item["Resource"] for item in statements], ["arn:aws:s3:::sendium-results-archive/runs/*"])
+        for action in ("s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "secretsmanager:GetSecretValue", "ssm:SendCommand"):
+            self.assertFalse(allowed("GitHubArchive", action), action)
+        for role in ("GitHubCleanup", "ExpiryRole", "GitHubOrchestrator", "GitHubDiagnostics", "CloudFormationExecution"):
+            for document in policies(role):
+                self.assertNotIn("sendium-results-archive", json.dumps(document), role)
+        for existing in (False, True):
+            trust = resolve(TEMPLATE["Resources"]["GitHubArchive"]["Properties"]["AssumeRolePolicyDocument"], existing=existing)
+            conditions = trust["Statement"][0]["Condition"]["StringEquals"]
+            self.assertEqual(conditions["token.actions.githubusercontent.com:sub"],
+                             "repo:cytechmobile/sendium:environment:sendium-performance-recovery")
+
     def test_new_network_resources_require_request_tags_and_matching_account_region(self):
         context = {"aws:RequestTag/sendium:managed-by": "performance-tests",
                    "aws:RequestTag/sendium:repository": "cytechmobile/sendium", "aws:RequestedRegion": "eu-west-1"}

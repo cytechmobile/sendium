@@ -72,6 +72,8 @@ cancellation without opening an unreviewed path to creating benchmark resources.
 | Output | Consumer |
 |--------|----------|
 | `ArtifactBucketName` | Run-scoped private inputs, immutable bundles, SSM output and diagnostics |
+| `ResultsArchiveBucketName` | Permanent private results bucket, versioned and retained without automatic expiration |
+| `ArchiveRoleArn` | Separate archive upload/read role trusted only by the protected recovery environment |
 | `OrchestratorRoleArn` | Protected preflight/provision/control/cleanup jobs |
 | `DiagnosticsRoleArn` | Automatic post-run EC2/CloudWatch reads and output retrieval |
 | `CleanupRoleArn` | Automatic deletion-only cleanup of owned run stacks and temporary artifacts |
@@ -358,3 +360,21 @@ objects remain outside the run stack for explicit cleanup/lifecycle expiration.
 Deletion recovery for partial provisioning uses the deployment cleanup helper. A stack's expiry timestamp
 does not itself perform deletion; execution requires the installed expiry handler
 and matching live configuration. This template has only offline validation so far.
+### Permanent results storage
+
+Updating the bootstrap stack creates `ResultsArchiveBucketName` and `ArchiveRoleArn`.
+The archive is separate from `ArtifactBucketName`: temporary `runs/` expiration,
+owned-run cleanup and the expiry handler do not apply to permanent results.
+The bucket is private, requires TLS, uses S3-managed AES256 encryption, and has
+versioning enabled. It has no automatic expiration and is retained if the bootstrap
+stack is deleted or replaced. Historical versions also consume storage; operators
+can introduce an explicit retention policy later if needed.
+
+The archive role trusts only the configured GitHub recovery environment through
+OIDC. It can put/get objects under the archive's `runs/` prefix and inspect this
+bootstrap stack's outputs. It cannot delete objects, read temporary run inputs or
+database secrets, or execute SSM commands. Existing runtime, orchestration,
+diagnostics, cleanup and expiry policies do not grant archive access.
+
+This infrastructure prepares permanent storage; automatic packaging/upload is
+tracked in `living_docs/PerformanceResultsArchive.md` and is not enabled yet.

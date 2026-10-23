@@ -76,6 +76,67 @@ Rules:
         AssertDescription: Supply both expiry package key and checksum, or neither for initial bootstrap.
 
 Resources:
+  ResultsArchive:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      VersioningConfiguration: {Status: Enabled}
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - {Key: 'sendium:managed-by', Value: performance-bootstrap}
+        - Key: 'sendium:repository'
+          Value: !Sub '${RepositoryOwner}/${RepositoryName}'
+  ResultsArchivePolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref ResultsArchive
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RequireTls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt ResultsArchive.Arn, !Sub '${ResultsArchive.Arn}/*']
+            Condition: {Bool: {'aws:SecureTransport': 'false'}}
+  GitHubArchive:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-archive'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: !Ref OidcAudience
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositoryOwner}/${RepositoryName}:environment:${GitHubRecoveryEnvironment}'
+      Policies:
+        - PolicyName: ArchiveResultsOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub '${ResultsArchive.Arn}/runs/*'
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
   Artifacts:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -681,6 +742,12 @@ Resources:
       SourceAccount: !Ref AWS::AccountId
 
 Outputs:
+  ResultsArchiveBucketName:
+    Description: Permanent benchmark evidence; retained independently of temporary run cleanup.
+    Value: !Ref ResultsArchive
+  ArchiveRoleArn:
+    Description: Restricted upload role for the protected recovery environment.
+    Value: !GetAtt GitHubArchive.Arn
   ArtifactBucketName:
     Value: !Ref Artifacts
   OrchestratorRoleArn:
