@@ -125,6 +125,7 @@ recover in short bursts; they are not automatically discarded.
 | **Outstanding work at each minute's end** | Messages still awaiting Sendium's acknowledgement, accepted messages awaiting provider completion, and accepted messages awaiting a forwarded DLR. These counts come from observed progress; they are **not direct measurements of Sendium's internal queue sizes**. |
 | **Time to finish remaining work** | After generation stops, how long messages and receipts take to finish, whether the drain time limit is reached, and how much remains unfinished. |
 | **Resource usage** | CPU and resident memory (RSS) for Sendium and the test tool, host CPU/memory, and available EC2 CPU-credit observations. This helps distinguish application pressure from test-tool pressure. |
+| **RDS resources** | Database CPU, freeable memory, connections, free storage, read/write I/O and latency, queue depth, and applicable CPU credits. CloudWatch coverage and phase boundaries remain visible; storage latency is not SQL-query latency. |
 
 For example, a minute can contain 5,400 provider completions while 1,200 accepted
 messages are still awaiting completion at that minute's end. The first number is
@@ -155,3 +156,13 @@ measurement evidence, rather than silently treating missing data as zero.
 Detailed definitions are in the [harness documentation](harness/README.md) and
 [result contracts](contracts/README.md). The [reporting documentation](workflow/REPORTING.md)
 explains evidence collection, publication and cleanup.
+
+## Permanent results archive
+
+After publication, a separate job archives readable results, resource evidence
+(including RDS metrics), diagnostics, and a compressed bundle in a dedicated
+private S3 bucket. JVM/native and HTTP/SMPP runs share the same archive format;
+failed and inconclusive observations retain their original status. The job summary
+links to a permanent manifest with provenance and checksums. GitHub artifacts remain
+temporary convenience copies. See [archive setup, format and retrieval](workflow/ARCHIVE.md)
+for the required bootstrap update and `AWS_ARCHIVE_ROLE_ARN` configuration.

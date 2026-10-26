@@ -113,6 +113,85 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  archive:
+    name: Archive permanent performance evidence
+    needs: [validate, publish]
+    if: always() && needs.validate.result == 'success' && needs.publish.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: sendium-performance-recovery
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+      AWS_ARCHIVE_ROLE_ARN: ${{ vars.AWS_ARCHIVE_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/workflow/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-request
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-source
+      - name: Package original published evidence without AWS credentials
+        run: |
+          python control/performance/workflow/archive_package.py \
+            --request "$RUNNER_TEMP/archive-request/request.json" \
+            --source "$RUNNER_TEMP/archive-source" --output "$RUNNER_TEMP/archive-package"
+      - name: Assume restricted archive role
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ARCHIVE_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-archive-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 1800
+          unset-current-credentials: true
+      - name: Upload and verify permanent evidence
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/archive_upload.py \
+              --request "$RUNNER_TEMP/archive-request/request.json" \
+              --package "$RUNNER_TEMP/archive-package" --output "$RUNNER_TEMP/archive-outcome.json"
+      - name: Publish archive outcome
+        if: always()
+        shell: python
+        run: |
+          import html, json, os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "archive-outcome.json"
+          if not path.exists():
+              path.write_text(json.dumps({"schemaVersion": 1, "status": "failed", "exitCode": 1,
+                                          "issues": ["ARCHIVE_JOB_INCOMPLETE"]}) + "\n", encoding="utf-8")
+          outcome = json.loads(path.read_text(encoding="utf-8"))
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Permanent results archive\n\nStatus: **" + html.escape(outcome["status"]) + "**\n\n")
+              if outcome.get("location"):
+                  summary.write("Manifest: `" + html.escape(outcome["location"]) + "`\n")
+              for issue in outcome.get("issues", []):
+                  summary.write("- " + html.escape(issue) + "\n")
+      - name: Preserve archive outcome
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-archive-outcome-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-outcome.json
+          if-no-files-found: error
+          retention-days: 30
+
   aws-execution:
     name: Provision and execute private AWS benchmark
     needs: [validate, build-ready]

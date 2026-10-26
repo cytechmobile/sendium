@@ -377,5 +377,5 @@ bootstrap stack's outputs. It cannot delete objects, read temporary run inputs o
 database secrets, or execute SSM commands. Existing runtime, orchestration,
 diagnostics, cleanup and expiry policies do not grant archive access.
 
-This infrastructure prepares permanent storage. [Offline packaging](../workflow/ARCHIVE.md)
-is available; automatic workflow upload is not enabled yet.
+Configure the recovery environment's `AWS_ARCHIVE_ROLE_ARN` from `ArchiveRoleArn`
+to enable the workflow's permanent upload job. See [archival setup and retrieval](../workflow/ARCHIVE.md).
