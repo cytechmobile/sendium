@@ -14,7 +14,6 @@ import publish
 import test_prepare
 from aws_cli import AwsError
 import test_archive_package
-from test_prepare import WORKFLOW
 
 
 ROLE = "arn:aws:iam::123456789012:role/sendium-perf-archive"
@@ -186,7 +185,7 @@ class ArchiveUploadTests(unittest.TestCase):
             self.assertNotIn("private detail", path.read_text())
 
     def test_workflow_runs_after_publication_even_when_it_fails(self):
-        job = WORKFLOW["jobs"]["archive"]
+        job = test_prepare.WORKFLOW["jobs"]["archive"]
         self.assertEqual(job["needs"], ["validate", "publish"])
         self.assertIn("always()", job["if"])
         self.assertNotIn("needs.publish.result == 'success'", job["if"])
