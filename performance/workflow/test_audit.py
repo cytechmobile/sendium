@@ -33,15 +33,15 @@ def condition(expression, statuses):
 
 
 class PermissionAuditTests(unittest.TestCase):
-    def test_oidc_exists_only_on_the_three_protected_hosted_jobs(self):
+    def test_oidc_exists_only_on_protected_cloud_jobs(self):
         jobs = test_prepare.WORKFLOW["jobs"]
-        protected = {"aws-execution", "diagnostics", "cleanup"}
+        protected = {"aws-execution", "diagnostics", "cleanup", "archive"}
         for name, job in jobs.items():
             with self.subTest(job=name):
                 expected = {"contents": "read", **({"id-token": "write"} if name in protected else {})}
                 self.assertEqual(job["permissions"], expected)
                 environments = {"aws-execution": "sendium-performance", "diagnostics": "sendium-performance-recovery",
-                                "cleanup": "sendium-performance-recovery"}
+                                 "cleanup": "sendium-performance-recovery", "archive": "sendium-performance-recovery"}
                 self.assertEqual(job.get("environment"), environments.get(name))
                 self.assertNotIn("self-hosted", str(job["runs-on"]))
                 self.assertNotIn("secrets.", json.dumps(job))
@@ -74,7 +74,7 @@ class PermissionAuditTests(unittest.TestCase):
         self.assertFalse(condition(jobs["publish"]["if"], states))
 
     def test_output_uploads_exclude_private_worktrees_and_always_preserve_failures(self):
-        for name in ("aws-execution", "diagnostics", "cleanup", "publish"):
+        for name in ("aws-execution", "diagnostics", "cleanup", "publish", "archive"):
             uploads = [step for step in test_prepare.WORKFLOW["jobs"][name]["steps"] if "upload-artifact" in step.get("uses", "")]
             self.assertTrue(uploads)
             for upload in uploads:

@@ -1,12 +1,13 @@
 # Reporting, diagnostics and immediate cleanup
 
-The manual workflow finishes with three separate jobs:
+The manual workflow finishes with four separate jobs:
 
 ```text
 aws-execution (orchestration role)
     → diagnostics (read-only diagnostics role)
     → cleanup (dedicated deletion-only role)
     → publish (no environment, OIDC or AWS credentials)
+    → archive (dedicated archive upload/read role)
 ```
 
 Diagnostics and cleanup use `always()` after a validated request and an attempted
@@ -28,6 +29,7 @@ another human approval after the run. Configure these environment variables:
 | `AWS_BOOTSTRAP_STACK` | Same bootstrap stack name |
 | `AWS_DIAGNOSTICS_ROLE_ARN` | Bootstrap output `DiagnosticsRoleArn` |
 | `AWS_CLEANUP_ROLE_ARN` | Bootstrap output `CleanupRoleArn` |
+| `AWS_ARCHIVE_ROLE_ARN` | Bootstrap output `ArchiveRoleArn`; uploads only permanent evidence |
 
 Apply the updated bootstrap before running the updated workflow. Diagnostics is
 read-only, with EC2/CloudWatch reads, bootstrap outputs and `runs/*/outputs/*`
@@ -62,6 +64,22 @@ window means an explicit unavailable-window outcome, not an invented query.
 `performance-diagnostics-<runId>-<attempt>` preserves available CPU credits,
 diagnostic outcome and allowlisted retrieved files even if collection fails.
 The diagnostic job has a 15-minute bound.
+
+New AWS reports also require RDS evidence. Diagnostics collect the standard
+CloudWatch database metrics before cleanup and preserve `rds-metrics.json`.
+Publication renders the RDS summary and retains full raw and enriched JSON;
+missing/partial required values remain inconclusive rather than becoming zeros.
+
+## Permanent archive after publication
+
+The archive job runs after publication, including failed publication when an
+artifact is available. It packages public results before authentication, then uses
+the separate archive role in the recovery environment to upload only to the
+retained archive bucket. The publisher remains credential-free, and cleanup has
+already completed. The archive job's summary records its verified permanent
+manifest location or an explicit failure; its outcome artifact is separate from
+the benchmark's original workflow outcome and validity. See [ARCHIVE.md](ARCHIVE.md)
+for configuration, layout, checksums, retries and retrieval.
 
 ## Immediate cleanup
 
