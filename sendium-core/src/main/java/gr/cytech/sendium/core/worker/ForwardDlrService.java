@@ -26,7 +26,7 @@ import java.util.concurrent.Semaphore;
 public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
 
-    private static final int DUE_BATCH_SIZE = 100;
+    private static final int DUE_BATCH_SIZE = 500;
     private static final int MAX_IN_FLIGHT_PER_HOST = 10;
     private static final int MAX_ATTEMPTS = 10;
     private static final long RETRY_INTERVAL_MS = Duration.ofHours(1).toMillis();

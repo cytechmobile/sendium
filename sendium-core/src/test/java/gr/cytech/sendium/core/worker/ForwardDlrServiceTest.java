@@ -17,17 +17,23 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -59,12 +65,73 @@ class ForwardDlrServiceTest {
 
     @Test
     void schedulerUsesBoundedBatchAndDoesNothingWhenNoDeliveryIsDue() throws Exception {
-        when(dlrService.claimDueHttpDeliveries(100)).thenReturn(List.of());
+        when(dlrService.claimDueHttpDeliveries(500)).thenReturn(List.of());
 
         service.dispatchDueDeliveries();
 
-        verify(dlrService).claimDueHttpDeliveries(100);
+        verify(dlrService).claimDueHttpDeliveries(500);
         verifyNoInteractions(httpClient);
+    }
+
+    @Test
+    void largeBatchKeepsPerHostConcurrencyBoundedAndRetriesOnlyTheFailedCallback() throws Exception {
+        List<MessageState> deliveries = IntStream.range(0, 500).mapToObj(index -> {
+            var state = new MessageState("message-" + index, "account", "system", "source", "destination",
+                    "https://example.test/dlr?id=%s");
+            state.setStatus(MessageState.MessageStatus.DELIVERED);
+            state.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
+            state.setDeliveryAttemptCount(1);
+            return state;
+        }).toList();
+        when(dlrService.claimDueHttpDeliveries(500)).thenReturn(deliveries);
+        when(dlrService.completeDelivery(anyString(), eq(1))).thenReturn(true);
+        when(dlrService.retryDelivery(eq("message-42"), eq(1), eq("http_failure"), anyLong())).thenReturn(true);
+        HttpResponse<Void> success = mock(HttpResponse.class);
+        HttpResponse<Void> failure = mock(HttpResponse.class);
+        when(success.statusCode()).thenReturn(204);
+        when(failure.statusCode()).thenReturn(503);
+        var firstWave = new CountDownLatch(10);
+        var releaseCallbacks = new CountDownLatch(1);
+        var active = new AtomicInteger();
+        var peakActive = new AtomicInteger();
+        var started = new AtomicInteger();
+        when(httpClient.send(any(HttpRequest.class), anyBodyHandler())).thenAnswer(invocation -> {
+            int concurrent = active.incrementAndGet();
+            peakActive.accumulateAndGet(concurrent, Math::max);
+            started.incrementAndGet();
+            firstWave.countDown();
+            try {
+                assertThat(releaseCallbacks.await(10, TimeUnit.SECONDS)).isTrue();
+                HttpRequest request = invocation.getArgument(0);
+                return request.uri().getQuery().equals("id=message-42") ? failure : success;
+            } finally {
+                active.decrementAndGet();
+            }
+        });
+
+        try (var dispatcher = Executors.newSingleThreadExecutor()) {
+            var dispatched = dispatcher.submit(service::dispatchDueDeliveries);
+            try {
+                assertThat(firstWave.await(10, TimeUnit.SECONDS)).isTrue();
+                assertThat(started).hasValue(10);
+                assertThat(peakActive).hasValue(10);
+                assertThat(dispatched.isDone()).isFalse();
+            } finally {
+                releaseCallbacks.countDown();
+            }
+            dispatched.get(10, TimeUnit.SECONDS);
+        }
+
+        assertThat(started).hasValue(500);
+        assertThat(peakActive).hasValue(10);
+        assertThat(active).hasValue(0);
+        ArgumentCaptor<String> completed = ArgumentCaptor.forClass(String.class);
+        verify(dlrService, times(499)).completeDelivery(completed.capture(), eq(1));
+        assertThat(completed.getAllValues()).doesNotHaveDuplicates().doesNotContain("message-42");
+        assertThat(completed.getAllValues()).containsExactlyInAnyOrderElementsOf(
+                deliveries.stream().map(MessageState::getGatewayMsgId).filter(id -> !id.equals("message-42")).toList());
+        verify(dlrService).retryDelivery(eq("message-42"), eq(1), eq("http_failure"), anyLong());
+        verify(dlrService, never()).failDelivery(anyString(), anyInt(), anyString());
     }
 
     @Test
@@ -83,7 +150,7 @@ class ForwardDlrServiceTest {
         assertThat(request.getValue().timeout()).contains(java.time.Duration.ofSeconds(5));
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
         var order = inOrder(dlrService, httpClient);
-        order.verify(dlrService).claimDueHttpDeliveries(100);
+        order.verify(dlrService).claimDueHttpDeliveries(500);
         order.verify(httpClient).send(any(HttpRequest.class), anyBodyHandler());
     }
 
@@ -225,7 +292,7 @@ class ForwardDlrServiceTest {
 
     @Test
     void schedulerStorageFailureDoesNotSend() {
-        when(dlrService.claimDueHttpDeliveries(100)).thenThrow(new DlrStorageException("database unavailable"));
+        when(dlrService.claimDueHttpDeliveries(500)).thenThrow(new DlrStorageException("database unavailable"));
 
         service.dispatchDueDeliveries();
 
@@ -270,7 +337,7 @@ class ForwardDlrServiceTest {
     private void dueAttempt(MessageState due, int attempt) {
         MessageState started = dueState(due.getForwardDlrUrl());
         started.setDeliveryAttemptCount(attempt);
-        when(dlrService.claimDueHttpDeliveries(100)).thenReturn(List.of(started));
+        when(dlrService.claimDueHttpDeliveries(500)).thenReturn(List.of(started));
     }
 
     private MessageState dueState(String callbackUrl) {
