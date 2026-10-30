@@ -25,6 +25,69 @@ an `UP` `sendium-dlr-storage` check with `backend=postgresql`, and a provider bi
 PostgreSQL remains required even when message-level DLR is disabled. SMPP ingress
 connects when selected; optional local sampling must produce a baseline.
 
+### Target-aware execution
+
+An absent `benchmarkTarget` retains Sendium behavior. To select Kannel in prepared
+inputs, set `benchmarkTarget: "kannel"` in **all three** locations:
+
+- `execution.context.application` in the execution manifest.
+- `runtime-settings.json`.
+- `effective-configuration.json`.
+
+The runner rejects conflicting identities before starting listeners. Kannel
+supports HTTP ingress only; a Kannel/SMPP workload is rejected before creating
+the output directory. The configuration generator and local rehearsal selector
+still produce Sendium inputs; the local Kannel orchestration task will prepare
+these target-specific inputs.
+
+Kannel readiness uses the unauthenticated `/sendsms` endpoint: HTTP 403 with the
+exact body `Authorization failed for sendsms` (allowing surrounding whitespace),
+plus an authenticated bind observed by the shared provider. It sends no readiness
+SMS and does not impose Sendium's PostgreSQL health check. Kannel's current
+prepared-input contract supports `dlrStorage: "internal"`; choosing an external
+backend will require its own storage-readiness checks.
+
+Kannel application metadata requires:
+
+```json
+{
+  "benchmarkTarget": "kannel",
+  "runtime": "kannel",
+  "jvmArguments": [],
+  "connections": {"outgoingTransceivers": 1},
+  "dlrStorage": "internal",
+  "messageStore": "spool",
+  "source": {
+    "version": "1.4.5",
+    "archiveSha256": "f279606ea8317fd2c8fa6b0f591c084fdfa954612f1e7c9cb667a5f6b77387f3",
+    "patchArchiveSha256": "3d8d54e272699a5226368738ee0246c8873d152a63220f978ac149285895f5be",
+    "patches": [
+      "Update-bison-source-for-newer-version.patch",
+      "Fix-multiple-conflicting-defs-of-dispatch_to_wdp-wsp-push.patch"
+    ]
+  }
+}
+```
+
+Repeat the same `source`, `dlrStorage`, and `messageStore` in the public effective
+configuration; the runner checks them against execution metadata. Use
+`deployment.gatewayHost` instead of `deployment.sendiumHost` for Kannel.
+
+Kannel's `provenance.applicationCommit` is **null**: the source archive is not a
+Sendium Git commit. The harness revision and artifact checksums remain required
+provenance. Put gateway infrastructure under `infrastructure.kannel`, retaining
+`harness`, `preset`, `region`, and explicit `database` metadata. Do not include a
+`sendium` infrastructure node in a Kannel result. Sendium still requires its
+exact application commit and retains its JVM/native runtime contract.
+
+For Kannel resource imports, supply `resources.gatewaySamples` and leave
+`sendiumSamples` null. `gatewaySamples` can also be used for Sendium; supplying
+both paths is rejected. Reports and offline `finalize-report` use the selected
+target's resource key (`kannel` or `sendium`) for raw samples, summaries, process
+identity checks, and Markdown labels. Missing evidence remains inconclusive.
+The actual bearerbox/smsbox group sampler and local benchmark launcher are the
+next integration steps.
+
 Warm-up, measurement, and bounded drain then run automatically. Accounting is
 sealed, owned services stop, and JSON/Markdown reports are written. Atomically
 replaced state includes phase, harness PID, UTC measurement origin/duration, and

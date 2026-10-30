@@ -25,6 +25,11 @@ public final class BenchmarkRunner {
     public int run(Path inputs, Path executionFile, Path output) throws Exception {
         RunConfig config = HarnessMain.configurationMapper().readValue(inputs.resolve("run-config.json").toFile(), RunConfig.class);
         ExecutionSettings execution = mapper.readValue(executionFile.toFile(), ExecutionSettings.class);
+        BenchmarkTarget target = BenchmarkTarget.from(execution.context().application());
+        target.validateWorkload(config);
+        if (target == BenchmarkTarget.KANNEL && execution.resources().sendiumSamples() != null) {
+            throw new IllegalArgumentException("Use gatewaySamples for Kannel resource evidence");
+        }
         MessageLedger ledger = new MessageLedger(config, execution.context().provenance().runIdentity(), System::nanoTime,
                 TimeUnit.SECONDS.toNanos(execution.retentionSeconds()));
         output = output.toAbsolutePath().normalize();
@@ -47,7 +52,7 @@ public final class BenchmarkRunner {
                         : scenario.phase == Lifecycle.Phase.READINESS ? "SETUP_FAILED" : "EXECUTION_FAILED",
                         "Benchmark stopped during " + scenario.phase + " (" + exception.getClass().getSimpleName() + ").", RunValidity.Severity.FAILED));
             }
-            ResourceEvidence evidence = execution.resources().load(executionFile.toAbsolutePath().getParent(), scenario.localSamples);
+            ResourceEvidence evidence = execution.resources().load(executionFile.toAbsolutePath().getParent(), scenario.localSamples, target);
             ResourceEvidence.Window window = scenario.measurementStart == null || ledger.timeline() == null ? null
                     : new ResourceEvidence.Window(scenario.measurementStart, scenario.measurementStart.plusNanos(ledger.timeline().durationNanos()));
             List<RunValidity.Reason> observations = new ArrayList<>(scenario.observations);
@@ -84,6 +89,7 @@ public final class BenchmarkRunner {
         final ExecutionSettings execution;
         final Path base, inputs, output;
         final MessageLedger ledger;
+        final BenchmarkTarget target;
         final List<FixedRateGenerator.Statistics> statistics = new ArrayList<>();
         final List<RunValidity.Reason> observations = new ArrayList<>();
         Lifecycle.Phase phase = Lifecycle.Phase.READINESS;
@@ -100,6 +106,7 @@ public final class BenchmarkRunner {
 
         RunScenario(RunConfig config, ExecutionSettings execution, Path base, Path inputs, Path output, MessageLedger ledger) {
             this.config = config; this.execution = execution; this.base = base; this.inputs = inputs; this.output = output; this.ledger = ledger;
+            target = BenchmarkTarget.from(execution.context().application());
         }
 
         void phase(Lifecycle.Phase value) {
@@ -135,6 +142,15 @@ public final class BenchmarkRunner {
                     || !effective.path("workload").equals(mapper.valueToTree(config))) {
                 throw new IllegalArgumentException("Effective configuration does not match the workload");
             }
+            if (BenchmarkTarget.from(runtime) != target || BenchmarkTarget.from(effective) != target) {
+                throw new IllegalArgumentException("Benchmark target differs between runtime and public configuration");
+            }
+            if (target == BenchmarkTarget.KANNEL
+                    && (!effective.path("source").equals(execution.context().application().path("source"))
+                        || !effective.path("dlrStorage").asText().equals(execution.context().application().path("dlrStorage").asText())
+                        || !effective.path("messageStore").asText().equals(execution.context().application().path("messageStore").asText()))) {
+                throw new IllegalArgumentException("Kannel source or storage configuration differs from execution");
+            }
             execution.context().application().set("effectiveConfiguration", effective);
             execution.context().application().put("dlrStorage", effective.path("dlrStorage").asText());
             JsonNode deployment = effective.path("deployment");
@@ -142,7 +158,8 @@ public final class BenchmarkRunner {
             connections.put("outgoingTransceivers", 1);
             for (String key : List.of("ingressWindow", "outgoingWindow", "providerWindow")) { connections.set(key, deployment.path(key)); }
             execution.context().infrastructure().put("preset", effective.path("preset").asText());
-            execution.context().infrastructure().withObject("/sendium").set("host", deployment.path("sendiumHost"));
+            execution.context().infrastructure().withObject("/" + target.id())
+                    .set("host", deployment.path(target == BenchmarkTarget.SENDIUM ? "sendiumHost" : "gatewayHost"));
             execution.context().infrastructure().withObject("/harness").set("host", deployment.path("harnessHost"));
             deployment.path("database").properties().forEach(entry -> execution.context().infrastructure().withObject("/database").set(entry.getKey(), entry.getValue()));
             URI readiness = URI.create(runtime.path("readinessUri").asText());
@@ -153,16 +170,16 @@ public final class BenchmarkRunner {
             provider = new SmppProvider(config, mapper.treeToValue(runtime.path("provider"), ProviderSettings.class), ledger);
             provider.start();
             if (config.ingressMode().equals("http")) {
-                http = new HttpAdmissionClient(config, mapper.treeToValue(runtime.path("ingress"), HttpIngressSettings.class), ledger);
+                http = new HttpAdmissionClient(config, mapper.treeToValue(runtime.path("ingress"), HttpIngressSettings.class), ledger, target.httpProtocol());
                 if (config.dlrEnabled()) {
                     JsonNode callback = runtime.path("callbackReceiver");
                     receiver = new HttpReceiptReceiver(new InetSocketAddress(callback.path("host").asText(), callback.path("port").asInt()),
-                            callback.path("path").asText(), callback.path("threads").asInt(), callback.path("queueCapacity").asInt(), true, ledger);
+                            callback.path("path").asText(), callback.path("threads").asInt(), callback.path("queueCapacity").asInt(), true, ledger, target.httpProtocol());
                     receiver.start();
                 }
             } else { smpp = new SmppAdmissionClient(config, mapper.treeToValue(runtime.path("ingress"), SmppIngressSettings.class), ledger); }
             listenersReady = true;
-            state("READINESS", null, null); // Deployment can now start Sendium without an initial failed provider bind.
+            state("READINESS", null, null); // Deployment can now start the gateway without an initial failed provider bind.
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(execution.readinessTimeoutSeconds());
             boolean ready = false;
             HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(1)).followRedirects(HttpClient.Redirect.NEVER).build();
@@ -175,13 +192,7 @@ public final class BenchmarkRunner {
                         pending = client.sendAsync(HttpRequest.newBuilder(readiness).timeout(Duration.ofNanos(timeout)).GET().build(),
                                 HttpResponse.BodyHandlers.limiting(HttpResponse.BodyHandlers.ofString(), 65536));
                         var response = pending.get(timeout, TimeUnit.NANOSECONDS);
-                        JsonNode health = mapper.readTree(response.body());
-                        if (response.statusCode() == 200 && health.path("status").asText().equals("UP")) {
-                            for (JsonNode check : health.path("checks")) {
-                                if (check.path("name").asText().equals("sendium-dlr-storage") && check.path("status").asText().equals("UP")
-                                        && check.path("data").path("backend").asText().equals("postgresql")) { ready = true; }
-                            }
-                        }
+                        ready = target.ready(response.statusCode(), response.body(), mapper);
                         if (ready) { break; }
                     } catch (java.io.IOException | java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException ignored) {
                         if (pending != null) { pending.cancel(true); }
@@ -190,7 +201,7 @@ public final class BenchmarkRunner {
                 }
             } finally { client.shutdownNow(); }
             if (!ready || !provider.awaitBound(Duration.ofNanos(Math.max(1, deadline - System.nanoTime())))) {
-                throw new IllegalStateException("Application/database/provider readiness failed");
+                throw new IllegalStateException("Gateway/storage/provider readiness failed");
             }
             if (smpp != null) { smpp.connect(); }
             if (execution.sampling() != null) {

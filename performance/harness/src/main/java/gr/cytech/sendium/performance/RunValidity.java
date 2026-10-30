@@ -78,7 +78,7 @@ public final class RunValidity {
             if (window.nanos() != observedNanos) {
                 failed(reasons, "RESOURCE_WINDOW_MISMATCH", "Resource and workload observation durations disagree.");
             }
-            checkSamples("sendium", evidence.sendium(), window, context, reasons);
+            checkSamples(BenchmarkTarget.from(context.application()).id(), evidence.sendium(), window, context, reasons);
             checkSamples("harness", evidence.harness(), window, context, reasons);
             if (!"local".equals(context.infrastructure().path("region").asText())) {
                 checkCredits(evidence, context, window, reasons);
@@ -181,7 +181,7 @@ public final class RunValidity {
     }
 
     private static void checkCredits(ResourceEvidence evidence, ResultReport.Context context, ResourceEvidence.Window window, List<Reason> reasons) {
-        for (String source : List.of("sendium", "harness")) {
+        for (String source : List.of(BenchmarkTarget.from(context.application()).id(), "harness")) {
             String expectedId = context.infrastructure().path(source).path("instanceId").asText();
             var matching = evidence.cpuCredits().stream().filter(credit -> source.equals(credit.source())).toList();
             if (expectedId.isBlank() || matching.size() != 1) {
