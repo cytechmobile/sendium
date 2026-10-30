@@ -17,7 +17,7 @@ import build_application
 import compare_load
 import rehearse
 from public_artifacts import redact_known
-from scenarios import DEFAULT, LOAD, select
+from scenarios import DEFAULT, LOAD, select, workload_overrides
 
 sys.path.insert(0, str(rehearse.ROOT / "performance/deployment"))
 from backend import LocalAws
@@ -25,6 +25,29 @@ from aws_cli import AwsError
 
 
 class LocalBoundaryTests(unittest.TestCase):
+    def test_modeled_rds_identity_tags_and_metrics_satisfy_the_unchanged_read_only_verifier(self):
+        identity = "gh-12345-1"
+        name = "local-perf-run-" + identity
+        tags = [{"Key": key, "Value": value} for key, value in {
+            "sendium:managed-by": "performance-tests", "sendium:repository": "cytechmobile/sendium", "sendium:run-identity": identity}.items()]
+        lab = SimpleNamespace(simulation={}, calls=[], roots={identity: {"name": name, "Tags": tags, "dbVersion": "17.0"}}, real=Mock())
+        aws = LocalAws(lab, identity, "diagnostics")
+        sys.path.insert(0, str(rehearse.ROOT / "performance/resources"))
+        from collect_rds_metrics import verify_database
+        database = {"identifier": name, "instanceClass": "db.local.small", "partition": "aws", "region": "local",
+                    "accountId": "000000000000", "repository": "cytechmobile/sendium", "runIdentity": identity}
+        self.assertEqual("arn:aws:rds:local:000000000000:db:" + name, verify_database(aws, database))
+        with self.assertRaises(ValueError):
+            verify_database(aws, {**database, "repository": "other/repository"})
+        response = aws.call("cloudwatch", "get-metric-statistics", namespace="AWS/RDS", metric_name="CPUUtilization",
+                            dimensions=[{"Name": "DBInstanceIdentifier", "Value": name}], start_time="2026-10-30T08:00:00Z",
+                            end_time="2026-10-30T08:02:00Z", period=60, statistics=["Average", "Minimum", "Maximum", "SampleCount"])
+        self.assertEqual(2, len(response["Datapoints"]))
+        self.assertEqual("Percent", response["Datapoints"][0]["Unit"])
+        with self.assertRaises(AwsError):
+            aws.call("cloudwatch", "get-metric-statistics", namespace="AWS/RDS", dimensions=[])
+        lab.real.call.assert_not_called()
+
     def test_application_overlay_preserves_the_base_controller_recovery_version(self):
         original = b'context = {"ref": "refs/heads/local-rehearsal", "applicationCommit": lab.source["baseCommit"]}\nlegacy_recovery_api()\n'
         updated = build_application.application_provenance(original)
@@ -112,6 +135,64 @@ class LocalBoundaryTests(unittest.TestCase):
         for invalid in ("", "http", "no-dlr", "load,http-no-dlr"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 select(invalid)
+
+    def test_kannel_defaults_to_http_dlr_and_rejects_smpp_before_docker_execution(self):
+        self.assertEqual(select("load", "kannel"), ("http-dlr",))
+        self.assertEqual(select("http-dlr,http-no-dlr", "kannel"), ("http-dlr", "http-no-dlr"))
+        with patch.object(sys, "argv", ["rehearse.py", "--benchmark-target", "kannel", "--scenarios", "smpp-dlr"]), \
+                patch("rehearse.call") as docker, patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as error:
+                rehearse.main()
+            self.assertEqual(2, error.exception.code)
+            docker.assert_not_called()
+
+    def test_shared_local_phase_overrides_are_bounded_by_the_preset(self):
+        preset = json.loads((rehearse.ROOT / "performance/presets/aws-private-jvm-v1.json").read_text())
+        self.assertEqual({"warmup_seconds": 0, "measurement_seconds": 65},
+                         workload_overrides(SimpleNamespace(warmup_seconds=0, measurement_seconds=65), preset))
+        for field, value in (("warmup_seconds", 601), ("measurement_seconds", 0), ("worker_tps", -1)):
+            with self.assertRaises(ValueError):
+                workload_overrides(SimpleNamespace(**{field: value}), preset)
+
+    def test_wrong_target_resume_does_not_clean_up_the_original_session(self):
+        session = "12345-abcdef"
+        original = {"Config": {"Labels": {"sendium.local.session": session, "sendium.benchmark.target": "kannel"}}}
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(sys, "argv", ["rehearse.py", "--resume-session", session, "--skip-build", "--output", str(Path(temporary) / "new")]), \
+                patch("rehearse.call", return_value=subprocess.CompletedProcess([], 0, stdout=json.dumps([original]))), \
+                patch("rehearse.clean_session") as cleanup:
+            with self.assertRaisesRegex(SystemExit, "original benchmark target"):
+                rehearse.main()
+            cleanup.assert_not_called()
+
+    def test_cancelling_resume_before_ownership_verification_cannot_stop_or_delete_the_session(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(sys, "argv", ["rehearse.py", "--resume-session", "12345-abcdef", "--skip-build", "--output", str(Path(temporary) / "new")]), \
+                patch("rehearse.call", side_effect=KeyboardInterrupt) as docker, patch("rehearse.clean_session") as cleanup:
+            self.assertEqual(130, rehearse.main())
+            self.assertEqual(["inspect", "sendium-local-control-12345-abcdef"], docker.call_args_list[0].args[0])
+            self.assertEqual(1, docker.call_count)
+            cleanup.assert_not_called()
+
+    def test_kannel_context_omits_application_sources_and_generated_private_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "performance/harness/src").mkdir(parents=True)
+            (root / "performance/harness/pom.xml").write_text("<project/>")
+            (root / "pom.xml").write_text("<project/>"); (root / "mvnw").write_text("wrapper")
+            (root / "performance/kannel/smoke-results/private").mkdir(parents=True)
+            (root / "performance/kannel/smoke-results/private/runtime.json").write_text("private-password")
+            (root / "performance/kannel/private-runtime.json").write_text("private-password")
+            (root / "performance/kannel/benchmark.py").write_text("controller")
+            (root / "sendium-app/src").mkdir(parents=True)
+            (root / "sendium-app/src/unrelated").write_text("application")
+            with patch("rehearse.ROOT", root), patch("rehearse.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="ab" * 20)):
+                data = rehearse.context("kannel")
+            with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+                self.assertFalse(any(name.startswith("sendium-app/") or "smoke-results" in name for name in archive.getnames()))
+                self.assertNotIn("performance/kannel/private-runtime.json", archive.getnames())
+                self.assertIn("performance/kannel/benchmark.py", archive.getnames())
+                self.assertEqual("local-working-tree", json.load(archive.extractfile("source-context.json"))["sourceMode"])
 
     def test_failed_rehearsal_exports_redact_known_values_without_logging_them(self):
         with tempfile.TemporaryDirectory() as directory:

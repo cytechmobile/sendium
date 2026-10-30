@@ -36,6 +36,18 @@ class ResultReportTest {
     }
 
     @Test
+    void localModeledDataLimitationsRemainVisibleInStandaloneJsonAndMarkdown() {
+        var context = context();
+        String limitation = "RDS resource series are deterministic local fixtures, not observed database utilization.";
+        context.infrastructure().withObject("/resolution/localRehearsal").putArray("limitations").add(limitation);
+        var config = config(true);
+        var ledger = ledger(config); ledger.freeze();
+        var report = writer.build(config, ledger, context, List.of(), false);
+        assertTrue(report.json().at("/measurementMetadata/limitations").toString().contains(limitation));
+        assertTrue(report.markdown().contains(limitation));
+    }
+
+    @Test
     void cohortsRetainDrainOutcomesWhileThroughputUsesTheActualEventWindow() throws Exception {
         RunConfig config = config(true);
         MessageLedger ledger = ledger(config);

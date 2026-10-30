@@ -21,8 +21,33 @@ FROM eclipse-temurin:25-jre AS provider
 COPY --from=build /opt/probe /opt/probe
 CMD ["java", "-cp", "/opt/probe/harness.jar:/opt/probe", "KannelBindProbe"]
 
+FROM provider AS benchmark-harness
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+COPY source-context.json /opt/probe/source-context.json
+COPY performance/resources/sample_process.py /opt/probe/sample_process.py
+COPY performance/kannel/metadata.py /opt/probe/metadata.py
+RUN python3 /opt/probe/metadata.py harness
+CMD ["java", "-Xms512m", "-Xmx512m", "-XX:+UseG1GC", "-jar", "/opt/probe/harness.jar", "run", "/probe/inputs", "/probe/execution.json", "/probe/initial"]
+
 FROM ${KANNEL_BASE_IMAGE} AS gateway
 RUN dnf install -y --setopt=install_weak_deps=False python3 && dnf clean all
 COPY performance/kannel/gateway.py /opt/probe/gateway.py
 COPY performance/resources/sample_process.py /opt/probe/sample_process.py
+COPY performance/kannel/metadata.py /opt/probe/metadata.py
+COPY performance/kannel/postgresql_probe.py /opt/probe/postgresql_probe.py
+RUN python3 /opt/probe/metadata.py gateway
 CMD ["python3", "/opt/probe/gateway.py"]
+
+FROM python:3.13-slim AS control
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY performance/contracts performance/contracts
+RUN python -m pip install --no-cache-dir -r performance/contracts/requirements-dev.txt
+COPY performance/presets performance/presets
+COPY performance/resources/sample_process.py performance/resources/sample_process.py
+COPY performance/local/scenarios.py performance/local/scenarios.py
+COPY performance/local/tls.py performance/local/tls.py
+COPY performance/kannel performance/kannel
+COPY source-context.json /opt/probe/source-context.json
+ENV PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python", "/workspace/performance/kannel/benchmark.py"]

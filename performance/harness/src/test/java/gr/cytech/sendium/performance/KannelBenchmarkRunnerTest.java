@@ -24,9 +24,18 @@ class KannelBenchmarkRunnerTest {
     private RunConfig config(String ingress) { return new RunConfig(1, ingress, 1, 0, 0, 1, 0, false, 0, 0, 1000, 10, 10); }
 
     private Path execution() throws Exception {
+        return execution(false);
+    }
+
+    private Path execution(boolean postgres) throws Exception {
         Path path = directory.resolve("execution.json");
+        var context = KannelFixtures.context("runner-kannel");
+        if (postgres) {
+            context.application().put("dlrStorage", "postgresql");
+            context.infrastructure().withObject("/database").put("provisioned", true).put("engine", "postgresql").put("sslMode", "verify-full");
+        }
         mapper.writeValue(path.toFile(), new ExecutionSettings(1, 5, 30, 256,
-                KannelFixtures.context("runner-kannel"), null, null));
+                new ResultReport.Context(context.provenance(), context.application(), context.infrastructure(), context.diagnostics()), null, null));
         return path;
     }
 
@@ -51,10 +60,12 @@ class KannelBenchmarkRunnerTest {
 
     @Test
     void runnerRequiresProviderBindAndUsesKannelReadinessWithoutAFalsePostgresqlDependency() throws Exception {
+        var submissions = new java.util.concurrent.atomic.AtomicInteger();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 10);
         server.createContext("/sendsms", exchange -> {
             try (exchange) {
                 boolean readiness = exchange.getRequestURI().getRawQuery() == null;
+                if (!readiness) { submissions.incrementAndGet(); }
                 byte[] body = (readiness ? "Authorization failed for sendsms" : "Temporal failure, try again later.")
                         .getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(readiness ? 403 : 503, body.length);
@@ -68,7 +79,16 @@ class KannelBenchmarkRunnerTest {
         var client = new DefaultSmppClient(group);
         try (var executor = Executors.newSingleThreadExecutor()) {
             Path inputs = inputs(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/sendsms"), port, "kannel");
-            Path execution = execution();
+            var runtime = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(inputs.resolve("runtime-settings.json").toFile());
+            runtime.put("gatewayReadinessFile", "gateway-ready.json");
+            mapper.writeValue(inputs.resolve("runtime-settings.json").toFile(), runtime);
+            var effective = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(inputs.resolve("effective-configuration.json").toFile());
+            effective.put("dlrStorage", "postgresql");
+            mapper.writeValue(inputs.resolve("effective-configuration.json").toFile(), effective);
+            Path execution = execution(true);
+            var awsExecution = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(execution.toFile());
+            ((com.fasterxml.jackson.databind.node.ObjectNode) awsExecution.at("/context/infrastructure")).put("region", "eu-west-1");
+            mapper.writeValue(execution.toFile(), awsExecution);
             Path output = directory.resolve("report");
             var run = executor.submit(() -> HarnessMain.run(new String[]{"run", inputs.toString(), execution.toString(), output.toString()}));
             try {
@@ -82,7 +102,20 @@ class KannelBenchmarkRunnerTest {
                 settings.setHost("127.0.0.1"); settings.setPort(port); settings.setBindTimeout(2000);
                 settings.getLoggingOptions().setLogPdu(false); settings.getLoggingOptions().setLogBytes(false);
                 var session = client.bind(settings, new DefaultSmppSessionHandler());
-                try { assertEquals(0, run.get(10, TimeUnit.SECONDS)); }
+                try {
+                    Thread.sleep(100);
+                    assertEquals(0, submissions.get(), "HTTP/bind readiness must wait for the gateway sampler baseline");
+                    assertEquals("READINESS", mapper.readTree(output.resolve("state.json").toFile()).path("phase").asText());
+                    mapper.writeValue(directory.resolve("gateway-ready.tmp").toFile(), mapper.readTree("""
+                            {"schemaVersion":1,"runIdentity":"runner-kannel","processes":[
+                              {"name":"bearerbox","pid":7,"processStartTicks":123,"password":"must-not-export"},
+                              {"name":"smsbox","pid":8,"processStartTicks":124}],
+                              "database":{"engine":"postgresql","version":"17.6","sslMode":"verify-full",
+                                          "tlsVerified":true,"schemaReady":true,"password":"must-not-export"}}
+                            """));
+                    Files.move(directory.resolve("gateway-ready.tmp"), directory.resolve("gateway-ready.json"));
+                    assertEquals(0, run.get(10, TimeUnit.SECONDS));
+                }
                 finally { session.destroy(); }
                 var report = mapper.readTree(output.resolve("results.json").toFile());
                 assertEquals("inconclusive", report.at("/validity/status").asText()); // Resource sampling is a later task.
@@ -91,6 +124,10 @@ class KannelBenchmarkRunnerTest {
                 assertFalse(report.at("/validity/reasons").toString().contains("SETUP_FAILED"));
                 assertTrue(report.path("resources").has("kannel"));
                 assertFalse(report.at("/configuration/infrastructure").has("sendium"));
+                assertEquals(2, report.at("/configuration/infrastructure/kannel/processes").size());
+                assertEquals("postgresql", report.at("/configuration/application/dlrStorage").asText());
+                assertTrue(report.at("/configuration/infrastructure/database/readiness/schemaReady").asBoolean());
+                assertFalse(report.toString().contains("must-not-export"));
             } finally { run.cancel(true); }
         } finally {
             server.stop(0); client.destroy(0, 100);

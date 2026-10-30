@@ -167,6 +167,20 @@ public final class BenchmarkRunner {
                     || readiness.getUserInfo() != null || readiness.getQuery() != null || readiness.getFragment() != null) {
                 throw new IllegalArgumentException("Invalid readiness endpoint");
             }
+            if (runtime.has("localReadinessFile") && (target != BenchmarkTarget.KANNEL
+                    || !"local".equals(execution.context().infrastructure().path("region").asText())
+                    || !runtime.path("localReadinessFile").isTextual() || runtime.path("localReadinessFile").asText().isBlank())) {
+                throw new IllegalArgumentException("Local gateway readiness files require local Kannel execution");
+            }
+            if (target == BenchmarkTarget.KANNEL && "postgresql".equals(effective.path("dlrStorage").asText())
+                    && !runtime.has("localReadinessFile") && !runtime.has("gatewayReadinessFile")) {
+                throw new IllegalArgumentException("Kannel PostgreSQL requires verified database readiness");
+            }
+            if (runtime.has("gatewayReadinessFile") && (target != BenchmarkTarget.KANNEL
+                    || runtime.has("localReadinessFile") || !runtime.path("gatewayReadinessFile").isTextual()
+                    || runtime.path("gatewayReadinessFile").asText().isBlank())) {
+                throw new IllegalArgumentException("Invalid gateway readiness file configuration");
+            }
             provider = new SmppProvider(config, mapper.treeToValue(runtime.path("provider"), ProviderSettings.class), ledger);
             provider.start();
             if (config.ingressMode().equals("http")) {
@@ -192,7 +206,7 @@ public final class BenchmarkRunner {
                         pending = client.sendAsync(HttpRequest.newBuilder(readiness).timeout(Duration.ofNanos(timeout)).GET().build(),
                                 HttpResponse.BodyHandlers.limiting(HttpResponse.BodyHandlers.ofString(), 65536));
                         var response = pending.get(timeout, TimeUnit.NANOSECONDS);
-                        ready = target.ready(response.statusCode(), response.body(), mapper);
+                        ready = target.ready(response.statusCode(), response.body(), mapper) && localGatewayReady(runtime);
                         if (ready) { break; }
                     } catch (java.io.IOException | java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException ignored) {
                         if (pending != null) { pending.cancel(true); }
@@ -212,6 +226,49 @@ public final class BenchmarkRunner {
             }
             generator = new FixedRateGenerator(config, ledger, (measured, scheduled) -> http != null
                     ? http.submit(measured, scheduled).isPresent() : smpp.submit(measured, scheduled).isPresent());
+        }
+
+        private boolean localGatewayReady(JsonNode runtime) throws Exception {
+            if (!runtime.has("localReadinessFile") && !runtime.has("gatewayReadinessFile")) { return true; }
+            Path file = ExecutionSettings.resolve(base, runtime.path(runtime.has("gatewayReadinessFile")
+                    ? "gatewayReadinessFile" : "localReadinessFile").asText());
+            if (!Files.exists(file)) { return false; }
+            if (Files.size(file) > 16384) { throw new IllegalArgumentException("Gateway readiness metadata exceeds its budget"); }
+            JsonNode ready = mapper.readTree(file.toFile());
+            if (ready == null || ready.path("schemaVersion").asInt() != 1
+                    || !ready.path("runIdentity").asText().equals(execution.context().provenance().runIdentity())
+                    || !ready.path("processes").isArray() || ready.path("processes").size() != 2) {
+                throw new IllegalArgumentException("Gateway readiness identity mismatch");
+            }
+            var names = new java.util.HashSet<String>();
+            var pids = new java.util.HashSet<Long>();
+            var members = mapper.createArrayNode();
+            for (JsonNode process : ready.path("processes")) {
+                String name = process.path("name").asText();
+                if (!java.util.Set.of("bearerbox", "smsbox").contains(name) || !names.add(name)
+                        || !process.path("pid").isIntegralNumber() || !process.path("pid").canConvertToLong()
+                        || process.path("pid").asLong() < 1 || !pids.add(process.path("pid").asLong())
+                        || !process.path("processStartTicks").isIntegralNumber() || !process.path("processStartTicks").canConvertToLong()
+                        || process.path("processStartTicks").asLong() < 0) {
+                    throw new IllegalArgumentException("Invalid gateway process readiness metadata");
+                }
+                members.addObject().put("name", name).put("pid", process.path("pid").asLong())
+                        .put("processStartTicks", process.path("processStartTicks").asLong());
+            }
+            execution.context().infrastructure().withObject("/kannel").set("processes", members);
+            if ("postgresql".equals(execution.context().application().path("dlrStorage").asText())) {
+                JsonNode database = ready.path("database");
+                if (!"postgresql".equals(database.path("engine").asText())
+                        || !"verify-full".equals(database.path("sslMode").asText())
+                        || !database.path("tlsVerified").asBoolean() || !database.path("schemaReady").asBoolean()
+                        || !database.path("version").isTextual() || !database.path("version").asText().startsWith("17.")) {
+                    throw new IllegalArgumentException("Kannel database readiness is missing or invalid");
+                }
+                var publicHealth = execution.context().infrastructure().withObject("/database/readiness");
+                publicHealth.put("engine", "postgresql").put("sslMode", "verify-full").put("tlsVerified", true)
+                        .put("schemaReady", true).put("version", database.path("version").asText());
+            }
+            return true;
         }
 
         @Override public void startGeneration(Lifecycle.Phase value, long start, long deadline) throws Exception {

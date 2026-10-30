@@ -36,16 +36,30 @@ inputs, set `benchmarkTarget: "kannel"` in **all three** locations:
 
 The runner rejects conflicting identities before starting listeners. Kannel
 supports HTTP ingress only; a Kannel/SMPP workload is rejected before creating
-the output directory. The configuration generator and local rehearsal selector
-still produce Sendium inputs; the local Kannel orchestration task will prepare
-these target-specific inputs.
+the output directory. The application configuration generator still produces
+Sendium bundles. The local launcher prepares Kannel's target-specific runtime and
+public inputs via `--benchmark-target kannel`.
 
 Kannel readiness uses the unauthenticated `/sendsms` endpoint: HTTP 403 with the
 exact body `Authorization failed for sendsms` (allowing surrounding whitespace),
 plus an authenticated bind observed by the shared provider. It sends no readiness
-SMS and does not impose Sendium's PostgreSQL health check. Kannel's current
-prepared-input contract supports `dlrStorage: "internal"`; choosing an external
-backend will require its own storage-readiness checks.
+SMS and does not impose Sendium's PostgreSQL health check. Prepared inputs support
+`dlrStorage: "internal"` for protocol probes or `"postgresql"` with explicit
+provisioned PostgreSQL/`verify-full` metadata. The full local benchmark uses
+PostgreSQL; its gateway verifies connectivity, TLS and schema before publishing
+database readiness, which the runner checks before workload phases.
+AWS node deployment uses `runtime.gatewayReadinessFile` for the same bounded,
+run-specific public marker after its private artifact-transport handoff. This
+field supports remote gateways; `localReadinessFile` remains restricted to local
+Kannel runs, and the two fields cannot be combined.
+
+The local launcher also supplies `runtime.localReadinessFile`. This optional gate
+is restricted to local Kannel execution. Its bounded JSON contains schema version,
+the exact run identity, and the two processes' names/PIDs/start ticks. The runner
+waits for the file and authenticated bind before starting workload phases, then
+copies only allowlisted identity fields into public infrastructure metadata. The
+gateway writes it atomically after the group sampler baseline. Zero-warm-up runs
+therefore retain resource coverage from before the measurement origin.
 
 Kannel application metadata requires:
 
@@ -91,8 +105,10 @@ identities and have null top-level `pid`/`processStartTicks`; Kannel validity
 requires both named members. Optional `infrastructure.kannel.processes` declares
 their expected names, PIDs and start ticks instead of a single `processId`.
 CPU and RSS are summed across members, with possible shared-page double counting
-for RSS, while host metrics are observed once. The local full-benchmark launcher
-is the next integration step.
+for RSS, while host metrics are observed once. The
+[local full-benchmark launcher](../local/README.md#select-sendium-or-kannel) starts
+listeners and the gateway, monitors execution, retains failed evidence, shuts down
+samplers/processes in order and runs offline resource finalization.
 
 Warm-up, measurement, and bounded drain then run automatically. Accounting is
 sealed, owned services stop, and JSON/Markdown reports are written. Atomically

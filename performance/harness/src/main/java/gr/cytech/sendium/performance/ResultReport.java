@@ -44,6 +44,12 @@ public final class ResultReport {
             if (infrastructure.has(target == BenchmarkTarget.KANNEL ? "sendium" : "kannel")) {
                 throw new IllegalArgumentException("Infrastructure contains a conflicting gateway identity");
             }
+            if (target == BenchmarkTarget.KANNEL && "postgresql".equals(application.path("dlrStorage").asText())
+                    && (!infrastructure.path("database").path("provisioned").asBoolean()
+                        || !"postgresql".equals(infrastructure.path("database").path("engine").asText())
+                        || !"verify-full".equals(infrastructure.path("database").path("sslMode").asText()))) {
+                throw new IllegalArgumentException("Kannel PostgreSQL storage requires explicit database/TLS metadata");
+            }
         }
     }
     public record Report(ObjectNode json, String markdown) { }
@@ -139,8 +145,13 @@ public final class ResultReport {
         limitations.add("CloudWatch CPU-credit samples are coarse period observations and may lag; absent values are not zero.");
         limitations.add("Average-rate pacing retains delayed targets and permits recovery using up to one second of stored Guava permits; it is not a strict per-second cap or a production arrival distribution.");
         limitations.add("Input dispatch timing marks the start of the adapter transport call, not completed socket writes; provider arrivals remain separate evidence.");
+        for (var limitation : context.infrastructure().path("resolution").path("localRehearsal").path("limitations")) {
+            if (limitation.isTextual()) { limitations.add(limitation.asText()); }
+        }
         if (target == BenchmarkTarget.KANNEL) {
-            limitations.add("Kannel internal DLR storage is process memory and is not persistence-equivalent to Sendium PostgreSQL DLR storage.");
+            limitations.add(context.application().path("dlrStorage").asText().equals("internal")
+                    ? "Kannel internal DLR storage is process memory and is not persistence-equivalent to Sendium PostgreSQL DLR storage."
+                    : "Using PostgreSQL for both gateways does not establish identical DLR transaction, recovery or durability semantics.");
         }
         root.set("resources", evidence.json(mapper, resourceWindow, timeline, target));
         root.set("validity", mapper.valueToTree(RunValidity.assess(config, ledger, context, generatorPhases, evidence, resourceWindow, observations)));

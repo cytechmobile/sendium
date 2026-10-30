@@ -15,7 +15,7 @@ import tarfile
 import threading
 import time
 
-from aws_cli import AwsCli
+from aws_cli import AwsCli, AwsError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 from application_runtime import validate_runtime_mode, verify_elf_header
 
@@ -138,7 +138,12 @@ class Node:
     def __init__(self, document, root=ROOT, install=INSTALL, aws=None):
         self.document = document
         self.source = document["source"]
+        self.target = document.get("benchmarkTarget", "sendium")
+        if self.target not in ("sendium", "kannel"):
+            raise ValueError("Unknown benchmark target")
         self.mode = validate_runtime_mode(document.get("applicationRuntime", "jvm"))
+        if self.target == "kannel" and self.mode != "jvm":
+            raise ValueError("Kannel cannot use Sendium native runtime settings")
         if self.source == "harness" and self.mode != "jvm":
             raise ValueError("The performance harness requires JVM execution")
         self.identity = document["runIdentity"]
@@ -169,6 +174,14 @@ class Node:
         artifacts = self.document["artifacts"]
         for name, descriptor in artifacts.items():
             self.fetch(descriptor, self.root / name)
+        if self.target == "kannel" and self.source == "sendium":
+            budget = shutil.disk_usage(self.install).free - 512 * 1024 * 1024
+            extract(self.root / "application", self.install / "application", budget)
+            self.kannel().install(self)
+            (INSTALL / "rds-ca").mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.root / "rdsCa", INSTALL / "rds-ca/global-bundle.pem")
+            self.status("installed", runtimeVersion="Kannel " + self.document["kannelBuild"]["source"]["version"])
+            return
         # Leave at least 512 MiB for OS/SSM and evidence after expanding both archives.
         budget = shutil.disk_usage(self.install).free - 512 * 1024 * 1024
         extract(self.root / "jre", self.install / "jre", budget)
@@ -194,6 +207,13 @@ class Node:
     def java(self):
         return read(self.root / "runtime.json")["java"]
 
+    def kannel(self):
+        # Selected artifact code executes only here on the isolated runtime node.
+        import importlib
+        sys.dont_write_bytecode = True
+        sys.path.insert(0, str(self.install / "application/control"))
+        return importlib.import_module("aws_runtime")
+
     def native_application(self):
         architecture = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x86_64"}.get(platform.machine().lower())
         if architecture != self.document["architecture"]:
@@ -215,6 +235,13 @@ class Node:
     def configure(self):
         secret = self.aws.call("secretsmanager", "get-secret-value", secret_id=self.document["databaseSecretArn"])
         credentials = json.loads(secret["SecretString"])
+        if self.target == "kannel":
+            self.kannel().configure(self, {key: credentials[key] for key in ("username", "password")})
+            for name in ("runtime-settings.json", "run-config.json", "effective-configuration.json"):
+                self.aws.put(self.bucket, self.prefix + "inputs/harness/generated/" + name,
+                             self.root / "generated/harness" / name, immutable=True)
+            self.status("configured")
+            return
         deployment = dict(self.document["deployment"])
         deployment["database"] = {**deployment["database"], "username": credentials["username"], "password": credentials["password"]}
         write(self.root / "deployment-private.json", deployment)
@@ -231,6 +258,9 @@ class Node:
 
     def secrets(self):
         values = []
+        redactions = self.root / "generated/kannel/redactions.json"
+        if redactions.is_file():
+            values.extend(read(redactions))
         for path in (self.root / "generated/sendium/environment.json", self.root / "generated/harness/runtime-settings.json"):
             if path.is_file():
                 def visit(node):
@@ -264,17 +294,19 @@ class Node:
                 private_values = tuple(self.secrets())
                 captured = CapturedProcess(command, self.root, child_environment())
             else:
-                environment = child_environment()
-                environment.update(read(self.root / "generated/sendium/environment.json"))
-                command = self.application_command()
                 private_values = tuple(self.secrets())
-                captured = CapturedProcess(command, self.root / "generated/sendium", environment)
-                sampler = subprocess.Popen(["python3", str(self.root / "sampler"), "--pid", str(captured.process.pid),
-                                            "--duration-seconds", str(self.document["timeoutSeconds"]),
-                                            "--interval-seconds", str(self.document["sampleIntervalSeconds"]),
-                                            "--max-samples", str(self.document["sampleBudget"]),
-                                            "--output", str(self.root / "sendium-resources.jsonl")],
-                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if self.target == "kannel":
+                    captured = CapturedProcess(self.kannel().command(self), self.root / "generated/kannel", self.kannel().environment(self))
+                else:
+                    environment = child_environment()
+                    environment.update(read(self.root / "generated/sendium/environment.json"))
+                    captured = CapturedProcess(self.application_command(), self.root / "generated/sendium", environment)
+                    sampler = subprocess.Popen(["python3", str(self.root / "sampler"), "--pid", str(captured.process.pid),
+                                                "--duration-seconds", str(self.document["timeoutSeconds"]),
+                                                "--interval-seconds", str(self.document["sampleIntervalSeconds"]),
+                                                "--max-samples", str(self.document["sampleBudget"]),
+                                                "--output", str(self.root / "sendium-resources.jsonl")],
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + self.document["timeoutSeconds"]
             self.status("running", processId=captured.process.pid)
             ready = False
@@ -285,6 +317,28 @@ class Node:
                     ready = read(self.root / "report/state.json").get("listenersReady", False)
                     if ready:
                         self.status("listening", processId=captured.process.pid)
+                if self.target == "kannel":
+                    if self.source == "harness" and ready:
+                        marker = self.root / "gateway-ready.json"
+                        if not marker.exists():
+                            temporary = marker.with_suffix(".tmp")
+                            try:
+                                self.aws.get(self.bucket, self.prefix + "inputs/harness/generated/gateway-ready.json", temporary)
+                                if temporary.stat().st_size > 16384:
+                                    raise ValueError("Gateway readiness exceeds its budget")
+                                temporary.replace(marker)
+                            except AwsError as error:
+                                if error.code not in ("NoSuchKey", "404", "NotFound"):
+                                    raise
+                    elif self.source == "sendium" and not ready:
+                        marker = self.root / "generated/kannel/gateway-ready.json"
+                        if marker.is_file():
+                            if marker.stat().st_size > 16384 or read(marker).get("runIdentity") != self.identity:
+                                raise ValueError("Gateway readiness identity mismatch")
+                            self.publish("gateway-ready.json", marker)
+                            self.aws.put(self.bucket, self.prefix + "inputs/harness/generated/gateway-ready.json", marker, immutable=True)
+                            self.status("ready", processId=captured.process.pid)
+                            ready = True
                 time.sleep(1)
             exit_code = captured.process.poll()
             if exit_code is None:
@@ -300,6 +354,8 @@ class Node:
                     sampler.wait(timeout=5)
             if captured:
                 captured.stop()
+                if self.target == "kannel" and self.source == "sendium" and captured.process.returncode != 0:
+                    exit_code = 1
                 text = captured.log()
                 for value in sorted(private_values, key=len, reverse=True):
                     if value:
@@ -307,7 +363,11 @@ class Node:
                 (self.root / "process.log").write_text(text, encoding="utf-8")
             # Explicit allowlist: never publish generated private configuration or deployment input.
             candidates = {"process.log": self.root / "process.log",
-                          "sendium-resources.jsonl": self.root / "sendium-resources.jsonl"}
+                           "sendium-resources.jsonl": self.root / "sendium-resources.jsonl"}
+            if self.target == "kannel":
+                candidates.pop("sendium-resources.jsonl")
+                candidates["kannel-resources.jsonl"] = self.root / "generated/kannel/kannel-resources.jsonl"
+                candidates["gateway-ready.json"] = self.root / "generated/kannel/gateway-ready.json"
             candidates.update({name: self.root / "report" / name for name in PUBLIC_FILES})
             issues = []
             for name, path in candidates.items():

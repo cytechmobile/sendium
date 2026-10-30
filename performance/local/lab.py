@@ -79,6 +79,7 @@ def request_for(lab, identity, scenario, offered_rate=None):
                "controllerRevision": lab.source["baseCommit"], "workflowRevision": lab.source["baseCommit"], "runId": run, "runAttempt": attempt,
                "workflowRunUrl": "local://rehearsal/" + identity}
     inputs = {"ingress_mode": mode, "dlr_enabled": dlr}
+    inputs.update(getattr(lab, "workload_overrides", {}))
     if offered_rate is not None:
         inputs["offered_rate"] = offered_rate
     return prepare.normalize(inputs, context, preset)
@@ -260,6 +261,8 @@ def run_case(lab, identity, scenario):
         thread.join(timeout=10)
     root = lab.roots.get(identity)
     if scenario in SCENARIOS[:4] or scenario == "concurrent":
+        require(root is not None and all(name in root["containers"] for name in ("database", "sendium", "harness")),
+                "Local provisioning did not produce a complete topology; inspect controller-outcome.json")
         network_checks(lab, root)
     if witness:
         other = lab.roots[witness["identity"]]
@@ -358,6 +361,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenarios", default="load")
     parser.add_argument("--offered-rate", type=float)
+    from scenarios import add_workload_arguments, workload_overrides
+    add_workload_arguments(parser)
     args = parser.parse_args()
     Path("/state/public").mkdir(exist_ok=True)
     def interrupted(*_):
@@ -367,6 +372,7 @@ def main():
     try:
         lab = Lab(os.environ["LOCAL_SESSION"])
         lab.offered_rate = args.offered_rate
+        lab.workload_overrides = workload_overrides(args, prepare.read(PERFORMANCE / "presets/aws-private-jvm-v1.json"))
         report["boundaries"] = lab.simulation
         selected = select(args.scenarios)
         run = str(time.time_ns())

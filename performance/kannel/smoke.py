@@ -26,37 +26,41 @@ def build(*arguments):
     subprocess.run(["docker", "build", *arguments], cwd=ROOT, check=True, timeout=1800)
 
 
-def configuration(provider_password, http_password, admin_password):
-    return f"""group = core
+def configuration(provider_password, http_password, admin_password, *, worker_tps=0, outgoing_window=1000,
+                  ingress_window=1000, request_timeout_seconds=30, database=None,
+                  provider_host="provider", provider_port=27779, http_port=8080, store_location="/tmp/kannel-store"):
+    value = f"""group = core
 admin-port = 13000
 admin-password = {admin_password}
 admin-deny-ip = "*.*.*.*"
 admin-allow-ip = "127.0.0.1"
 smsbox-port = 13001
-smsbox-max-pending = 1000
+smsbox-max-pending = {ingress_window}
 box-deny-ip = "*.*.*.*"
 box-allow-ip = "127.0.0.1"
-dlr-storage = internal
+dlr-storage = {'pgsql' if database else 'internal'}
 store-type = spool
-store-location = /tmp/kannel-store
+store-location = {store_location}
 log-level = 2
 
 group = smsc
 smsc = smpp
 smsc-id = simulated-provider
-host = provider
-port = 27779
+host = {provider_host}
+port = {provider_port}
 smsc-username = provider
 smsc-password = {provider_password}
 system-type = smpp
 interface-version = 34
 transceiver-mode = true
-max-pending-submits = 1000
-throughput = 0
+max-pending-submits = {outgoing_window}
+throughput = {worker_tps}
+wait-ack = {request_timeout_seconds}
 
 group = smsbox
+smsbox-id = benchmark
 bearerbox-host = 127.0.0.1
-sendsms-port = 8080
+sendsms-port = {http_port}
 sendsms-url = /sendsms
 immediate-sendsms-reply = false
 log-level = 2
@@ -67,6 +71,31 @@ password = {http_password}
 max-messages = 1
 concatenation = false
 """
+    if database:
+        value += f"""
+group = pgsql-connection
+id = benchmark-dlr
+host = {database['host']}
+port = {database['port']}
+username = {database['username']}
+password = {database['password']}
+database = {database['database']}
+max-connections = {database['poolMaxSize']}
+
+group = dlr-db
+id = benchmark-dlr
+table = dlr
+field-smsc = smsc
+field-timestamp = ts
+field-destination = destination
+field-source = source
+field-service = service
+field-url = url
+field-mask = mask
+field-status = status
+field-boxc-id = boxc
+"""
+    return value
 
 
 def wait_ready(directory, containers, markers, timeout):
@@ -202,7 +231,7 @@ def run_smoke(output, *, skip_build=False, timeout=120, traffic=False):
     return outcome
 
 
-def collect_and_remove(candidates, output, passwords, outcome):
+def collect_and_remove(candidates, output, passwords, outcome, roles=None):
     for name in list(reversed(candidates)):
         try:
             exists = bool(docker("ps", "--all", "--filter", "name=^/" + name + "$",
@@ -218,7 +247,7 @@ def collect_and_remove(candidates, output, passwords, outcome):
                 logs = result.stdout + result.stderr
                 for password in passwords:
                     logs = logs.replace(password, "[REDACTED]")
-                role = "provider" if name.endswith("-provider") else "gateway"
+                role = (roles or {}).get(name, "provider" if name.endswith("-provider") else "gateway")
                 (output / (role + ".log")).write_text(logs, encoding="utf-8")
                 docker("rm", "--force", name, timeout=20)
             candidates.remove(name)

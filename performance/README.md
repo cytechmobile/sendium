@@ -160,11 +160,13 @@ explains evidence collection, publication and cleanup.
 ## Kannel comparison work
 
 The optional Kannel target is being developed locally first. Its
-[build baseline, local startup smoke run, and protocol findings](kannel/README.md)
-describe the verified x86-64/ARM64 build, authenticated simulator bind, and local
-end-to-end HTTP/DLR correctness check. Workflow target selection is not available
-yet. The initial Kannel scope is HTTP ingress with SMPP forwarding and HTTP
-delivery reports; SMPP ingress is deferred.
+[build baseline, local benchmark, and protocol findings](kannel/README.md)
+describe the verified x86-64/ARM64 build, HTTP/DLR accounting, combined gateway
+sampling, and full local benchmark lifecycle. Run it with
+`python performance/local/rehearse.py --benchmark-target kannel --output local-load-results`.
+Sendium remains the local launcher's default. AWS/workflow target selection is the
+next phase. Kannel supports HTTP ingress with SMPP forwarding and HTTP delivery
+reports; SMPP ingress is deferred.
 
 ## Permanent results archive
 
