@@ -174,6 +174,18 @@ def run_smoke(output, *, skip_build=False, timeout=120, traffic=False):
                         outcome["issues"].append("Provider probe did not stop within its shutdown budget")
                 # Containers must release the private mount before TemporaryDirectory closes.
                 collect_and_remove(candidates, output, passwords, outcome)
+                if gateway not in candidates and (directory / "kannel-resources.jsonl").is_file():
+                    try:
+                        samples = directory / "kannel-resources.jsonl"
+                        if not 0 < samples.stat().st_size <= 256 * 8192:
+                            raise ValueError("Invalid smoke sample budget")
+                        (output / "kannel-resources.jsonl").write_bytes(samples.read_bytes())
+                        outcome["gatewaySampling"] = {"source": "kannel-resources.jsonl", "members": ["bearerbox", "smsbox"],
+                                                      "cpu": "sum of member CPU", "rss": "sum of member RSS; shared pages may repeat"}
+                    except (OSError, ValueError):
+                        outcome["issues"].append("Could not preserve gateway resource evidence")
+                elif outcome["status"] == "passed":
+                    outcome["issues"].append("Gateway resource evidence is missing")
     except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
         outcome["issues"].append(type(error).__name__ if isinstance(error, subprocess.SubprocessError) else str(error))
     finally:
@@ -197,6 +209,8 @@ def collect_and_remove(candidates, output, passwords, outcome):
                                  "--format", "{{.Names}}"))
             if exists:
                 docker("stop", "--time", "15", name, timeout=20)
+                if name.endswith("-gateway") and docker("inspect", "--format", "{{.State.ExitCode}}", name) != "0":
+                    outcome["issues"].append("Gateway supervision or resource sampling exited unsuccessfully")
                 result = subprocess.run(["docker", "logs", "--tail", "200", name],
                                         text=True, capture_output=True, timeout=10)
                 if result.returncode:

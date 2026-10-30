@@ -30,6 +30,8 @@ class SmokeLifecycleTest(unittest.TestCase):
                 if provider_shutdown_times_out:
                     raise subprocess.TimeoutExpired(command, 20)
                 text = "0"
+            elif args[0] == "inspect":
+                text = "0"
             return subprocess.CompletedProcess(command, 0, text, "")
 
         with tempfile.TemporaryDirectory() as temporary:

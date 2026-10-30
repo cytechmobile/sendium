@@ -8,7 +8,9 @@ The shared benchmark runner and version-1 report contracts also accept explicitl
 prepared Kannel execution inputs. Target-aware readiness, archive-based source
 identity, `kannel` resource labels, and offline resource finalization are described
 in [target-aware execution](../harness/EXECUTION.md#target-aware-execution).
-The process-group sampler and local full-benchmark launcher remain the next steps.
+Named process-group sampling now measures bearerbox and smsbox together, with
+per-member identities and contributions. The local full-benchmark launcher remains
+the next step.
 
 The initial scenario is **HTTP ingress -> SMPP provider -> HTTP DLR callback**.
 Kannel SMPP ingress is deferred. Sendium retains its existing HTTP/SMPP ingress
@@ -64,10 +66,16 @@ The run:
 3. Checks the real `/sendsms` handler's known unauthenticated response and requires
    an authenticated SMPP 3.4 **transceiver** bind. DLR mode is enabled on the
    simulator, so a transmitter-only bind would be rejected.
-4. Requires the processes/session to remain live, then shuts down the probe and
-   gateway and removes both containers and the network. Docker images remain
-   cached. Startup waits, process lifetimes, and cleanup commands have bounds.
-5. Writes `outcome.json` plus bounded, credential-redacted provider/gateway logs.
+4. Starts the shared Linux sampler for the two gateway PIDs and waits for its
+   baseline before publishing gateway readiness. The group has one-second
+   intervals, a 256-record budget, and a bounded smoke lifetime.
+5. Requires the processes/session to remain live, then shuts down the probe and
+   gateway. The supervisor stops the sampler first, retaining a final complete
+   interval while both members are alive, then stops smsbox and bearerbox. Both
+   containers and the network are removed; Docker images remain cached. Startup
+   waits, process lifetimes, and cleanup commands have bounds.
+6. Writes `outcome.json`, `kannel-resources.jsonl`, and bounded,
+   credential-redacted provider/gateway logs.
    A failure or cleanup issue produces a failed outcome and nonzero exit status.
 
 Generated credentials/configuration live in a temporary private directory and
@@ -82,10 +90,19 @@ internal DLR storage and an ephemeral local spool for message storage; it is not
 a persistence-equivalent Sendium comparison. Container CPU limits do not simulate
 `t4g.small` CPU credits.
 
+Group samples preserve each member's PID/start ticks, CPU and RSS. Group CPU/RSS
+are sums; shared pages can be counted in both processes' RSS. Host metrics are
+collected once per sample and describe the Docker Linux host/VM. The Java importer
+and independent result validator check aggregation and stable member identities;
+see [sampling semantics](../resources/README.md#named-process-groups-kannel-bearerbox-and-smsbox).
+
 Local verification on 2026-10-30 passed on linux/amd64 with real Kannel and the
 current harness simulator: ten attempts, ten acceptances, ten provider completions,
 and ten correlated forwarded DLRs, with zero duplicates, outstanding messages,
-or protocol/accounting problems. Startup failures encountered during configuration
+or protocol/accounting problems. The same real Kannel run retained a null-CPU
+group baseline and subsequent complete intervals for both processes; its five
+sample records also imported through the Java resource finalizer without import
+or identity errors. Startup failures encountered during configuration
 verification retained diagnostics and cleaned up their containers/network. The
 failure-path tests cover gateway readiness failure, provider shutdown timeout,
 failed traffic accounting, evidence export failure, credential redaction, and

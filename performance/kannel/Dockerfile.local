@@ -24,4 +24,5 @@ CMD ["java", "-cp", "/opt/probe/harness.jar:/opt/probe", "KannelBindProbe"]
 FROM ${KANNEL_BASE_IMAGE} AS gateway
 RUN dnf install -y --setopt=install_weak_deps=False python3 && dnf clean all
 COPY performance/kannel/gateway.py /opt/probe/gateway.py
+COPY performance/resources/sample_process.py /opt/probe/sample_process.py
 CMD ["python3", "/opt/probe/gateway.py"]

@@ -196,8 +196,10 @@ messages and delivery reports. See the [local correctness check](../kannel/READM
 The shared benchmark runner now accepts explicitly prepared Kannel inputs and
 renders target-aware reports; missing target fields retain Sendium defaults.
 See [target-aware execution](EXECUTION.md#target-aware-execution) for readiness,
-source identity, and resource paths. Configuration generation, process-group
-sampling, local target orchestration, and workflow selection are subsequent tasks.
+source identity, and resource paths. The resource importer accepts validated named
+process groups and requires bearerbox plus smsbox for complete Kannel resource
+evidence. Kannel configuration generation, local full-benchmark orchestration,
+and workflow selection are subsequent tasks.
 
 ## SMPP submission and forwarded receipts
 
