@@ -22,7 +22,7 @@ public final class ResultReport {
     public record Provenance(String branch, String applicationCommit, String harnessRevision,
             String workflowRunUrl, String runIdentity, List<Artifact> artifacts) {
         public Provenance {
-            if (branch == null || branch.isBlank() || applicationCommit == null || !applicationCommit.matches("[0-9a-f]{40}")
+            if (branch == null || branch.isBlank() || applicationCommit != null && !applicationCommit.matches("[0-9a-f]{40}")
                     || harnessRevision == null || !harnessRevision.matches("[0-9a-f]{40}") || runIdentity == null || runIdentity.isBlank()) {
                 throw new IllegalArgumentException("Missing exact run provenance");
             }
@@ -34,10 +34,15 @@ public final class ResultReport {
         public Context {
             java.util.Objects.requireNonNull(provenance);
             application = application.deepCopy(); infrastructure = infrastructure.deepCopy(); diagnostics = List.copyOf(diagnostics);
+            BenchmarkTarget target = BenchmarkTarget.from(application);
+            target.validateApplication(application, provenance);
             if (!application.has("jvmArguments") || !application.has("connections") || !application.has("dlrStorage")
-                    || !infrastructure.has("preset") || !infrastructure.has("region") || !infrastructure.has("sendium")
+                    || !infrastructure.has("preset") || !infrastructure.has("region") || !infrastructure.has(target.id())
                     || !infrastructure.has("harness") || !infrastructure.has("database")) {
                 throw new IllegalArgumentException("Effective application and infrastructure settings are required");
+            }
+            if (infrastructure.has(target == BenchmarkTarget.KANNEL ? "sendium" : "kannel")) {
+                throw new IllegalArgumentException("Infrastructure contains a conflicting gateway identity");
             }
         }
     }
@@ -53,6 +58,8 @@ public final class ResultReport {
             List<FixedRateGenerator.Statistics> generatorPhases, boolean drainTimeoutReached,
             ResourceEvidence evidence, ResourceEvidence.Window resourceWindow, List<RunValidity.Reason> observations) {
         if (!ledger.isFrozen()) { throw new IllegalStateException("Freeze accounting before publishing results"); }
+        BenchmarkTarget target = BenchmarkTarget.from(context.application());
+        target.validateWorkload(config);
         var timeline = ledger.timeline();
         var counts = ledger.snapshot();
         if (timeline == null && counts.scheduled() != 0) { throw new IllegalStateException("Measurement interval origin was not recorded"); }
@@ -132,7 +139,10 @@ public final class ResultReport {
         limitations.add("CloudWatch CPU-credit samples are coarse period observations and may lag; absent values are not zero.");
         limitations.add("Average-rate pacing retains delayed targets and permits recovery using up to one second of stored Guava permits; it is not a strict per-second cap or a production arrival distribution.");
         limitations.add("Input dispatch timing marks the start of the adapter transport call, not completed socket writes; provider arrivals remain separate evidence.");
-        root.set("resources", evidence.json(mapper, resourceWindow, timeline));
+        if (target == BenchmarkTarget.KANNEL) {
+            limitations.add("Kannel internal DLR storage is process memory and is not persistence-equivalent to Sendium PostgreSQL DLR storage.");
+        }
+        root.set("resources", evidence.json(mapper, resourceWindow, timeline, target));
         root.set("validity", mapper.valueToTree(RunValidity.assess(config, ledger, context, generatorPhases, evidence, resourceWindow, observations)));
         root.set("diagnostics", mapper.valueToTree(context.diagnostics()));
         return new Report(root, markdown(root));
@@ -170,6 +180,7 @@ public final class ResultReport {
         Context context = new Context(mapper.treeToValue(result.path("provenance"), Provenance.class),
                 (ObjectNode) configuration.path("application"), (ObjectNode) configuration.path("infrastructure"),
                 mapper.convertValue(result.path("diagnostics"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() { }));
+        BenchmarkTarget.from(context.application()).validateWorkload(mapper.treeToValue(configuration.path("workload"), RunConfig.class));
         List<MeasurementTimeline.EventInterval> intervals = new java.util.ArrayList<>();
         for (var interval : result.path("eventIntervals")) {
             intervals.add(new MeasurementTimeline.EventInterval(interval.path("phase").asText(),
@@ -184,7 +195,7 @@ public final class ResultReport {
             if (!reason.path("scope").asText().equals("resources")) { retained.add(mapper.treeToValue(reason, RunValidity.Reason.class)); }
         }
         retained.addAll(RunValidity.resourceReasons(context, duration, evidence, window));
-        result.set("resources", evidence.jsonForIntervals(mapper, window, intervals));
+        result.set("resources", evidence.jsonForIntervals(mapper, window, intervals, BenchmarkTarget.from(context.application())));
         result.set("validity", mapper.valueToTree(RunValidity.classify(retained)));
         metadata.put("resourcesFinalized", true);
         return new Report(result, markdown(result));
@@ -216,15 +227,26 @@ public final class ResultReport {
     private static String text(String text) { return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "\\|").replace("\r", " ").replace("\n", " ").replace("`", "'"); }
 
     static String markdown(ObjectNode root) {
-        StringBuilder out = new StringBuilder("# Sendium performance results\n\n");
+        BenchmarkTarget target = BenchmarkTarget.from(root.path("configuration").path("application"));
+        String gateway = target.displayName();
+        StringBuilder out = new StringBuilder("# " + gateway + " performance results\n\n");
         var provenance = root.path("provenance");
         out.append("**Status:** ").append(root.path("validity").path("status").asText()).append("\n\n")
                 .append("Branch: `").append(text(provenance.path("branch").asText())).append("` · Application: `")
-                .append(provenance.path("applicationCommit").asText()).append("` · Harness: `").append(provenance.path("harnessRevision").asText()).append("`\n\n");
+                .append(provenance.path("applicationCommit").isNull() ? "source archive (see below)" : provenance.path("applicationCommit").asText())
+                .append("` · Harness: `").append(provenance.path("harnessRevision").asText()).append("`\n\n");
         var workload = root.path("configuration").path("workload");
         var application = root.path("configuration").path("application");
         out.append("Application runtime: **").append(text(application.path("runtime").asText("jvm")))
                 .append("** · Harness runtime: **jvm**\n\n");
+        if (target == BenchmarkTarget.KANNEL) {
+            out.append("Kannel version: **").append(text(application.path("source").path("version").asText()))
+                    .append("** · DLR storage: **").append(text(application.path("dlrStorage").asText()))
+                    .append("** · Message store: **").append(text(application.path("messageStore").asText()))
+                    .append("**\n\nSource archive SHA-256: `").append(text(application.path("source").path("archiveSha256").asText()))
+                    .append("`\n\nPatch archive SHA-256: `").append(text(application.path("source").path("patchArchiveSha256").asText()))
+                    .append("`\n\nApplied patches: ").append(text(application.path("source").path("patches").toString())).append("\n\n");
+        }
         if (application.has("nativeBuild")) {
             out.append("Native builder: `").append(text(application.path("nativeBuild").path("builderImage").asText()))
                     .append("`\n\nNative compiler: `").append(text(application.path("nativeBuild").path("compilerVersion").asText()))
@@ -296,8 +318,11 @@ public final class ResultReport {
             out.append("|\n");
         }
         out.append("\n### Outstanding work at each interval's end\n\n")
-                .append("These counts are inferred from observed message progress, not direct readings of Sendium's internal queues. Provider completion means the simulator completed its response write, not proof that Sendium consumed it.\n\n")
-                .append("| Phase | Interval end (s) | Requests awaiting Sendium acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |\n|---|---:|---:|---:|---:|\n");
+                .append("These counts are inferred from observed message progress, not direct readings of ").append(gateway)
+                .append("'s internal queues. Provider completion means the simulator completed its response write, not proof that ")
+                .append(gateway).append(" consumed it.\n\n")
+                .append("| Phase | Interval end (s) | Requests awaiting ").append(gateway)
+                .append(" acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |\n|---|---:|---:|---:|---:|\n");
         for (var interval : root.path("eventIntervals")) {
             double end = interval.path("startOffsetSeconds").asDouble() + interval.path("durationSeconds").asDouble();
             out.append('|').append(interval.path("phase").asText()).append('|').append(String.format(Locale.ROOT, "%.3f", end));
@@ -311,13 +336,13 @@ public final class ResultReport {
                 .append(root.path("drain").has("pendingReceiptAcknowledgements") ? root.path("drain").path("pendingReceiptAcknowledgements").asLong() : "n/a").append(".\n\n")
                 .append("## Resources\n\nProcess CPU: 100% is one logical core. Host CPU: 100% is aggregate host capacity.\n\n")
                 .append("| Source | Process CPU avg % | Process CPU max % | Host CPU avg % | Peak RSS MiB | Peak host used MiB | CPU coverage s |\n|---|---:|---:|---:|---:|---:|---:|\n");
-        for (String source : List.of("sendium", "harness")) {
+        for (String source : List.of(target.id(), "harness")) {
             resourceRow(out, source, root.path("resources").path("summary").path("overall").path(source));
         }
         out.append("\n<details><summary>Per-minute resource measurements</summary>\n\n")
                 .append("| Phase / interval / source | Process CPU avg % | Process CPU max % | Host CPU avg % | Peak RSS MiB | Peak host used MiB | CPU coverage s |\n|---|---:|---:|---:|---:|---:|---:|\n");
         for (var interval : root.path("resources").path("summary").path("intervals")) {
-            for (String source : List.of("sendium", "harness")) {
+            for (String source : List.of(target.id(), "harness")) {
                 resourceRow(out, interval.path("phase").asText() + " / " + number(interval.path("startOffsetSeconds")) + "s / " + source, interval.path(source));
             }
         }

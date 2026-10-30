@@ -4,6 +4,12 @@ This directory establishes the Kannel build baseline and standalone local
 startup/bind and HTTP/DLR correctness checks for the optional performance target. It is not yet
 integrated with the full local rehearsal or GitHub Actions.
 
+The shared benchmark runner and version-1 report contracts also accept explicitly
+prepared Kannel execution inputs. Target-aware readiness, archive-based source
+identity, `kannel` resource labels, and offline resource finalization are described
+in [target-aware execution](../harness/EXECUTION.md#target-aware-execution).
+The process-group sampler and local full-benchmark launcher remain the next steps.
+
 The initial scenario is **HTTP ingress -> SMPP provider -> HTTP DLR callback**.
 Kannel SMPP ingress is deferred. Sendium retains its existing HTTP/SMPP ingress
 and JVM/native choices. AWS gateway and harness hosts remain `t4g.small`.

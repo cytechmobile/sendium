@@ -6,6 +6,31 @@ they do not provision infrastructure or execute traffic.
 
 ## Application runtime identity
 
+### Gateway target identity
+
+`configuration.application.benchmarkTarget` selects `sendium` or `kannel` in
+version-1 reports. Absence retains the existing Sendium contract. Kannel reports
+must use HTTP ingress, runtime `kannel`, empty `jvmArguments`, explicit
+`messageStore`, and currently `dlrStorage: internal`. Mandrel/native heap metadata
+does not describe the Kannel C build and is rejected for that target.
+
+Kannel source identity is `application.source`: version, upstream archive
+SHA-256, patch archive SHA-256, and applied patch names. Its
+`provenance.applicationCommit` is null; a Sendium commit must not be substituted
+for archive identity. Sendium's application commit remains mandatory.
+
+The selected gateway's infrastructure and resource samples use its actual name:
+`infrastructure.kannel` / `resources.kannel` or the existing `sendium` fields.
+Mixed gateway labels are rejected. Resource summaries and offline finalization
+retain the same target, while accounting and observation-window rules are shared.
+Execution resource manifests accept the optional neutral `gatewaySamples` path;
+legacy `sendiumSamples` remains supported for Sendium and cannot be combined with
+that path. The workload schema and Sendium preset/runtime validation are unchanged.
+
+See [prepared execution inputs](../harness/EXECUTION.md#target-aware-execution).
+
+### Sendium application runtime
+
 The effective preset records `runtime.applicationRuntime` as `jvm` (default) or
 `native`. The Action's `application_runtime` choice selects the application build
 and launch mode. Deployment requires matching native compiler metadata and resolved

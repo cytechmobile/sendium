@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Sendium performance results v1",
+  "title": "SMS gateway performance results v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "provenance", "configuration", "validity", "overall", "cohortIntervals", "eventIntervals", "resources", "drain", "measurementMetadata", "diagnostics"],
@@ -11,7 +11,7 @@
       "required": ["branch", "applicationCommit", "harnessRevision", "workflowRunUrl", "runIdentity", "artifacts"],
       "properties": {
         "branch": { "type": "string", "minLength": 1 },
-        "applicationCommit": { "$ref": "#/$defs/commit" },
+        "applicationCommit": { "anyOf": [{ "$ref": "#/$defs/commit" }, { "type": "null" }] },
         "harnessRevision": { "$ref": "#/$defs/commit" },
         "workflowRunUrl": { "type": ["string", "null"] },
         "runIdentity": { "type": "string", "minLength": 1 },
@@ -26,7 +26,10 @@
         "application": {
           "type": "object", "required": ["jvmArguments", "connections", "dlrStorage"],
           "properties": {
-            "runtime": { "enum": ["jvm", "native"] },
+            "benchmarkTarget": { "enum": ["sendium", "kannel"] },
+            "runtime": { "enum": ["jvm", "native", "kannel"] },
+            "source": { "$ref": "#/$defs/kannelSource" },
+            "messageStore": { "enum": ["spool", "file", "disabled"] },
             "jvmArguments": { "type": "array", "items": { "type": "string" } },
             "nativeArguments": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^-Xm[sx][1-9][0-9]*[mg]$" } },
             "nativeBuild": {
@@ -39,24 +42,64 @@
                 "buildArguments": { "const": ["-march=compatibility"] }
               }
             },
-            "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled"] }
+            "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled", "internal"] }
           },
           "allOf": [{ "if": { "required": ["runtime"], "properties": { "runtime": { "const": "native" } } },
                       "then": { "required": ["nativeArguments"], "properties": { "jvmArguments": { "maxItems": 0 } } } }]
         },
-        "infrastructure": { "type": "object", "required": ["preset", "region", "sendium", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object", "properties": { "resourceMetricsRequired": { "type": "boolean" }, "accountId": { "type": "string", "pattern": "^[0-9]{12}$" } } } } }
+        "infrastructure": { "type": "object", "required": ["preset", "region", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "kannel": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object", "properties": { "resourceMetricsRequired": { "type": "boolean" }, "accountId": { "type": "string", "pattern": "^[0-9]{12}$" } } } } }
       }
     },
     "validity": { "type": "object", "required": ["status", "reasons"], "properties": { "status": { "enum": ["valid", "inconclusive", "failed"] }, "reasons": { "type": "array", "items": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1 }, "message": { "type": "string", "minLength": 1 } } } } } },
     "overall": { "$ref": "#/$defs/measurements" },
     "cohortIntervals": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/measurements" }, { "type": "object", "required": ["startOffsetSeconds", "endOffsetSeconds"], "properties": { "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "endOffsetSeconds": { "$ref": "#/$defs/nonnegative" } } }] } },
     "eventIntervals": { "type": "array", "items": { "type": "object", "required": ["phase", "startOffsetSeconds", "durationSeconds", "providerResponses", "receiptsForwarded"], "properties": { "phase": { "enum": ["measurement", "drain"] }, "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "durationSeconds": { "type": "number", "exclusiveMinimum": 0 }, "providerArrivals": { "$ref": "#/$defs/count" }, "providerResponses": { "$ref": "#/$defs/count" }, "receiptsGenerated": { "$ref": "#/$defs/count" }, "receiptsForwarded": { "$ref": "#/$defs/count" }, "outstanding": { "$ref": "#/$defs/backlog" }, "rates": { "$ref": "#/$defs/outputRates" } } } },
-    "resources": { "type": "object", "required": ["sendium", "harness", "cpuCredits"], "properties": { "sendium": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "harness": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "cpuCredits": { "type": "array", "items": { "$ref": "#/$defs/creditState" } }, "database": { "$ref": "#/$defs/rdsEvidence" } } },
+    "resources": { "type": "object", "required": ["harness", "cpuCredits"], "properties": { "sendium": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "kannel": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "harness": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "cpuCredits": { "type": "array", "items": { "$ref": "#/$defs/creditState" } }, "database": { "$ref": "#/$defs/rdsEvidence" } } },
     "drain": { "type": "object", "required": ["durationSeconds", "timeoutReached", "unfinishedAccepted", "pendingAdmission"], "properties": { "durationSeconds": { "$ref": "#/$defs/nonnegative" }, "timeoutReached": { "type": "boolean" }, "unfinishedAccepted": { "$ref": "#/$defs/count" }, "pendingAdmission": { "$ref": "#/$defs/count" } } },
     "measurementMetadata": { "type": "object", "required": ["histogramAlgorithm", "histogramPrecision", "histogramOverflowCount", "duplicateDetectionHorizonSeconds", "limitations"], "properties": { "histogramAlgorithm": { "type": "string" }, "histogramPrecision": { "type": "object" }, "histogramOverflowCount": { "$ref": "#/$defs/count" }, "duplicateDetectionHorizonSeconds": { "$ref": "#/$defs/nonnegative" }, "inputTiming": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/inputTiming" }] }, "generatorPhases": { "type": "array", "items": { "type": "object", "properties": { "pacingMode": { "type": "string" }, "delayedByAtLeastOnePeriod": { "$ref": "#/$defs/count" }, "submissionLateness": { "$ref": "#/$defs/distribution" } } } }, "limitations": { "type": "array", "items": { "type": "string" } } } },
     "diagnostics": { "type": "array", "items": { "type": "string" } }
   },
+  "allOf": [{
+    "if": { "properties": { "configuration": { "properties": { "application": {
+      "required": ["benchmarkTarget"], "properties": { "benchmarkTarget": { "const": "kannel" } }
+    } } } } },
+    "then": {
+      "properties": {
+        "provenance": { "properties": { "applicationCommit": { "type": "null" } } },
+        "configuration": { "properties": {
+          "workload": { "properties": { "ingressMode": { "const": "http" } } },
+          "application": {
+            "required": ["runtime", "source", "messageStore"],
+            "properties": { "runtime": { "const": "kannel" }, "dlrStorage": { "const": "internal" },
+              "jvmArguments": { "maxItems": 0 }, "nativeArguments": false, "nativeBuild": false }
+          },
+          "infrastructure": { "required": ["kannel"], "properties": { "sendium": false } }
+        } },
+        "resources": { "required": ["kannel"], "properties": { "sendium": false } }
+      }
+    },
+    "else": {
+      "properties": {
+        "provenance": { "properties": { "applicationCommit": { "$ref": "#/$defs/commit" } } },
+        "configuration": { "properties": {
+          "application": { "properties": { "runtime": { "enum": ["jvm", "native"] },
+            "dlrStorage": { "enum": ["postgresql", "disabled"] } } },
+          "infrastructure": { "required": ["sendium"], "properties": { "kannel": false } }
+        } },
+        "resources": { "required": ["sendium"], "properties": { "kannel": false } }
+      }
+    }
+  }],
   "$defs": {
+    "kannelSource": {
+      "type": "object", "required": ["version", "archiveSha256", "patchArchiveSha256", "patches"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+        "archiveSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "patchArchiveSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "patches": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "pattern": "\\S" } }
+      }
+    },
     "rdsEvidence": {
       "type": "object", "additionalProperties": false,
       "required": ["schemaVersion", "namespace", "runIdentity", "collectionStartedUtc", "database", "phases", "metrics", "collectionIssues"],
@@ -143,7 +186,7 @@
       }
     },
     "creditSample": { "type": "object", "required": ["timestamp"], "properties": { "timestamp": { "type": "string", "format": "date-time" }, "balanceAverage": { "$ref": "#/$defs/nullableNonnegative" }, "usageSum": { "$ref": "#/$defs/nullableNonnegative" }, "surplusBalanceAverage": { "$ref": "#/$defs/nullableNonnegative" }, "surplusChargedSum": { "$ref": "#/$defs/nullableNonnegative" } } },
-    "creditState": { "type": "object", "required": ["instanceId", "mode", "samples"], "properties": { "source": { "enum": ["sendium", "harness"] }, "instanceId": { "type": "string" }, "instanceType": { "type": "string" }, "burstable": { "type": ["boolean", "null"] }, "mode": { "enum": ["standard", "unlimited", "not-applicable", "unknown"] }, "periodSeconds": { "type": "integer", "minimum": 1 }, "windowStart": { "type": "string", "format": "date-time" }, "windowEnd": { "type": "string", "format": "date-time" }, "samples": { "type": "array", "items": { "$ref": "#/$defs/creditSample" } }, "collectionIssues": { "type": "array", "items": { "type": "string" } } } },
+    "creditState": { "type": "object", "required": ["instanceId", "mode", "samples"], "properties": { "source": { "enum": ["sendium", "kannel", "harness"] }, "instanceId": { "type": "string" }, "instanceType": { "type": "string" }, "burstable": { "type": ["boolean", "null"] }, "mode": { "enum": ["standard", "unlimited", "not-applicable", "unknown"] }, "periodSeconds": { "type": "integer", "minimum": 1 }, "windowStart": { "type": "string", "format": "date-time" }, "windowEnd": { "type": "string", "format": "date-time" }, "samples": { "type": "array", "items": { "$ref": "#/$defs/creditSample" } }, "collectionIssues": { "type": "array", "items": { "type": "string" } } } },
     "backlog": { "type": "object", "required": ["pendingAdmission", "acceptedAwaitingProvider", "acceptedAwaitingReceipt"], "additionalProperties": { "$ref": "#/$defs/count" } },
     "outputRates": { "type": "object", "required": ["providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond"], "additionalProperties": { "$ref": "#/$defs/nonnegative" } },
     "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },

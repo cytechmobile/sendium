@@ -193,8 +193,11 @@ The local Kannel probe explicitly passes `HttpGatewayProtocol.KANNEL` to both
 
 These adapters have been verified with real Kannel 1.4.5 for ten single-part HTTP
 messages and delivery reports. See the [local correctness check](../kannel/README.md).
-The production benchmark CLI/configuration and workflow still select Sendium;
-Kannel runner/deployment integration is a subsequent task.
+The shared benchmark runner now accepts explicitly prepared Kannel inputs and
+renders target-aware reports; missing target fields retain Sendium defaults.
+See [target-aware execution](EXECUTION.md#target-aware-execution) for readiness,
+source identity, and resource paths. Configuration generation, process-group
+sampling, local target orchestration, and workflow selection are subsequent tasks.
 
 ## SMPP submission and forwarded receipts
 

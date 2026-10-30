@@ -48,7 +48,7 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     public record Credits(String source, String instanceId, String instanceType, Boolean burstable, String mode, int periodSeconds,
             String windowStart, String windowEnd, List<CreditSample> samples, List<String> collectionIssues) {
         public Credits {
-            if (!List.of("sendium", "harness").contains(source) || instanceId == null || instanceType == null
+            if (!List.of("sendium", "kannel", "harness").contains(source) || instanceId == null || instanceType == null
                     || !List.of("standard", "unlimited", "not-applicable", "unknown").contains(mode)
                     || periodSeconds < 1 || !instant(windowStart).isBefore(instant(windowEnd)) || samples.size() > 1440) {
                 throw new IllegalArgumentException("Invalid instance credit evidence");
@@ -80,10 +80,15 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     }
 
     public static ResourceEvidence loadAvailable(Path sendiumFile, Path harnessFile, Path creditFile, Path databaseFile, int budget) {
+        return loadAvailable(sendiumFile, harnessFile, creditFile, databaseFile, budget, BenchmarkTarget.SENDIUM);
+    }
+
+    public static ResourceEvidence loadAvailable(Path gatewayFile, Path harnessFile, Path creditFile, Path databaseFile,
+            int budget, BenchmarkTarget target) {
         if (budget < 1) { throw new IllegalArgumentException("Invalid resource sample budget"); }
         ObjectMapper mapper = new ObjectMapper();
         List<String> issues = new ArrayList<>();
-        List<Sample> sendium = availableSamples("sendium", sendiumFile, budget, mapper, issues);
+        List<Sample> sendium = availableSamples(target.id(), gatewayFile, budget, mapper, issues);
         List<Sample> harness = availableSamples("harness", harnessFile, budget, mapper, issues);
         List<Credits> credits = List.of();
         if (creditFile != null) {
@@ -163,12 +168,21 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     }
 
     public ObjectNode json(ObjectMapper mapper, Window window, MeasurementTimeline.Snapshot timeline) {
-        return jsonForIntervals(mapper, window, timeline == null ? List.of() : timeline.events());
+        return json(mapper, window, timeline, BenchmarkTarget.SENDIUM);
+    }
+
+    public ObjectNode json(ObjectMapper mapper, Window window, MeasurementTimeline.Snapshot timeline, BenchmarkTarget target) {
+        return jsonForIntervals(mapper, window, timeline == null ? List.of() : timeline.events(), target);
     }
 
     public ObjectNode jsonForIntervals(ObjectMapper mapper, Window window, List<MeasurementTimeline.EventInterval> events) {
+        return jsonForIntervals(mapper, window, events, BenchmarkTarget.SENDIUM);
+    }
+
+    public ObjectNode jsonForIntervals(ObjectMapper mapper, Window window, List<MeasurementTimeline.EventInterval> events,
+            BenchmarkTarget target) {
         ObjectNode result = mapper.createObjectNode();
-        result.set("sendium", mapper.valueToTree(sendium)); result.set("harness", mapper.valueToTree(harness));
+        result.set(target.id(), mapper.valueToTree(sendium)); result.set("harness", mapper.valueToTree(harness));
         result.set("cpuCredits", mapper.valueToTree(cpuCredits)); result.set("collectionIssues", mapper.valueToTree(collectionIssues));
         if (database != null) { result.set("database", database.json(mapper)); }
         result.put("sampleBudgetPerSource", sampleBudget).put("processCpuPercentBasis", "100 percent is one logical CPU core")
@@ -176,7 +190,7 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
         if (window != null) { result.putObject("window").put("start", window.start().toString()).put("end", window.end().toString()); }
         ObjectNode summary = result.putObject("summary");
         ObjectNode overall = summary.putObject("overall");
-        overall.set("sendium", mapper.valueToTree(summarize(sendium, window)));
+        overall.set(target.id(), mapper.valueToTree(summarize(sendium, window)));
         overall.set("harness", mapper.valueToTree(summarize(harness, window)));
         var intervals = summary.putArray("intervals");
         if (window != null) {
@@ -186,7 +200,7 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
                 ObjectNode value = intervals.addObject();
                 value.put("phase", event.phase()).put("startOffsetSeconds", event.startOffsetNanos() / 1_000_000_000.0)
                         .put("durationSeconds", event.durationNanos() / 1_000_000_000.0);
-                value.set("sendium", mapper.valueToTree(summarize(sendium, interval)));
+                value.set(target.id(), mapper.valueToTree(summarize(sendium, interval)));
                 value.set("harness", mapper.valueToTree(summarize(harness, interval)));
             }
         }
