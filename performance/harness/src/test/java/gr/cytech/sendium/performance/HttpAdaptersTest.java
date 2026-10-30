@@ -280,6 +280,119 @@ class HttpAdaptersTest {
         if (dlr) { ledger.event(token, RECEIPT_GENERATED); }
     }
 
+    @Test
+    void kannelReceiptsUseSimulatorIdentityAndMayArriveBeforeAdmission() throws Exception {
+        for (String acknowledgement : new String[]{"0: Accepted for delivery", "3: Queued for later delivery"}) {
+            RunConfig config = config(true, 3000, 10);
+            MessageLedger ledger = ledger(config);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try (HttpReceiptReceiver receiver = new HttpReceiptReceiver(new InetSocketAddress("127.0.0.1", 0),
+                    "/dlr", 2, 10, true, ledger, HttpGatewayProtocol.KANNEL)) {
+                receiver.start();
+                URI callback = URI.create("http://127.0.0.1:" + receiver.port() + "/dlr");
+                try (Api api = new Api(exchange -> {
+                    try {
+                        var query = HttpReceiptReceiver.decodeQuery(exchange.getRequestURI().getRawQuery());
+                        assertEquals("1", query.get("dlr-mask"));
+                        String token = query.get("text");
+                        ledger.event(token, PROVIDER_ARRIVAL);
+                        assertTrue(ledger.assignProviderId(token, "p-1"));
+                        ledger.event(token, PROVIDER_RESPONSE);
+                        ledger.event(token, RECEIPT_GENERATED);
+                        assertTrue(query.get("dlr-url").contains("messageId=%F&status=%d"));
+                        URI receipt = URI.create(query.get("dlr-url").replace("%F", "p-1").replace("%d", "1"));
+                        assertEquals(200, get(receipt));
+                        assertEquals(1, ledger.snapshot().pendingAdmission());
+                        respond(exchange, 202, acknowledgement);
+                    } catch (Throwable error) {
+                        failure.set(error);
+                        respond(exchange, 500, "test handler failed");
+                    }
+                }); HttpAdmissionClient client = new HttpAdmissionClient(config, settings(api.uri(), callback),
+                        ledger, HttpGatewayProtocol.KANNEL)) {
+                    assertEquals(ACCEPTED, client.submit(true).orElseThrow().completion().get(5, TimeUnit.SECONDS));
+                    assertNull(failure.get());
+                    assertEquals(1, ledger.snapshot().acceptedReceiptForwarded());
+                    assertEquals(0, ledger.snapshot().violations());
+                    assertFalse(ledger.hasOutstandingWork());
+                }
+            }
+        }
+    }
+
+    @Test
+    void kannelRejectsUuidAndPartialAcceptanceBodiesAndOmitsDlrSettingsWhenDisabled() throws Exception {
+        for (String body : new String[]{UUID.randomUUID().toString(), "0: Accepted", "0: Accepted for delivery extra"}) {
+            RunConfig config = config(false, 3000, 10);
+            MessageLedger ledger = ledger(config);
+            AtomicReference<java.util.Map<String, String>> query = new AtomicReference<>();
+            try (Api api = new Api(exchange -> {
+                query.set(HttpReceiptReceiver.decodeQuery(exchange.getRequestURI().getRawQuery()));
+                respond(exchange, 202, body);
+            }); HttpAdmissionClient client = new HttpAdmissionClient(config, settings(api.uri(), null), ledger,
+                    HttpGatewayProtocol.KANNEL)) {
+                assertEquals(FAILED, client.submit(true).orElseThrow().completion().get(5, TimeUnit.SECONDS));
+                assertEquals(1, client.problems().get(HttpAdmissionClient.Problem.INVALID_ACKNOWLEDGEMENT));
+                assertFalse(query.get().containsKey("dlr-mask"));
+                assertFalse(query.get().containsKey("dlr-url"));
+            }
+        }
+    }
+
+    @Test
+    void kannelDoesNotLearnProviderIdentityFromCallbacksAndAcknowledgesProvenDuplicates() throws Exception {
+        RunConfig config = config(true, 3000, 10);
+        MessageLedger ledger = ledger(config);
+        String first = ledger.attempt(true);
+        String second = ledger.attempt(true);
+        for (String token : new String[]{first, second}) {
+            ledger.admission(token, ACCEPTED);
+            ledger.event(token, PROVIDER_ARRIVAL);
+            assertTrue(ledger.assignProviderId(token, token.equals(first) ? "p-1" : "p-2"));
+            ledger.event(token, PROVIDER_RESPONSE);
+            ledger.event(token, RECEIPT_GENERATED);
+        }
+        try (HttpReceiptReceiver receiver = new HttpReceiptReceiver(new InetSocketAddress("127.0.0.1", 0),
+                "/dlr", 2, 10, true, ledger, HttpGatewayProtocol.KANNEL)) {
+            receiver.start();
+            String url = "http://127.0.0.1:" + receiver.port() + "/dlr?token=" + first + "&messageId=p-1&status=1";
+            assertEquals(400, get(URI.create(url.replace("p-1", "p-2"))));
+            assertEquals(400, get(URI.create(url.replace("p-1", "p-unknown"))));
+            assertEquals(400, get(URI.create(url.replace(first, "unknown:1"))));
+            assertEquals(400, get(URI.create(url + "&messageId=p-1")));
+            assertEquals(422, get(URI.create(url.replace("status=1", "status=2"))));
+            assertEquals(0, ledger.snapshot().receiptsForwarded());
+            assertEquals(200, get(URI.create(url)));
+            assertEquals(200, get(URI.create(url)));
+            assertEquals(1, ledger.snapshot().receiptsForwarded());
+            assertEquals(1, ledger.snapshot().duplicateReceipts());
+            assertEquals(4, ledger.snapshot().violations());
+        }
+    }
+
+    @Test
+    void kannelExpiredReceiptHistoryIsAcknowledgedAsLimitedRatherThanProven() throws Exception {
+        RunConfig config = config(true, 3000, 10);
+        MessageLedger ledger = new MessageLedger(config, "http-test", System::nanoTime, 0);
+        String token = ledger.attempt(true);
+        ledger.admission(token, ACCEPTED);
+        ledger.event(token, PROVIDER_ARRIVAL);
+        assertTrue(ledger.assignProviderId(token, "p-1"));
+        ledger.event(token, PROVIDER_RESPONSE);
+        ledger.event(token, RECEIPT_GENERATED);
+        assertEquals(MessageLedger.ReceiptResult.RECORDED, ledger.receiveProviderReceipt(token, "p-1"));
+        try (HttpReceiptReceiver receiver = new HttpReceiptReceiver(new InetSocketAddress("127.0.0.1", 0),
+                "/dlr", 1, 1, true, ledger, HttpGatewayProtocol.KANNEL)) {
+            receiver.start();
+            assertEquals(200, get(URI.create("http://127.0.0.1:" + receiver.port()
+                    + "/dlr?token=" + token + "&messageId=p-1&status=1")));
+            assertEquals(1, receiver.problems().get(HttpReceiptReceiver.Problem.LIMITED_HISTORY));
+            assertEquals(1, ledger.eventsBeyondRetention());
+            assertEquals(1, ledger.snapshot().receiptsForwarded());
+            assertEquals(0, ledger.snapshot().violations());
+        }
+    }
+
     private static int get(URI uri) throws Exception {
         try (HttpClient client = HttpClient.newHttpClient()) {
             return client.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(3)).GET().build(),

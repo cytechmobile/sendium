@@ -164,4 +164,22 @@ class MessageLedgerTest {
                 + counts.timedOut() + counts.pendingAdmission());
         assertEquals(counts.accepted(), counts.acceptedProviderCompleted() + counts.acceptedAwaitingProvider());
     }
+
+    @Test
+    void providerIdentityMustBeAssignedBySimulatorBeforeResponseAndCannotBeReplaced() {
+        MessageLedger ledger = ledger(true, 2, 2);
+        String token = ledger.attempt(true);
+        assertFalse(ledger.assignProviderId(token, "p-1"));
+        ledger.event(token, PROVIDER_ARRIVAL);
+        assertTrue(ledger.assignProviderId(token, "p-1"));
+        assertFalse(ledger.assignProviderId(token, "p-2"));
+        ledger.event(token, PROVIDER_RESPONSE);
+        ledger.event(token, RECEIPT_GENERATED);
+        assertEquals(MessageLedger.ReceiptResult.INVALID, ledger.receiveProviderReceipt(token, "p-2"));
+        assertEquals(0, ledger.snapshot().receiptsForwarded());
+        assertEquals(MessageLedger.ReceiptResult.RECORDED, ledger.receiveProviderReceipt(token, "p-1"));
+        ledger.admission(token, ACCEPTED);
+        assertEquals(1, ledger.snapshot().acceptedReceiptForwarded());
+        assertEquals(3, ledger.snapshot().violations());
+    }
 }

@@ -86,7 +86,7 @@ def inspect_image(image):
     return {"id": data["Id"], "platform": data["Os"] + "/" + data["Architecture"]}
 
 
-def run_smoke(output, *, skip_build=False, timeout=120):
+def run_smoke(output, *, skip_build=False, timeout=120, traffic=False):
     output = Path(output).resolve()
     if not output.parent.is_dir():
         raise ValueError("Output parent must already exist")
@@ -99,7 +99,8 @@ def run_smoke(output, *, skip_build=False, timeout=120):
     network_attempted = False
     # Kannel enforces SMPP's eight-character password limit on the wire.
     passwords = [secrets.token_hex(4), secrets.token_hex(12), secrets.token_hex(12)]
-    outcome = {"schemaVersion": 1, "scope": "startup-and-bind-only", "status": "failed",
+    outcome = {"schemaVersion": 1,
+               "scope": "single-part-http-dlr-correctness" if traffic else "startup-and-bind-only", "status": "failed",
                "runIdentity": identity, "target": "kannel", "ingressMode": "http",
                "dlrStorage": "internal", "messageStore": "spool",
                "images": {}, "issues": [], "cleanupIssues": [], "buildSkipped": skip_build}
@@ -126,6 +127,9 @@ def run_smoke(output, *, skip_build=False, timeout=120):
             directory = Path(temporary)
             (directory / "provider-password").write_text(passwords[0], encoding="utf-8")
             (directory / "kannel.conf").write_text(configuration(*passwords), encoding="utf-8")
+            if traffic:
+                (directory / "http-password").write_text(passwords[1], encoding="utf-8")
+                (directory / "traffic-enabled").touch()
             network_attempted = True
             docker("network", "create", "--internal", "--label", "sendium.kannel.smoke=" + identity, network)
             try:
@@ -145,8 +149,19 @@ def run_smoke(output, *, skip_build=False, timeout=120):
                 time.sleep(1)
                 wait_ready(directory, candidates, ["gateway-ready", "provider-bound"], timeout)
                 outcome["readiness"] = {"smsboxHttp": True, "authenticatedSmppTransceiverBind": True}
+                if traffic:
+                    wait_ready(directory, candidates, ["traffic-result.json"], timeout)
+                    result = json.loads((directory / "traffic-result.json").read_text(encoding="utf-8"))
+                    if result.get("status") != "passed":
+                        outcome["issues"].append("Message/DLR correctness check failed")
                 outcome["status"] = "passed"
             finally:
+                if traffic and (directory / "traffic-result.json").is_file():
+                    try:
+                        result = json.loads((directory / "traffic-result.json").read_text(encoding="utf-8"))
+                        (output / "traffic-result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                    except (OSError, ValueError):
+                        outcome["issues"].append("Could not preserve traffic correctness evidence")
                 # Stop the provider while the gateway session is still connected;
                 # graceful probe exit verifies its final problem checks.
                 (directory / "stop-provider").touch()
@@ -201,12 +216,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New result directory beneath an existing parent")
     parser.add_argument("--skip-build", action="store_true", help="Reuse the existing local smoke images")
+    parser.add_argument("--traffic", action="store_true", help="Verify ten HTTP submissions and their delivery reports")
     arguments = parser.parse_args()
     try:
-        outcome = run_smoke(arguments.output, skip_build=arguments.skip_build)
+        outcome = run_smoke(arguments.output, skip_build=arguments.skip_build, traffic=arguments.traffic)
     except (ValueError, OSError) as error:
         parser.error(str(error))
-    print(f"Kannel startup/bind smoke: {outcome['status']}; evidence: {arguments.output / 'outcome.json'}")
+    print(f"Kannel {outcome['scope']}: {outcome['status']}; evidence: {arguments.output / 'outcome.json'}")
     return 0 if outcome["status"] == "passed" else 1
 
 

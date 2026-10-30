@@ -10,8 +10,12 @@ RUN chmod +x mvnw \
     && ./mvnw -B -ntp -f performance/harness/pom.xml -Dmaven.test.skip=true package \
     && mkdir /opt/probe \
     && cp performance/harness/target/sendium-performance-harness-*.jar /opt/probe/harness.jar
-COPY performance/kannel/KannelBindProbe.java /src/KannelBindProbe.java
-RUN javac -cp /opt/probe/harness.jar -d /opt/probe KannelBindProbe.java
+COPY performance/kannel/KannelBindProbe.java performance/kannel/KannelTrafficProbe.java /src/
+RUN javac -cp /opt/probe/harness.jar -d /opt/probe KannelBindProbe.java KannelTrafficProbe.java
+
+FROM build AS verification
+COPY performance/harness/src/test performance/harness/src/test
+RUN ./mvnw -B -ntp -f performance/harness/pom.xml verify
 
 FROM eclipse-temurin:25-jre AS provider
 COPY --from=build /opt/probe /opt/probe

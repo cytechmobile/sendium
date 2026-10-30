@@ -157,6 +157,13 @@ public final class SmppProvider implements AutoCloseable {
     private void process(SmppSession session, SubmitSm submit, SubmitSmResp response, String token) {
         try {
             Thread.sleep(workload.providerResponseDelayMillis());
+            synchronized (ledger) {
+                if (ledger.isFrozen()) { return; }
+                if (!ledger.assignProviderId(token, response.getMessageId())) {
+                    problem(Problem.UNKNOWN_CORRELATION);
+                    return;
+                }
+            }
             session.sendResponsePdu(response);
             synchronized (ledger) { if (ledger.isFrozen()) { return; } ledger.event(token, PROVIDER_RESPONSE); }
             if (workload.dlrEnabled()) {
