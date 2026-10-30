@@ -1,6 +1,7 @@
 """Unprivileged dispatch validation and build-artifact identity/packaging helpers."""
 
 import argparse
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 import hashlib
 import html
@@ -21,6 +22,7 @@ sys.path.insert(0, str(HERE.parent / "contracts"))
 from jsonschema import Draft202012Validator, ValidationError
 from preset_validation import validate_preset
 from application_runtime import RUNTIMES, runtime_mode, validate_native_build, verify_elf_header
+from kannel_identity import SOURCE as KANNEL_SOURCE, validate_build as validate_kannel_build
 
 
 INPUT_FIELDS = {
@@ -75,7 +77,7 @@ def boolean(value):
 
 
 def normalize(inputs, context, preset):
-    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime"}
+    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target"}
     require(isinstance(inputs, dict) and set(inputs) <= allowed, "Unknown dispatch input")
     result = json.loads(json.dumps(preset))
     mode = inputs.get("application_runtime", runtime_mode(result))
@@ -86,6 +88,10 @@ def normalize(inputs, context, preset):
         workload[field] = number(inputs.get(name, workload[field]), integral=name != "offered_rate")
     workload["ingressMode"] = inputs.get("ingress_mode", workload["ingressMode"])
     workload["dlrEnabled"] = boolean(inputs.get("dlr_enabled", workload["dlrEnabled"]))
+    target = inputs.get("benchmark_target", "sendium")
+    require(target in ("sendium", "kannel"), "Unknown benchmark target")
+    require(target != "kannel" or (workload["ingressMode"] == "http" and mode == "jvm"),
+            "Kannel requires HTTP ingress and cannot select Sendium native runtime")
     for source in ("sendium", "harness"):
         instance_type = inputs.get(source + "_instance_type", result["aws"]["instanceDefaults"][source])
         require(isinstance(instance_type, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*\.[a-z0-9]+", instance_type), "Invalid EC2 instance type")
@@ -102,14 +108,23 @@ def normalize(inputs, context, preset):
     identity = "gh-" + str(context["runId"]) + "-" + str(context["runAttempt"])
     require(len(identity) <= 27, "Run identity exceeds IAM name budget")
     return {"schemaVersion": 1, "runIdentity": identity, "repository": context["repository"], "applicationRef": context["ref"],
+            **({"benchmarkTarget": "kannel", "applicationSource": deepcopy(KANNEL_SOURCE), "dispatchRevision": context["applicationCommit"]} if target == "kannel" else {}),
             "controllerRevision": context["controllerRevision"], "workflowRevision": context["workflowRevision"],
-            "provenance": {"branch": context["ref"][11:], "applicationCommit": context["applicationCommit"],
+            "provenance": {"branch": context["ref"][11:], "applicationCommit": None if target == "kannel" else context["applicationCommit"],
                            "harnessRevision": context["controllerRevision"], "workflowRunUrl": context["workflowRunUrl"], "runIdentity": identity},
             "preset": result}
 
 
 def revision(request, component):
+    if component == "application" and benchmark_target(request) == "kannel":
+        return request["controllerRevision"]
     return request["provenance"]["applicationCommit" if component == "application" else "harnessRevision"]
+
+
+def benchmark_target(request):
+    target = request.get("benchmarkTarget", "sendium")
+    require(target in ("sendium", "kannel"), "Unknown benchmark target")
+    return target
 
 
 def machine_architecture(machine=None):
@@ -156,8 +171,14 @@ def build_bundle(request, component, architecture, checkout, output, java_versio
     output.mkdir(exist_ok=False)
     target = output / FILES[component]
     native_build = None
+    kannel_build = None
     if component == "application":
-        if runtime_mode(request["preset"]) == "native":
+        if benchmark_target(request) == "kannel":
+            directory = checkout / "performance/kannel/target/aws-runtime"
+            kannel_build = read(directory / "build-metadata.json")
+            validate_kannel_build(kannel_build, architecture)
+            shutil.copyfile(directory / "kannel.tar.gz", target)
+        elif runtime_mode(request["preset"]) == "native":
             native_build = validate_native_build(read(checkout / "sendium-app/target/performance-native-build.json"), request["preset"], architecture)
             archive_native_application(checkout / "sendium-app/target", target, architecture)
         else:
@@ -173,6 +194,8 @@ def build_bundle(request, component, architecture, checkout, output, java_versio
                 "file": target.name, "sha256": digest(target), "size": target.stat().st_size}
     if native_build is not None:
         manifest.update(applicationRuntime="native", nativeBuild=native_build)
+    if kannel_build is not None:
+        manifest.update(benchmarkTarget="kannel", applicationRuntime="kannel", kannelBuild=kannel_build)
     write(output / "build-manifest.json", manifest)
     return manifest
 
@@ -184,13 +207,19 @@ def verify_bundle(request, directory, component, architecture):
     require(bundle.is_dir() and not bundle.is_symlink() and not (bundle / "build-manifest.json").is_symlink(), "Invalid artifact directory")
     manifest = read(bundle / "build-manifest.json")
     native = component == "application" and runtime_mode(request["preset"]) == "native"
+    kannel = component == "application" and benchmark_target(request) == "kannel"
     fields = {"schemaVersion", "runIdentity", "component", "sourceRevision", "architecture", "javaVersion", "file", "sha256", "size"}
     if native:
         fields.update(("applicationRuntime", "nativeBuild"))
+    if kannel:
+        fields.update(("benchmarkTarget", "applicationRuntime", "kannelBuild"))
     require(isinstance(manifest, dict) and set(manifest) == fields, "Build manifest fields mismatch")
     if native:
         require(manifest["applicationRuntime"] == "native", "Native application runtime mismatch")
         validate_native_build(manifest["nativeBuild"], request["preset"], architecture)
+    if kannel:
+        require(manifest["benchmarkTarget"] == manifest["applicationRuntime"] == "kannel", "Kannel build target mismatch")
+        validate_kannel_build(manifest["kannelBuild"], architecture)
     require(manifest.get("schemaVersion") == 1 and manifest.get("runIdentity") == request["runIdentity"]
             and manifest.get("component") == component and manifest.get("architecture") == architecture
             and manifest.get("sourceRevision") == revision(request, component)
@@ -213,7 +242,8 @@ def summary(request, path, ready=False):
     provenance = request["provenance"]
     lines = ["## Performance test build preparation", "", "| Setting | Value |", "|---|---|"]
     fields = {"Run": request["runIdentity"], "Application branch": provenance["branch"],
-              "Application runtime": runtime_mode(request["preset"]),
+              "Benchmark target": benchmark_target(request),
+              "Application runtime": "kannel" if benchmark_target(request) == "kannel" else runtime_mode(request["preset"]),
               "Application commit": provenance["applicationCommit"], "Harness/controller revision": request["controllerRevision"],
               "Workflow revision": request["workflowRevision"], **request["preset"]["aws"]["instanceDefaults"], **request["preset"]["workload"]}
     for key, value in fields.items():
@@ -258,7 +288,8 @@ def main():
             request = normalize(read_inputs(), github_context(os.environ["CONTROLLER_REVISION"]), read(HERE.parent / "presets/aws-private-jvm-v1.json"))
             write(args.output, request)
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
-                stream.write("controller_revision=" + request["controllerRevision"] + "\nrun_identity=" + request["runIdentity"] + "\n")
+                stream.write("controller_revision=" + request["controllerRevision"] + "\nrun_identity=" + request["runIdentity"]
+                             + "\napplication_revision=" + revision(request, "application") + "\n")
             summary(request, os.environ["GITHUB_STEP_SUMMARY"])
         elif args.command == "bundle":
             build_bundle(read(args.request), args.component, args.architecture, args.checkout, args.output, os.environ["BUILD_JAVA_VERSION"])

@@ -101,6 +101,9 @@ def package(request, source, output):
                 "ingressMode": report["configuration"]["workload"]["ingressMode"],
                 "missingFiles": [name for name in TOP_LEVEL if not (source / name).is_file()],
                 "files": files, "bundle": descriptor(output / "evidence.tar.gz", "evidence.tar.gz")}
+    if prepare.benchmark_target(request) == "kannel":
+        manifest.update(benchmarkTarget="kannel", applicationSource=application["source"],
+                        dlrStorage=application["dlrStorage"], messageStore=application["messageStore"])
     prepare.write(output / "manifest.json", manifest)
     return manifest
 

@@ -44,8 +44,14 @@ def validate(document, request):
         prepare.require(document["provenance"][key] == request["provenance"][key], "Published report provenance mismatch")
     prepare.require(document["configuration"]["workload"] == request["preset"]["workload"], "Published workload mismatch")
     application = document["configuration"]["application"]
-    mode = runtime_mode(request["preset"])
+    target = prepare.benchmark_target(request)
+    prepare.require(application.get("benchmarkTarget", "sendium") == target, "Published gateway target mismatch")
+    mode = "kannel" if target == "kannel" else runtime_mode(request["preset"])
     prepare.require(application.get("runtime", "jvm") == mode, "Published application runtime mismatch")
+    if target == "kannel":
+        prepare.require(application["dlrStorage"] == "postgresql" and application["messageStore"] == "spool"
+                        and all(application["source"].get(key) == value for key, value in prepare.KANNEL_SOURCE.items()),
+                        "Published Kannel source/storage mismatch")
     if mode == "native":
         prepare.require(application["jvmArguments"] == [] and application.get("nativeArguments") == request["preset"]["runtime"]["native"]["arguments"],
                         "Published native runtime arguments mismatch")
@@ -62,7 +68,7 @@ def unavailable(request, code):
                "latencies": {name: {key: 0 if key == "count" else None for key in definitions["distribution"]["required"]}
                              for name in fields["latencies"]["required"]}}
     preset = request["preset"]
-    return {"schemaVersion": 1, "provenance": {**request["provenance"], "artifacts": []},
+    result = {"schemaVersion": 1, "provenance": {**request["provenance"], "artifacts": []},
             "configuration": {"workload": preset["workload"],
                 "application": {"runtime": runtime_mode(preset),
                     "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if runtime_mode(preset) == "jvm" else [],
@@ -81,6 +87,14 @@ def unavailable(request, code):
                 "duplicateDetectionHorizonSeconds": 0, "observationAvailable": False,
                 "limitations": ["Zero counters represent absent evidence; no measured rates, latency percentiles or resource values are claimed."]},
             "diagnostics": []}
+    if prepare.benchmark_target(request) == "kannel":
+        result["configuration"]["application"] = {"benchmarkTarget": "kannel", "runtime": "kannel", "source": deepcopy(prepare.KANNEL_SOURCE),
+                                                  "jvmArguments": [], "connections": {}, "dlrStorage": "postgresql", "messageStore": "spool"}
+        infrastructure = result["configuration"]["infrastructure"]
+        infrastructure["kannel"] = infrastructure.pop("sendium")
+        infrastructure["database"].update(provisioned=None, engine="postgresql", sslMode="verify-full", state="unresolved")
+        result["resources"]["kannel"] = result["resources"].pop("sendium")
+    return result
 
 
 def first_file(paths):
@@ -120,11 +134,16 @@ def fallback_markdown(report):
         return html.escape(str(value)).replace("|", "&#124;").replace("`", "'").replace("\n", " ")
     def number(value):
         return "n/a" if value is None else format(value, ".3f")
-    lines = ["# Sendium performance results", "", "**Status:** " + report["validity"]["status"], "",
+    gateway = "Kannel" if report["configuration"]["application"].get("benchmarkTarget") == "kannel" else "Sendium"
+    lines = ["# " + gateway + " performance results", "", "**Status:** " + report["validity"]["status"], "",
              "Run: <code>" + text(report["provenance"]["runIdentity"]) + "</code>",
              "Branch: <code>" + text(report["provenance"]["branch"]) + "</code>",
-              "Application: <code>" + report["provenance"]["applicationCommit"] + "</code>; harness: <code>" + report["provenance"]["harnessRevision"] + "</code>", ""]
+              "Application commit: <code>" + text(report["provenance"]["applicationCommit"] or "n/a (upstream archive)")
+              + "</code>; harness: <code>" + report["provenance"]["harnessRevision"] + "</code>", ""]
     application = report["configuration"]["application"]
+    if gateway == "Kannel":
+        lines.append("Kannel source: <code>" + text(application["source"]["version"]) + "</code>; archive SHA-256: <code>"
+                     + text(application["source"]["archiveSha256"]) + "</code>; DLR storage: **postgresql**")
     lines.append("Application runtime: **" + text(application.get("runtime", "jvm")) + "**; harness runtime: **jvm**")
     if "nativeBuild" in application:
         lines.extend(["Native builder: <code>" + text(application["nativeBuild"]["builderImage"]) + "</code>",
@@ -159,8 +178,8 @@ def fallback_markdown(report):
             interval["durationSeconds"], *(interval.get("rates", {}).get(key) for key in
             ("providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond")))) + " |")
     lines += ["", "### Outstanding work at each interval's end", "",
-              "Counts are inferred from observed message progress, not direct readings of Sendium's internal queues. Provider response completion is simulator-side write completion, not proof of application consumption.", "",
-              "| Phase | Interval end s | Requests awaiting Sendium acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |",
+               "Counts are inferred from observed message progress, not direct readings of " + gateway + "'s internal queues. Provider response completion is simulator-side write completion, not proof of application consumption.", "",
+               "| Phase | Interval end s | Requests awaiting " + gateway + " acknowledgement | Accepted messages awaiting provider completion | Accepted messages awaiting forwarded DLR |",
               "|---|---:|---:|---:|---:|"]
     for interval in report["eventIntervals"]:
         end = interval["startOffsetSeconds"] + interval["durationSeconds"]
@@ -206,12 +225,14 @@ def publish(request, controller, diagnostic, cleanup, builds, inputs, outcomes, 
             except Exception:
                 original = None
                 issues.append("REPORT_REJECTED")
-    resources = {"schemaVersion": 1, "sendiumSamples": None, "harnessSamples": None, "cpuCredits": None,
+    target = prepare.benchmark_target(request)
+    resources = {"schemaVersion": 1, "harnessSamples": None, "cpuCredits": None,
                  "sampleBudget": request["preset"]["measurement"]["sampleBudgetPerSource"]}
-    for source in ("sendium", "harness"):
+    for source in (target, "harness"):
         filename = source + "-resources.jsonl"
-        path = first_file([root / source / filename for root in roots])
-        resources[source + "Samples"] = copy_evidence(path, evidence / filename, evidence_issues)
+        role = "sendium" if source == "kannel" else source
+        path = first_file([root / role / filename for root in roots])
+        resources["gatewaySamples" if source == "kannel" else source + "Samples"] = copy_evidence(path, evidence / filename, evidence_issues)
     credit = first_file([Path(diagnostic) / "cpu-credits.json"])
     resources["cpuCredits"] = copy_evidence(credit, evidence / "cpu-credits.json", evidence_issues)
     rds = first_file([Path(diagnostic) / "rds-metrics.json"])
