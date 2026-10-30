@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from preset_validation import validate_preset
 from application_runtime import runtime_mode, validate_native_build
+from kannel_identity import validate_build
 from jsonschema import Draft202012Validator, ValidationError
 
 
@@ -56,7 +57,21 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def benchmark_target(plan):
+    target = plan.get("benchmarkTarget", "sendium")
+    require(target in ("sendium", "kannel"), "Unknown benchmark target")
+    return target
+
+
+def validate_kannel_build(build, architecture=None):
+    try:
+        validate_build(build, architecture)
+    except ValueError as error:
+        raise DeploymentError(str(error)) from None
+
+
 def validate_plan(plan, preset):
+    target = benchmark_target(plan)
     require(plan.get("schemaVersion") == 1, "Unsupported deployment plan version")
     for field, pattern in (("region", r"[a-z0-9-]{3,32}"), ("runIdentity", r"gh-[0-9]+-[0-9]+"),
                            ("bootstrapStack", r"[a-zA-Z][a-zA-Z0-9-]{0,127}"),
@@ -66,6 +81,10 @@ def validate_plan(plan, preset):
     effective = json.loads(json.dumps(preset))
     effective["workload"].update(plan.get("workload", {}))
     validate_preset(effective, Draft202012Validator(read(HERE.parent / "contracts/run-config.schema.json")))
+    if target == "kannel":
+        require(effective["workload"]["ingressMode"] == "http" and runtime_mode(effective) == "jvm"
+                and "nativeBuild" not in plan, "Kannel requires HTTP ingress and its C runtime, without Sendium native settings")
+        validate_kannel_build(plan.get("kannelBuild"), plan.get("resolution", {}).get("nodes", {}).get("sendium", {}).get("architecture"))
     if runtime_mode(effective) == "native":
         architecture = plan.get("resolution", {}).get("nodes", {}).get("sendium", {}).get("architecture")
         validate_native_build(plan.get("nativeBuild"), effective, architecture)
@@ -81,11 +100,16 @@ def validate_plan(plan, preset):
                 "Preset " + section + " differs from the V1 deployment contract")
     provenance = plan["provenance"]
     for name in ("applicationCommit", "harnessRevision"):
+        if target == "kannel" and name == "applicationCommit":
+            require(provenance.get(name) is None, "Kannel archive identity cannot use an application commit")
+            continue
         require(re.fullmatch(r"[a-f0-9]{40}", provenance.get(name, ""))
                 and len(set(provenance[name])) > 1, "Exact build revision required")
     require(isinstance(provenance.get("branch"), str) and provenance["branch"], "Selected branch required")
-    require(set(plan["artifacts"]) == {"application", "harness", "sendiumJre", "harnessJre", "rdsCa"},
-            "Expected application, harness, two architecture-compatible JREs and RDS CA")
+    expected_artifacts = {"application", "harness", "harnessJre", "rdsCa"}
+    if target == "sendium":
+        expected_artifacts.add("sendiumJre")
+    require(set(plan["artifacts"]) == expected_artifacts, "Unexpected target runtime artifacts")
     for artifact in plan["artifacts"].values():
         require(re.fullmatch(r"[a-f0-9]{64}", artifact.get("sha256", "")), "Artifact SHA-256 required")
         require(Path(artifact["path"]).is_file() and sha256(artifact["path"]) == artifact["sha256"],
@@ -154,6 +178,7 @@ def stage(aws, plan, preset, directory):
     return {key: plan[key] for key in ("schemaVersion", "region", "runIdentity", "runStack", "bootstrapStack", "repository", "provenance")} | {
         "bucket": bucket, "artifacts": descriptors, "preset": effective,
         "createdAt": marker["createdAt"], "expiresAt": marker["expiresAt"], "resolution": plan.get("resolution", {}),
+        **({"benchmarkTarget": "kannel", "kannelBuild": plan["kannelBuild"]} if benchmark_target(plan) == "kannel" else {}),
         **({"nativeBuild": plan["nativeBuild"]} if runtime_mode(effective) == "native" else {})}
 
 
@@ -230,6 +255,7 @@ def inspect_run(aws, staged):
 
 def documents(staged, result, instances, timeout):
     preset = staged["preset"]
+    target = benchmark_target(staged)
     mode = runtime_mode(preset)
     application = {"runtime": mode, "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if mode == "jvm" else [],
                    "connections": {"outgoingTransceivers": 1}, "dlrStorage": "postgresql"}
@@ -241,6 +267,12 @@ def documents(staged, result, instances, timeout):
         **preset["database"], "identifier": result["DatabaseIdentifier"], "availabilityZone": result["PrimaryAvailabilityZone"],
         "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"],
         "resourceMetricsRequired": True}}
+    if target == "kannel":
+        validate_kannel_build(staged.get("kannelBuild"), instances[result["SendiumInstanceId"]]["Architecture"])
+        application = {"benchmarkTarget": "kannel", "runtime": "kannel", "jvmArguments": [], "connections": {},
+                       "dlrStorage": "postgresql", "messageStore": "spool", "source": staged["kannelBuild"]["source"]}
+        infrastructure["database"]["provisioned"] = True
+        infrastructure["database"]["engine"] = "postgresql"
     infrastructure["resolution"] = staged.get("resolution", {})
     for source in ("sendium", "harness"):
         instance = instances[result[source.title() + "InstanceId"]]
@@ -252,6 +284,9 @@ def documents(staged, result, instances, timeout):
                                   "creditMode": "standard" if instance["burstable"] else "not-applicable"}
         if source == "sendium" and mode == "native":
             infrastructure[source]["execution"] = infrastructure[source]["execution"].replace("-jvm", "-native")
+    if target == "kannel":
+        infrastructure["kannel"] = infrastructure.pop("sendium")
+        infrastructure["kannel"].update(execution="ec2-kannel", build=staged["kannelBuild"])
     execution = {"schemaVersion": 1, "readinessTimeoutSeconds": preset["measurement"]["readinessTimeoutSeconds"],
                  "retentionSeconds": preset["measurement"]["retentionSeconds"], "intervalBudget": preset["measurement"]["intervalBudget"],
                  "context": {"provenance": {**staged["provenance"], "runIdentity": staged["runIdentity"],
@@ -271,12 +306,23 @@ def documents(staged, result, instances, timeout):
         artifact_names = {"harness": "harness", "sampler": "sampler", "rdsCa": "rdsCa", "jre": source + "Jre"}
         if source == "sendium":
             artifact_names["application"] = "application"
+            if target == "kannel":
+                artifact_names.pop("jre")
+                artifact_names.pop("harness")
         result_documents[source] = {"schemaVersion": 1, "runIdentity": staged["runIdentity"], "region": staged["region"],
             "bucket": staged["bucket"], "source": source, "artifacts": {name: staged["artifacts"][key] for name, key in artifact_names.items()},
             "jvmArguments": preset["runtime"]["java"][source + "Arguments"], "timeoutSeconds": timeout,
             "sampleIntervalSeconds": preset["measurement"]["sampleIntervalSeconds"], "sampleBudget": preset["measurement"]["sampleBudgetPerSource"]}
     result_documents["sendium"].update(databaseSecretArn=result["DatabaseCredentialsArn"], deployment=deployment, workload=preset["workload"])
     result_documents["sendium"]["applicationRuntime"] = mode
+    if target == "kannel":
+        result_documents["sendium"].update(benchmarkTarget="kannel", kannelBuild=staged["kannelBuild"], jvmArguments=[])
+        result_documents["harness"]["benchmarkTarget"] = "kannel"
+        result_documents["sendium"]["deployment"]["database"] = {
+            "host": result["DatabaseAddress"], "port": int(result["DatabasePort"]), "database": result["DatabaseName"],
+            "caFile": db["caBundlePath"], "poolMaxSize": db["poolMaxSize"]}
+        execution["resources"].pop("sendiumSamples")
+        execution["resources"]["gatewaySamples"] = None
     if mode == "native":
         result_documents["sendium"].update(nativeArguments=application["nativeArguments"],
                                            architecture=application["nativeBuild"]["architecture"])
@@ -416,6 +462,8 @@ def retrieve(aws, staged, directory):
     result = {"schemaVersion": 1, "retrieved": [], "issues": []}
     names = {"harness": ("results.json", "summary.md", "state.json", "lifecycle.jsonl", "harness-resources.jsonl", "process.log", "node-status.json"),
              "sendium": ("sendium-resources.jsonl", "process.log", "node-status.json")}
+    if benchmark_target(staged) == "kannel":
+        names["sendium"] = ("kannel-resources.jsonl", "gateway-ready.json", "process.log", "node-status.json")
     for source, files in names.items():
         (directory / source).mkdir()
         for name in files:
@@ -427,7 +475,9 @@ def retrieve(aws, staged, directory):
                 result["issues"].append("UNAVAILABLE:" + relative)
     write_new(directory / "retrieval.json", result)
     write_new(directory / "resource-inputs.json", {"schemaVersion": 1,
-        "sendiumSamples": "sendium/sendium-resources.jsonl" if "sendium/sendium-resources.jsonl" in result["retrieved"] else None,
+        **({"gatewaySamples": "sendium/kannel-resources.jsonl" if "sendium/kannel-resources.jsonl" in result["retrieved"] else None}
+           if benchmark_target(staged) == "kannel" else {
+               "sendiumSamples": "sendium/sendium-resources.jsonl" if "sendium/sendium-resources.jsonl" in result["retrieved"] else None}),
         "harnessSamples": "harness/harness-resources.jsonl" if "harness/harness-resources.jsonl" in result["retrieved"] else None,
         "cpuCredits": None, "sampleBudget": staged["preset"]["measurement"]["sampleBudgetPerSource"]})
     return result

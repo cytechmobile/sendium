@@ -55,6 +55,11 @@ def checked_manifest(request, directory):
                     "Archive bundle checksum mismatch")
     report = publish.read(directory / "results.json")
     publish.validate(report, request)
+    if prepare.benchmark_target(request) == "kannel":
+        application = report["configuration"]["application"]
+        prepare.require(manifest.get("benchmarkTarget") == "kannel" and manifest.get("applicationSource") == application["source"]
+                        and manifest.get("dlrStorage") == application["dlrStorage"] and manifest.get("messageStore") == application["messageStore"],
+                        "Archive Kannel identity differs from report")
     prepare.require(manifest["provenance"] == report["provenance"]
                     and manifest["applicationRuntime"] == report["configuration"]["application"].get("runtime", "jvm")
                     and manifest["ingressMode"] == report["configuration"]["workload"]["ingressMode"]

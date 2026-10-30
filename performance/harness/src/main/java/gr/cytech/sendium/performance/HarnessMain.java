@@ -31,8 +31,10 @@ public final class HarnessMain {
                 ObjectMapper mapper = inputMapper();
                 var files = mapper.readValue(Path.of(args[2]).toFile(), ExecutionSettings.ResourceFiles.class);
                 var writer = new ResultReport();
-                var report = writer.finalizeResources((com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(Path.of(args[1]).toFile()),
-                        files.load(Path.of(args[2]).toAbsolutePath().getParent(), null));
+                var initial = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(Path.of(args[1]).toFile());
+                var report = writer.finalizeResources(initial,
+                        files.load(Path.of(args[2]).toAbsolutePath().getParent(), null,
+                                BenchmarkTarget.from(initial.path("configuration").path("application"))));
                 java.nio.file.Files.createDirectory(Path.of(args[3]));
                 writer.write(Path.of(args[3]), report);
                 System.out.println("Finalized resource evidence: " + report.json().at("/validity/status").asText());

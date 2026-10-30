@@ -167,6 +167,41 @@ These adapters are tested over real local HTTP sockets against a controlled API
 endpoint and against packaged Sendium/PostgreSQL. Workload scheduling is integrated;
 AWS deployment/workflow execution remains Phase 4/5 work.
 
+### Explicit Kannel HTTP protocol
+
+Existing adapter constructors default to `HttpGatewayProtocol.SENDIUM`, preserving
+UUID admission responses, gateway-ID equality checks, and HTTP 204 callbacks.
+The local Kannel probe explicitly passes `HttpGatewayProtocol.KANNEL` to both
+`HttpAdmissionClient` and `HttpReceiptReceiver`:
+
+- HTTP 202 must contain exactly `0: Accepted for delivery` or
+  `3: Queued for later delivery` (after trimming whitespace). No admission ID is
+  invented from these responses. Other 202 bodies remain ambiguous failures.
+- DLR-enabled requests add `dlr-mask=1` and use callback `messageId=%F`, carrying
+  the provider's message ID, plus the literal harness token and `status=%d`.
+  DLR-disabled requests omit both receipt parameters.
+- The simulator records its assigned provider ID in the existing bounded ledger
+  entry before sending its response. Kannel callbacks must match that token's
+  recorded provider ID and follow observed provider/receipt events. Callback
+  content never establishes a new provider identity. Receipt-before-admission
+  ordering remains supported without inferring admission success.
+- Valid callbacks and proven duplicates receive HTTP 200, which Kannel accepts
+  as successful receipt delivery. Duplicates remain accounting violations. Events
+  beyond retained history are acknowledged with an explicit coverage limitation.
+  Invalid tokens/IDs, duplicate fields, and unexpected statuses retain rejection
+  and diagnostic behavior.
+
+These adapters have been verified with real Kannel 1.4.5 for ten single-part HTTP
+messages and delivery reports. See the [local correctness check](../kannel/README.md).
+The shared benchmark runner now accepts explicitly prepared Kannel inputs and
+renders target-aware reports; missing target fields retain Sendium defaults.
+See [target-aware execution](EXECUTION.md#target-aware-execution) for readiness,
+source identity, and resource paths. The resource importer accepts validated named
+process groups and requires bearerbox plus smsbox for complete Kannel resource
+evidence. The [local launcher](../local/README.md#select-sendium-or-kannel) prepares
+Kannel inputs and runs the full benchmark lifecycle, resource finalization and
+cleanup. AWS deployment and workflow selection are subsequent tasks.
+
 ## SMPP submission and forwarded receipts
 
 `SmppAdmissionClient` binds one authenticated transceiver session using

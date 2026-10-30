@@ -21,7 +21,9 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     }
     public record Sample(String timestamp, String intervalStartTimestamp, Double intervalSeconds,
             Double cpuPercent, Double hostCpuPercent, Long rssBytes, Long hostMemoryUsedBytes,
-            Long hostMemoryTotalBytes, Integer cpuCount, Long pid, Long processStartTicks) {
+            Long hostMemoryTotalBytes, Integer cpuCount, Long pid, Long processStartTicks,
+            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+            List<ProcessSample> processes) {
         public Sample {
             Instant end = instant(timestamp);
             if (intervalStartTimestamp != null && (!instant(intervalStartTimestamp).isBefore(end)
@@ -34,6 +36,47 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
                     || cpuCount != null && cpuCount < 1 || cpuPercent != null && intervalStartTimestamp == null
                     || pid != null && pid < 1 || !nonnegative(processStartTicks)) {
                 throw new IllegalArgumentException("Invalid resource sample values");
+            }
+            if (processes != null) {
+                processes = List.copyOf(processes);
+                if (processes.size() < 2 || processes.size() > 16 || pid != null || processStartTicks != null) {
+                    throw new IllegalArgumentException("Invalid process group or conflicting single-process identity");
+                }
+                var names = new java.util.HashSet<String>();
+                var pids = new java.util.HashSet<Long>();
+                long rss = 0; double cpu = 0;
+                for (ProcessSample process : processes) {
+                    if (!names.add(process.name()) || !pids.add(process.pid()) || Long.MAX_VALUE - rss < process.rssBytes()
+                            || (cpuPercent == null) != (process.cpuPercent() == null)) {
+                        throw new IllegalArgumentException("Invalid process group member or aggregate");
+                    }
+                    rss += process.rssBytes();
+                    if (cpuPercent != null) { cpu += process.cpuPercent(); }
+                }
+                if (rssBytes == null || rss != rssBytes || !Double.isFinite(cpu)
+                        || cpuPercent != null && Math.abs(cpuPercent - cpu) > Math.max(1e-12, Math.abs(cpu) * 1e-12)) {
+                    throw new IllegalArgumentException("Process group aggregates disagree with members");
+                }
+            }
+        }
+        public Sample(String timestamp, String intervalStartTimestamp, Double intervalSeconds,
+                Double cpuPercent, Double hostCpuPercent, Long rssBytes, Long hostMemoryUsedBytes,
+                Long hostMemoryTotalBytes, Integer cpuCount, Long pid, Long processStartTicks) {
+            this(timestamp, intervalStartTimestamp, intervalSeconds, cpuPercent, hostCpuPercent, rssBytes,
+                    hostMemoryUsedBytes, hostMemoryTotalBytes, cpuCount, pid, processStartTicks, null);
+        }
+        java.util.Map<String, List<Long>> identities() {
+            if (processes == null) { return null; }
+            return processes.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ProcessSample::name,
+                    process -> List.of(process.pid(), process.processStartTicks())));
+        }
+    }
+    public record ProcessSample(String name, Long pid, Long processStartTicks, Double cpuPercent, Long rssBytes) {
+        public ProcessSample {
+            if (name == null || !name.matches("[a-z][a-z0-9_-]{0,31}") || pid == null || pid < 1
+                    || processStartTicks == null || processStartTicks < 0 || rssBytes == null || rssBytes < 0
+                    || !nonnegative(cpuPercent)) {
+                throw new IllegalArgumentException("Invalid named process sample");
             }
         }
     }
@@ -48,7 +91,7 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     public record Credits(String source, String instanceId, String instanceType, Boolean burstable, String mode, int periodSeconds,
             String windowStart, String windowEnd, List<CreditSample> samples, List<String> collectionIssues) {
         public Credits {
-            if (!List.of("sendium", "harness").contains(source) || instanceId == null || instanceType == null
+            if (!List.of("sendium", "kannel", "harness").contains(source) || instanceId == null || instanceType == null
                     || !List.of("standard", "unlimited", "not-applicable", "unknown").contains(mode)
                     || periodSeconds < 1 || !instant(windowStart).isBefore(instant(windowEnd)) || samples.size() > 1440) {
                 throw new IllegalArgumentException("Invalid instance credit evidence");
@@ -80,10 +123,15 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     }
 
     public static ResourceEvidence loadAvailable(Path sendiumFile, Path harnessFile, Path creditFile, Path databaseFile, int budget) {
+        return loadAvailable(sendiumFile, harnessFile, creditFile, databaseFile, budget, BenchmarkTarget.SENDIUM);
+    }
+
+    public static ResourceEvidence loadAvailable(Path gatewayFile, Path harnessFile, Path creditFile, Path databaseFile,
+            int budget, BenchmarkTarget target) {
         if (budget < 1) { throw new IllegalArgumentException("Invalid resource sample budget"); }
         ObjectMapper mapper = new ObjectMapper();
         List<String> issues = new ArrayList<>();
-        List<Sample> sendium = availableSamples("sendium", sendiumFile, budget, mapper, issues);
+        List<Sample> sendium = availableSamples(target.id(), gatewayFile, budget, mapper, issues);
         List<Sample> harness = availableSamples("harness", harnessFile, budget, mapper, issues);
         List<Credits> credits = List.of();
         if (creditFile != null) {
@@ -163,20 +211,35 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
     }
 
     public ObjectNode json(ObjectMapper mapper, Window window, MeasurementTimeline.Snapshot timeline) {
-        return jsonForIntervals(mapper, window, timeline == null ? List.of() : timeline.events());
+        return json(mapper, window, timeline, BenchmarkTarget.SENDIUM);
+    }
+
+    public ObjectNode json(ObjectMapper mapper, Window window, MeasurementTimeline.Snapshot timeline, BenchmarkTarget target) {
+        return jsonForIntervals(mapper, window, timeline == null ? List.of() : timeline.events(), target);
     }
 
     public ObjectNode jsonForIntervals(ObjectMapper mapper, Window window, List<MeasurementTimeline.EventInterval> events) {
+        return jsonForIntervals(mapper, window, events, BenchmarkTarget.SENDIUM);
+    }
+
+    public ObjectNode jsonForIntervals(ObjectMapper mapper, Window window, List<MeasurementTimeline.EventInterval> events,
+            BenchmarkTarget target) {
         ObjectNode result = mapper.createObjectNode();
-        result.set("sendium", mapper.valueToTree(sendium)); result.set("harness", mapper.valueToTree(harness));
+        result.set(target.id(), mapper.valueToTree(sendium)); result.set("harness", mapper.valueToTree(harness));
         result.set("cpuCredits", mapper.valueToTree(cpuCredits)); result.set("collectionIssues", mapper.valueToTree(collectionIssues));
         if (database != null) { result.set("database", database.json(mapper)); }
         result.put("sampleBudgetPerSource", sampleBudget).put("processCpuPercentBasis", "100 percent is one logical CPU core")
                 .put("hostCpuPercentBasis", "100 percent is aggregate host CPU capacity");
+        if (java.util.stream.Stream.concat(sendium.stream(), harness.stream()).anyMatch(sample -> sample.processes() != null)) {
+            result.putObject("processGroupSemantics")
+                    .put("cpuPercent", "Sum of member process CPU over the same monotonic interval; 100 percent is one logical core.")
+                    .put("rssBytes", "Sum of member RSS snapshots; shared pages may be counted more than once, not unique physical memory.")
+                    .put("hostMetrics", "One host observation per sample; host CPU and memory are not summed across members.");
+        }
         if (window != null) { result.putObject("window").put("start", window.start().toString()).put("end", window.end().toString()); }
         ObjectNode summary = result.putObject("summary");
         ObjectNode overall = summary.putObject("overall");
-        overall.set("sendium", mapper.valueToTree(summarize(sendium, window)));
+        overall.set(target.id(), mapper.valueToTree(summarize(sendium, window)));
         overall.set("harness", mapper.valueToTree(summarize(harness, window)));
         var intervals = summary.putArray("intervals");
         if (window != null) {
@@ -186,7 +249,7 @@ public record ResourceEvidence(List<Sample> sendium, List<Sample> harness, List<
                 ObjectNode value = intervals.addObject();
                 value.put("phase", event.phase()).put("startOffsetSeconds", event.startOffsetNanos() / 1_000_000_000.0)
                         .put("durationSeconds", event.durationNanos() / 1_000_000_000.0);
-                value.set("sendium", mapper.valueToTree(summarize(sendium, interval)));
+                value.set(target.id(), mapper.valueToTree(summarize(sendium, interval)));
                 value.set("harness", mapper.valueToTree(summarize(harness, interval)));
             }
         }

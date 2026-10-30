@@ -109,13 +109,14 @@ def jre_metadata(downloads, architecture, release=None):
     return candidates[0]
 
 
-def resolve(downloads, nodes, preset, directory):
+def resolve(downloads, nodes, preset, directory, target="sendium"):
     directory = Path(directory)
     directory.mkdir(exist_ok=False)
     artifacts, runtime = {}, {}
     selected_release = preset["runtime"]["java"]["release"]
     cache = {}
-    for source in ("sendium", "harness"):
+    require(target in ("sendium", "kannel"), "Unknown benchmark target")
+    for source in (("harness",) if target == "kannel" else ("sendium", "harness")):
         architecture = nodes[source]["architecture"]
         if architecture not in cache:
             metadata = jre_metadata(downloads, architecture, selected_release)

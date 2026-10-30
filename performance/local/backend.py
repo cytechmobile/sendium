@@ -1,7 +1,7 @@
 """Local S3/Secrets are real; this adapter models EC2/RDS/SSM/CloudFormation metadata."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 import hashlib
 import io
 import json
@@ -70,9 +70,10 @@ class Lab:
         self.db_version = docker("run", "--rm", "--network", "none", "--entrypoint", "postgres", "postgres:17-alpine", "--version").stdout.split()[-1]
         self.simulation = {"mode": "local-functional-rehearsal", "source": self.source,
             "real": ["AL2023 nodes", "Java25", "S3/Secrets APIs", "PostgreSQL17/TLS", "HTTP/SMPP", "sampling", "publication"],
-            "modeled": ["EC2/RDS/CloudFormation metadata", "SSM Docker-exec", "systemd watchdog", "IAM runtime CLI scope", "scheduled clock"],
+            "modeled": ["EC2/RDS/CloudFormation metadata", "RDS/CloudWatch resource metrics", "SSM Docker-exec", "systemd watchdog", "IAM runtime CLI scope", "scheduled clock"],
             "limitations": ["No AWS capacity findings; gp3/encryption/AMI metadata are simulated.",
-                            "CPU/memory cgroups constrain nodes; host /proc summaries describe the Docker Linux VM."]}
+                            "CPU/memory cgroups constrain nodes; host /proc summaries describe the Docker Linux VM.",
+                            "RDS resource series are deterministic local fixtures, not observed database utilization."]}
 
     def bootstrap(self):
         outputs = {"ArtifactBucketName": self.bucket, "RepositoryTag": "cytechmobile/sendium", "GitHubEnvironmentName": "sendium-performance",
@@ -123,7 +124,9 @@ class Lab:
                "--env", "POSTGRES_DB=sendium_benchmark", "--env", "POSTGRES_PASSWORD_FILE=/tls/password", "postgres:17-alpine",
                "postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/tls/server.pem", "-c", "ssl_key_file=/tls/server.key", "-c", "hba_file=/tls/pg_hba.conf")
         for _ in range(60):
-            ready = docker("exec", db, "pg_isready", "-U", "sendium_perf", "-d", "sendium_benchmark", check=False)
+            # The entrypoint's temporary init server accepts Unix-socket probes
+            # before initialization finishes. Wait for the final TCP listener.
+            ready = docker("exec", db, "pg_isready", "-h", "127.0.0.1", "-U", "sendium_perf", "-d", "sendium_benchmark", check=False)
             if ready.returncode == 0:
                 break
             time.sleep(1)
@@ -289,13 +292,41 @@ class LocalAws:
                 "Targets": [{"Id": "Expiry", "Arn": FUNCTION, "RetryPolicy": {"MaximumRetryAttempts": 0, "MaximumEventAgeInSeconds": 900}}]}
         if service == "ec2":
             return self.ec2(operation, p)
+        if service == "cloudwatch" and operation == "get-metric-statistics":
+            if (self.mode != "diagnostics" or root is None or p.get("namespace") != "AWS/RDS"
+                    or p.get("dimensions") != [{"Name": "DBInstanceIdentifier", "Value": root["name"]}]):
+                raise AwsError("Local metrics require the owned run database", code="AccessDenied")
+            units = {"CPUUtilization": "Percent", "FreeableMemory": "Bytes", "SwapUsage": "Bytes", "DatabaseConnections": "Count",
+                     "ReadIOPS": "Count/Second", "WriteIOPS": "Count/Second", "ReadThroughput": "Bytes/Second", "WriteThroughput": "Bytes/Second",
+                     "ReadLatency": "Seconds", "WriteLatency": "Seconds", "DiskQueueDepth": "Count", "FreeStorageSpace": "Bytes",
+                     "CPUCreditBalance": "Count", "CPUCreditUsage": "Count", "CPUSurplusCreditBalance": "Count", "CPUSurplusCreditsCharged": "Count"}
+            if p.get("metric_name") not in units or p.get("period") not in (60, 300):
+                raise AwsError("Unsupported local metric", code="LocalUnsupportedOperation")
+            start = datetime.fromisoformat(p["start_time"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(p["end_time"].replace("Z", "+00:00"))
+            if not 0 < (end - start).total_seconds() / p["period"] <= 1440:
+                raise AwsError("Local metric point budget exceeded", code="LocalUnsupportedOperation")
+            points = []
+            while start < end:
+                points.append({"Timestamp": start.isoformat(), "Unit": units[p["metric_name"]],
+                               **{statistic: 1 for statistic in p["statistics"]}})
+                start += timedelta(seconds=p["period"])
+            return {"Datapoints": points}
         if service == "rds":
             if operation == "describe-db-engine-versions":
                 return {"DBEngineVersions": [{"EngineVersion": self.lab.db_version, "Status": "available"}]}
             if operation == "describe-orderable-db-instance-options":
                 return {"OrderableDBInstanceOptions": [{"StorageType": "gp3", "SupportsStorageEncryption": True, "Vpc": True, "MinStorageSize": 20, "MaxStorageSize": 20,
                     "AvailabilityZones": [{"Name": "local-a"}, {"Name": "local-b"}]}]}
-            return {"DBInstances": [{"DBInstanceStatus": "available", "PubliclyAccessible": False, "StorageEncrypted": True, "MultiAZ": False,
+            arn = "arn:aws:rds:" + REGION + ":" + ACCOUNT + ":db:" + root["name"]
+            if operation == "list-tags-for-resource":
+                if p.get("resource_name") != arn:
+                    raise AwsError("Local database ownership mismatch", code="AccessDenied")
+                return {"TagList": root["Tags"]}
+            if p.get("db_instance_identifier") != root["name"]:
+                raise AwsError("Local database identity mismatch", code="DBInstanceNotFound")
+            return {"DBInstances": [{"DBInstanceIdentifier": root["name"], "DBInstanceArn": arn,
+                "DBInstanceStatus": "available", "PubliclyAccessible": False, "StorageEncrypted": True, "MultiAZ": False,
                 "BackupRetentionPeriod": 0, "Endpoint": {"Address": "db"}, "AvailabilityZone": "local-a", "Engine": "postgres", "EngineVersion": root["dbVersion"],
                 "DBInstanceClass": "db.local.small", "AllocatedStorage": 20, "StorageType": "gp3"}]}
         if service == "ssm":

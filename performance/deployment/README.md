@@ -291,3 +291,61 @@ docker run --rm --network sendium-node-verification-352 \
 docker rm -f sendium-node-postgres-352
 docker network rm sendium-node-verification-352
 ```
+## Kannel AWS deployment profile
+
+Prepared deployment plans can select `benchmarkTarget: "kannel"`. The shared
+CloudFormation topology, run-scoped IAM roles, private transport and cleanup
+remain the same: gateway and harness use `t4g.small`, with PostgreSQL 17 on RDS.
+Sendium remains the default when the target field is absent. The manual workflow
+exposes this selector after the maintained controller changes merge to `main`.
+
+Kannel plans require HTTP ingress, `provenance.applicationCommit: null`, and a
+`kannelBuild` object from the runtime bundle's `build-metadata.json`. The controller
+validates the reviewed archive/patch identity, PostgreSQL support and resolved
+gateway architecture before staging. Artifacts are `application` (Kannel runtime
+archive), `harness`, `harnessJre`, and `rdsCa`; the C gateway needs no JRE.
+
+Build the pinned baseline for the selected architecture, then export its runtime:
+
+```sh
+docker build --platform linux/arm64 --file performance/kannel/Dockerfile.baseline --tag sendium-kannel-baseline:arm64 performance/kannel
+docker build --platform linux/arm64 --file performance/kannel/Dockerfile.aws --build-arg KANNEL_BASE_IMAGE=sendium-kannel-baseline:arm64 --target export --output type=local,dest=kannel-runtime .
+```
+
+The export contains `kannel.tar.gz` and `build-metadata.json`. It includes binaries,
+non-glibc shared libraries (including libpq), configuration/supervision helpers,
+schema, licenses and a per-file manifest. The runtime uses the AL2023 node's glibc
+and loader. No package downloads or compilation occur on the private gateway.
+The `verification` Docker target tests installation and version probes on a
+minimal AL2023 image; prefer native ARM builders for Graviton packaging.
+
+The gateway retrieves its database secret, connects with libpq
+`sslmode=verify-full`, and initializes `dlr.sql`. Credentials are kept off the
+harness except for its own simulator/HTTP fixture passwords. The supervisor
+checks PostgreSQL 17, TLS and schema, starts bearerbox/smsbox and establishes the
+group sampler baseline. Only then does it publish public `gateway-ready.json`
+through `inputs/harness/generated/`. The harness atomically receives that marker
+and verifies run/process/database identities before workload phases, including
+zero-warm-up runs.
+
+Existing transport-role paths and CloudFormation outputs retain the name
+`sendium`; on a Kannel run this is the gateway **role**, not the measured software.
+Reports use `configuration.application.runtime: kannel`, `infrastructure.kannel`
+and `resources.kannel`. Retrieval writes `gatewaySamples` pointing at
+`sendium/kannel-resources.jsonl` for offline finalization. RDS metrics remain
+required for AWS observations. The message spool is run-local and ephemeral;
+the shared PostgreSQL engine does not imply equal recovery/durability semantics.
+
+`performance/kannel/verify_aws_nodes.py` rehearses the actual install/configure/
+supervise/retrieve code with local artifact/secret transport, a real packaged
+gateway, the Java harness and TLS-enabled PostgreSQL 17. Its `node-verification`
+image target requires the local harness verification image
+`sendium-local:kannel-postgresql-verification`. Run it on an internal network
+with PostgreSQL reachable as `db`, database `kannel_benchmark`, user `kannel_perf`,
+and the ephemeral PKI from `performance/local/tls.py` mounted at `/tls` on both
+containers. The database must use `/tls/password`, the server certificate/key and
+TLS-only HBA file. It must be fresh: schema initialization deliberately rejects an
+existing table. `KANNEL_NODE_EVIDENCE` optionally retains public outputs in a new
+directory. The rehearsal checks 15 measured messages/DLRs, readiness handoff,
+group samples, finalization, redaction and shutdown. It models transport only;
+it does not verify AWS APIs, IAM/SSM behavior or Graviton performance.

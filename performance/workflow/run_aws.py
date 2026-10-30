@@ -118,14 +118,17 @@ def run(aws, downloads, request, inputs, bundles, settings, directory, verify_bu
         resolved = resolve_aws.resolve(aws, request["preset"], settings["region"])
         resolved["sourceRevisions"] = {"controller": request["controllerRevision"], "workflow": request["workflowRevision"]}
         outcome["phase"] = "runtime-resolution"
-        runtime, details = runtime_assets.resolve(downloads, resolved["nodes"], request["preset"], directory / "runtime")
+        target = prepare.benchmark_target(request)
+        runtime, details = runtime_assets.resolve(downloads, resolved["nodes"], request["preset"], directory / "runtime",
+                                                 **({"target": target} if target == "kannel" else {}))
         resolved["runtime"] = details
         prepare.write(directory / "resolution.json", resolved)
         preset = deepcopy(request["preset"])
         preset["database"]["engineVersion"] = resolved["database"]["engineVersion"]
-        preset["runtime"]["java"]["release"] = details["java"]["sendium"]["release"]
+        preset["runtime"]["java"]["release"] = details["java"]["harness"]["release"]
         artifacts = dict(runtime)
         native_build = None
+        kannel_build = None
         for source, component in (("sendium", "application"), ("harness", "harness")):
             node = resolved["nodes"][source]
             preset["runtime"]["amiIds"][node["architecture"]] = node["imageId"]
@@ -133,9 +136,13 @@ def run(aws, downloads, request, inputs, bundles, settings, directory, verify_bu
             artifacts[component] = {"path": str((Path(bundles) / item["path"]).resolve()), "sha256": item["sha256"]}
             if component == "application":
                 native_build = item.get("nativeBuild")
+                kannel_build = item.get("kannelBuild")
         plan = {**cleanup_plan, "provenance": request["provenance"], "artifacts": artifacts, "resolution": resolved}
         if native_build is not None:
             plan["nativeBuild"] = native_build
+        if target == "kannel":
+            prepare.validate_kannel_build(kannel_build, resolved["nodes"]["sendium"]["architecture"])
+            plan.update(benchmarkTarget=target, kannelBuild=kannel_build)
         prepare.write(directory / "deployment-plan.json", plan)
         prepare.write(directory / "resolved-preset.json", preset)
         outcome["phase"] = "staging"

@@ -66,16 +66,17 @@ PostgreSQL in containers, while explicitly modeling AWS control-plane operations
 ## Workflow parameters
 
 The [Performance Tests Action](../.github/workflows/performance-tests.yml) exposes
-the following inputs. Each run tests one ingress protocol.
+the following inputs. Each run tests one gateway and one ingress protocol.
 
 | Parameter | Default | What it controls |
 |---|---|---|
-| `application_runtime` | `jvm` | Runs Sendium as JVM Java or a compiled `native` executable. The test tool remains JVM-based. |
-| `ingress_mode` | `http` | How the test client submits messages to Sendium: `http` or `smpp`. Sendium's outgoing provider connection uses SMPP in both cases. |
-| `sendium_instance_type` | `t4g.small` | EC2 instance type for the Sendium application. |
+| `benchmark_target` | `sendium` | Selects Sendium or Kannel. Kannel supports HTTP ingress and uses its C runtime with PostgreSQL-backed DLR storage. |
+| `application_runtime` | `jvm` | Runs Sendium as JVM Java or a compiled `native` executable. Leave `jvm` for Kannel, which uses C; the test tool remains JVM-based. |
+| `ingress_mode` | `http` | Sendium supports `http` or `smpp`; Kannel supports HTTP ingress only. Both gateways connect to the provider over SMPP. |
+| `sendium_instance_type` | `t4g.small` | EC2 instance type for the gateway, whether Sendium or Kannel. |
 | `harness_instance_type` | `t4g.small` | EC2 instance type for the test tool, including the generator, simulated provider and DLR receiver. |
-| `offered_rate` | `30` | Average messages per second the generator attempts to submit **to Sendium**; positive fractional rates are supported. |
-| `worker_tps` | `0` | Sendium's outgoing worker rate cap. `0` means unlimited; a positive integer sets the cap. This is separate from the generator's offered rate. |
+| `offered_rate` | `30` | Average messages per second the generator attempts to submit to the selected gateway; positive fractional rates are supported. |
+| `worker_tps` | `0` | Gateway outgoing rate cap. `0` means unlimited; a positive integer sets the cap. This is separate from the generator's offered rate. |
 | `warmup_seconds` | `120` | Warm-up duration before measured traffic: 0–600 seconds. |
 | `measurement_seconds` | `600` | Duration of measured traffic: 1–3,600 seconds. |
 | `drain_seconds` | `120` | Maximum time to wait for outstanding messages and DLRs after generation stops: 0–600 seconds. |
@@ -86,7 +87,10 @@ the following inputs. Each run tests one ingress protocol.
 The **Use workflow from** branch selector determines the application revision
 being tested. The maintained test tool and controller are pinned separately from
 the default branch. Instance compatibility and regional availability are checked
-before provisioning.
+before provisioning. For Kannel, upstream archive identity replaces the application
+commit and the packaging code comes from the maintained controller revision.
+Merge the controller/workflow changes to `main` before the first Kannel dispatch;
+see the [Kannel dispatch instructions](workflow/README.md#running-kannel-after-merge).
 
 Native mode builds both Linux architectures using a digest-pinned Mandrel compiler
 and runs the matching executable directly on the Sendium instance. Reports record
@@ -156,6 +160,17 @@ measurement evidence, rather than silently treating missing data as zero.
 Detailed definitions are in the [harness documentation](harness/README.md) and
 [result contracts](contracts/README.md). The [reporting documentation](workflow/REPORTING.md)
 explains evidence collection, publication and cleanup.
+
+## Kannel comparison work
+
+The optional Kannel target is being developed locally first. Its
+[build baseline, local benchmark, and protocol findings](kannel/README.md)
+describe the verified x86-64/ARM64 build, HTTP/DLR accounting, combined gateway
+sampling, and full local benchmark lifecycle. Run it with
+`python performance/local/rehearse.py --benchmark-target kannel --output local-load-results`.
+Sendium remains the local launcher's default. AWS/workflow target selection is the
+next phase. Kannel supports HTTP ingress with SMPP forwarding and HTTP delivery
+reports; SMPP ingress is deferred.
 
 ## Permanent results archive
 

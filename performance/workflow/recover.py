@@ -36,6 +36,7 @@ def ownership(aws, request, region, bootstrap, role, diagnostic):
     require(caller["Account"] == account and caller["Arn"].startswith("arn:" + partition + ":sts::" + account
             + ":assumed-role/" + role.split("/")[-1] + "/"), "Recovery requires the configured assumed role")
     return {"schemaVersion": 1, "region": region, "repository": request["repository"], "bootstrapStack": bootstrap,
+            **({"benchmarkTarget": "kannel"} if diagnostic and prepare.benchmark_target(request) == "kannel" else {}),
             "runIdentity": request["runIdentity"], "runStack": outputs["RunStackPrefix"] + request["runIdentity"],
             "bucket": outputs["ArtifactBucketName"], "preset": request["preset"], "accountId": account, "partition": partition}
 
@@ -71,6 +72,9 @@ def diagnostics(aws, credits, plan, request, directory):
                 and document["provenance"]["applicationCommit"] == request["provenance"]["applicationCommit"]
                 and document["provenance"]["harnessRevision"] == request["provenance"]["harnessRevision"], "Diagnostic report identity mismatch")
         validate_results(document)
+        target = prepare.benchmark_target(request)
+        require(document["configuration"]["application"].get("benchmarkTarget", "sendium") == target,
+                "Diagnostic gateway target mismatch")
         require(document["configuration"]["infrastructure"]["region"] == plan["region"], "Diagnostic report region mismatch")
         metadata = document["measurementMetadata"]
         if not metadata.get("measurementStartUtc") or metadata.get("observedDurationNanos", 0) <= 0:
@@ -93,14 +97,15 @@ def diagnostics(aws, credits, plan, request, directory):
                 result["exitCode"] = 1
             finally:
                 aws.timeout_seconds = timeout
-        instances = {source: document["configuration"]["infrastructure"][source]["instanceId"] for source in ("sendium", "harness")}
+        instances = {source: document["configuration"]["infrastructure"][source]["instanceId"] for source in (target, "harness")}
         require(len(set(instances.values())) == 2, "Distinct instance IDs required")
         described = aws.call("ec2", "describe-instances", instance_ids=list(instances.values()))
         actual = {item["InstanceId"]: item for reservation in described["Reservations"] for item in reservation["Instances"]}
         for source, identity in instances.items():
             tags = {item["Key"]: item["Value"] for item in actual[identity]["Tags"]}
             require(tags.get("sendium:managed-by") == "performance-tests" and tags.get("sendium:repository") == request["repository"]
-                    and tags.get("sendium:run-identity") == request["runIdentity"] and tags.get("sendium:role") == source,
+                    and tags.get("sendium:run-identity") == request["runIdentity"]
+                    and tags.get("sendium:role") == ("sendium" if source == "kannel" else source),
                     "Diagnostic instance ownership/source mismatch")
             require(actual[identity]["InstanceType"] == document["configuration"]["infrastructure"][source]["instanceType"],
                     "Diagnostic instance type mismatch")
