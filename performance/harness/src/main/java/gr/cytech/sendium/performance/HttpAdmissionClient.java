@@ -24,18 +24,25 @@ public final class HttpAdmissionClient implements AutoCloseable {
     private final RunConfig config;
     private final HttpIngressSettings settings;
     private final MessageLedger ledger;
+    private final HttpGatewayProtocol protocol;
     private final HttpClient client;
     private final Map<String, CompletableFuture<HttpResponse<String>>> pending = new ConcurrentHashMap<>();
     private final EnumMap<Problem, AtomicLong> problems = new EnumMap<>(Problem.class);
     private boolean closed;
 
     public HttpAdmissionClient(RunConfig config, HttpIngressSettings settings, MessageLedger ledger) {
+        this(config, settings, ledger, HttpGatewayProtocol.SENDIUM);
+    }
+
+    public HttpAdmissionClient(RunConfig config, HttpIngressSettings settings, MessageLedger ledger,
+            HttpGatewayProtocol protocol) {
         if (!"http".equals(config.ingressMode()) || config.dlrEnabled() && settings.callbackBase() == null) {
             throw new IllegalArgumentException("HTTP ingress requires callback settings when delivery reports are enabled");
         }
         this.config = config;
         this.settings = settings;
         this.ledger = ledger;
+        this.protocol = java.util.Objects.requireNonNull(protocol);
         client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofMillis(config.admissionTimeoutMillis())).build();
@@ -70,9 +77,9 @@ public final class HttpAdmissionClient implements AutoCloseable {
                                 && cause.getCause() != null) { cause = cause.getCause(); }
                         outcome = cause instanceof HttpTimeoutException || cause instanceof java.util.concurrent.TimeoutException ? TIMED_OUT : FAILED;
                         if (outcome == FAILED) { problem(Problem.TRANSPORT_FAILURE); }
-                    } else if (response.statusCode() == 202 && canonicalUuid(response.body().strip())) {
+                    } else if (response.statusCode() == 202 && validAcknowledgement(response.body().strip())) {
                         outcome = ACCEPTED;
-                        gatewayId = response.body().strip();
+                        if (protocol == HttpGatewayProtocol.SENDIUM) { gatewayId = response.body().strip(); }
                     } else if (response.statusCode() == 202) {
                         outcome = FAILED;
                         problem(Problem.INVALID_ACKNOWLEDGEMENT);
@@ -80,7 +87,9 @@ public final class HttpAdmissionClient implements AutoCloseable {
                         outcome = REJECTED;
                     } else if (response.statusCode() >= 400 && response.statusCode() < 500) {
                         outcome = REJECTED;
-                        problem(response.statusCode() == 401 || response.statusCode() == 403
+                        boolean notRoutable = protocol == HttpGatewayProtocol.KANNEL
+                                && response.body().strip().equals("Not routable. Do not try again.");
+                        problem(response.statusCode() == 401 || response.statusCode() == 403 && !notRoutable
                                 ? Problem.AUTHENTICATION_FAILURE : Problem.UNEXPECTED_STATUS);
                     } else {
                         // A server/redirect error is not proof that the message was never admitted.
@@ -110,13 +119,19 @@ public final class HttpAdmissionClient implements AutoCloseable {
                 + "&text=" + encode(token) + "&coding=0&charset=UTF-8";
         if (config.dlrEnabled()) {
             String callback = settings.callbackBase().toASCIIString() + "?token=" + encode(token)
-                    + "&messageId=%s&status=%d";
+                    + "&messageId=" + (protocol == HttpGatewayProtocol.KANNEL ? "%F" : "%s") + "&status=%d";
             query += "&dlr-url=" + encode(callback);
+            if (protocol == HttpGatewayProtocol.KANNEL) { query += "&dlr-mask=1"; }
         }
         return URI.create(settings.admissionUri().toASCIIString() + "?" + query);
     }
 
     static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
+
+    private boolean validAcknowledgement(String body) {
+        return protocol == HttpGatewayProtocol.SENDIUM ? canonicalUuid(body)
+                : body.equals("0: Accepted for delivery") || body.equals("3: Queued for later delivery");
+    }
 
     static boolean canonicalUuid(String value) {
         try { return UUID.fromString(value).toString().equals(value); }

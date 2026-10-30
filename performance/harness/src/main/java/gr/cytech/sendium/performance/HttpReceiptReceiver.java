@@ -21,16 +21,23 @@ public final class HttpReceiptReceiver implements AutoCloseable {
     private final ThreadPoolExecutor executor;
     private final MessageLedger ledger;
     private final boolean dlrEnabled;
+    private final HttpGatewayProtocol protocol;
     private final java.util.concurrent.atomic.AtomicInteger active = new java.util.concurrent.atomic.AtomicInteger();
     private final EnumMap<Problem, AtomicLong> problems = new EnumMap<>(Problem.class);
 
     public HttpReceiptReceiver(InetSocketAddress address, String path, int threads, int queueCapacity,
             boolean dlrEnabled, MessageLedger ledger) throws IOException {
+        this(address, path, threads, queueCapacity, dlrEnabled, ledger, HttpGatewayProtocol.SENDIUM);
+    }
+
+    public HttpReceiptReceiver(InetSocketAddress address, String path, int threads, int queueCapacity,
+            boolean dlrEnabled, MessageLedger ledger, HttpGatewayProtocol protocol) throws IOException {
         if (threads < 1 || queueCapacity < 1 || path == null || !path.startsWith("/") || path.contains("?")) {
             throw new IllegalArgumentException("Invalid HTTP receiver settings");
         }
         this.ledger = ledger;
         this.dlrEnabled = dlrEnabled;
+        this.protocol = java.util.Objects.requireNonNull(protocol);
         for (Problem problem : Problem.values()) { problems.put(problem, new AtomicLong()); }
         server = HttpServer.create(address, queueCapacity);
         executor = new ThreadPoolExecutor(threads, threads, 0, TimeUnit.MILLISECONDS,
@@ -58,7 +65,8 @@ public final class HttpReceiptReceiver implements AutoCloseable {
             try {
                 query = decodeQuery(exchange.getRequestURI().getRawQuery());
                 if (!query.keySet().equals(java.util.Set.of("token", "messageId", "status"))
-                        || !HttpAdmissionClient.canonicalUuid(query.get("messageId"))) {
+                        || protocol == HttpGatewayProtocol.SENDIUM
+                            && !HttpAdmissionClient.canonicalUuid(query.get("messageId"))) {
                     throw new IllegalArgumentException();
                 }
             } catch (IllegalArgumentException exception) {
@@ -74,7 +82,9 @@ public final class HttpReceiptReceiver implements AutoCloseable {
             MessageLedger.ReceiptResult result;
             synchronized (ledger) {
                 if (ledger.isFrozen()) { exchange.sendResponseHeaders(503, -1); return; }
-                result = ledger.receiveReceipt(query.get("token"), query.get("messageId"));
+                result = protocol == HttpGatewayProtocol.KANNEL
+                        ? ledger.receiveProviderReceipt(query.get("token"), query.get("messageId"))
+                        : ledger.receiveReceipt(query.get("token"), query.get("messageId"));
             }
             if (result == MessageLedger.ReceiptResult.BEYOND_RETENTION) {
                 problem(Problem.LIMITED_HISTORY);
@@ -84,7 +94,7 @@ public final class HttpReceiptReceiver implements AutoCloseable {
                 return;
             }
             // Duplicates are acknowledged idempotently; the ledger still flags the scenario violation.
-            exchange.sendResponseHeaders(204, -1);
+            exchange.sendResponseHeaders(protocol == HttpGatewayProtocol.KANNEL ? 200 : 204, -1);
         } catch (IOException exception) {
             problem(Problem.IO_FAILURE);
         } finally { active.decrementAndGet(); }

@@ -34,6 +34,7 @@ public final class MessageLedger {
         Admission admission = Admission.PENDING;
         String ingressId;
         String forwardedIngressId;
+        String providerId;
         final EnumMap<Event, Long> events = new EnumMap<>(Event.class);
         Entry(boolean measured, long scheduledNanos, long dispatch, Measurements cohort) {
             this.measured = measured; this.scheduledNanos = scheduledNanos; this.dispatch = dispatch; this.cohort = cohort;
@@ -267,6 +268,37 @@ public final class MessageLedger {
         ensureOpen();
         Entry entry = find(token);
         return entry != null && eventAt(token, entry, Event.PROVIDER_ARRIVAL, clock.getAsLong());
+    }
+
+    /** Simulator-owned identity, retained with the bounded entry, never learned from a callback. */
+    public synchronized boolean assignProviderId(String token, String providerId) {
+        ensureOpen();
+        Entry entry = find(token);
+        if (entry == null) { return false; }
+        if (providerId == null || providerId.isBlank() || entry.providerId != null
+                || !entry.events.containsKey(Event.PROVIDER_ARRIVAL)
+                || entry.events.containsKey(Event.PROVIDER_RESPONSE)) {
+            violations++;
+            return false;
+        }
+        entry.providerId = providerId;
+        return true;
+    }
+
+    /** Kannel reports the provider ID, not an ID supplied by its admission response. */
+    public synchronized ReceiptResult receiveProviderReceipt(String token, String providerId) {
+        ensureOpen();
+        long before = eventsBeyondRetention;
+        Entry entry = find(token);
+        if (entry == null) {
+            return eventsBeyondRetention > before ? ReceiptResult.BEYOND_RETENTION : ReceiptResult.INVALID;
+        }
+        if (entry.providerId == null || !entry.providerId.equals(providerId)) {
+            violations++;
+            return ReceiptResult.INVALID;
+        }
+        return eventAt(token, entry, Event.RECEIPT_FORWARDED, clock.getAsLong())
+                ? ReceiptResult.RECORDED : ReceiptResult.INVALID;
     }
 
     /** Callback token permits correlation before the admission response supplies its gateway ID. */

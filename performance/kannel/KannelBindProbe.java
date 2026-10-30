@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
-/** Local startup probe using the production simulator; deliberately generates no traffic. */
+/** Local provider supervisor; traffic is opt-in and uses the shared harness adapters. */
 public final class KannelBindProbe {
     public static void main(String[] args) throws Exception {
         Path directory = Path.of("/probe");
@@ -31,6 +31,16 @@ public final class KannelBindProbe {
                 }
             }
             Files.writeString(directory.resolve("provider-bound"), "bound\n");
+            if (Files.exists(directory.resolve("traffic-enabled"))) {
+                while (!Files.exists(directory.resolve("gateway-ready"))) {
+                    if (Files.exists(directory.resolve("stop-provider"))) { return; }
+                    if (System.nanoTime() >= bindDeadline) {
+                        throw new IllegalStateException("Gateway HTTP readiness timed out");
+                    }
+                    Thread.sleep(100);
+                }
+                KannelTrafficProbe.run(directory, workload, ledger, provider);
+            }
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(180);
             while (!Files.exists(directory.resolve("stop-provider"))) {
                 if (System.nanoTime() >= deadline) {
@@ -40,7 +50,7 @@ public final class KannelBindProbe {
                     throw new IllegalStateException("Kannel provider session disconnected before shutdown");
                 }
                 if (provider.snapshot().problems().values().stream().anyMatch(value -> value != 0)) {
-                    throw new IllegalStateException("Unexpected provider problem during bind-only probe");
+                    throw new IllegalStateException("Unexpected provider problem during local probe");
                 }
                 Thread.sleep(100);
             }

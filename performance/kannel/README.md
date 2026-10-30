@@ -1,7 +1,7 @@
 # Kannel benchmark baseline
 
 This directory establishes the Kannel build baseline and standalone local
-startup/bind smoke run for the optional performance target. It is not yet
+startup/bind and HTTP/DLR correctness checks for the optional performance target. It is not yet
 integrated with the full local rehearsal or GitHub Actions.
 
 The initial scenario is **HTTP ingress -> SMPP provider -> HTTP DLR callback**.
@@ -33,6 +33,22 @@ architecture, builds the baseline and two smoke images, records their IDs, and
 launches those exact IDs. Reused images may contain older source; their recorded
 IDs, rather than the current working tree, identify the bytes being checked.
 
+To also verify real messages and delivery reports:
+
+```sh
+python performance/kannel/smoke.py --traffic --output performance/kannel/smoke-results-http-dlr
+```
+
+The opt-in traffic check sends ten synthetic, single-part HTTP submissions using
+the shared `HttpAdmissionClient`, with DLR callbacks handled by the shared
+`HttpReceiptReceiver`. It uses explicit Kannel protocol settings, records provider
+IDs in the shared ledger, and requires every admitted message to reach the
+simulated provider and return a matching delivered receipt. A bounded drain waits
+for outstanding messages and acknowledgement work. `traffic-result.json` contains
+counts, protocol diagnostics, and the correctness outcome; it is preserved beside
+the deployment outcome and redacted logs. It is a functional check, not a
+throughput measurement or an archived benchmark report.
+
 The run:
 
 1. Starts `KannelBindProbe`, a small wrapper around the existing production
@@ -53,21 +69,31 @@ are removed after the containers release it. The SMPP fixture password is eight
 characters to respect Kannel's wire limit. `system-type` is explicit. Logging uses
 warning/error verbosity; no access or protocol-payload logging is enabled.
 
-The outcome is explicitly **startup-and-bind-only**. It generates no SMS traffic
-and does not prove message forwarding, receipt correlation, or throughput. Those
-checks require the next HTTP/DLR adapter task. The smoke configuration uses
+Without `--traffic`, the outcome is explicitly **startup-and-bind-only** and
+generates no SMS traffic. With `--traffic`, its scope is
+**single-part-http-dlr-correctness**. Neither mode measures throughput. The smoke configuration uses
 internal DLR storage and an ephemeral local spool for message storage; it is not
 a persistence-equivalent Sendium comparison. Container CPU limits do not simulate
 `t4g.small` CPU credits.
 
 Local verification on 2026-10-30 passed on linux/amd64 with real Kannel and the
-current harness simulator. Startup failures encountered during configuration
+current harness simulator: ten attempts, ten acceptances, ten provider completions,
+and ten correlated forwarded DLRs, with zero duplicates, outstanding messages,
+or protocol/accounting problems. Startup failures encountered during configuration
 verification retained diagnostics and cleaned up their containers/network. The
 failure-path tests cover gateway readiness failure, provider shutdown timeout,
-credential redaction, and cleanup of both nodes and networking:
+failed traffic accounting, evidence export failure, credential redaction, and
+cleanup of both nodes and networking:
 
 ```sh
 python -m unittest discover -s performance/kannel -p 'test_*.py'
+```
+
+The Java harness unit suite (including default Sendium HTTP/SMPP adapters and
+Kannel protocol cases) can also run entirely inside Docker:
+
+```sh
+docker build --file performance/kannel/Dockerfile.local --target verification --tag sendium-local:kannel-adapter-verification .
 ```
 
 ## Source identity
@@ -141,8 +167,8 @@ and stage runtime dependencies before execution on isolated AWS instances.
 ## Verified HTTP and DLR differences
 
 These findings are from the exact upstream archive above, not assumptions based
-on Sendium's Kannel-compatible API. Runtime interoperability still needs the
-local smoke scenario.
+on Sendium's Kannel-compatible API. The local traffic check verifies the core
+submission/provider-ID/receipt path; negative cases are exercised in adapter tests.
 
 | Concern | Kannel 1.4.5 behavior | Integration requirement |
 |---|---|---|

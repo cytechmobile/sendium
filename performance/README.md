@@ -161,8 +161,8 @@ explains evidence collection, publication and cleanup.
 
 The optional Kannel target is being developed locally first. Its
 [build baseline, local startup smoke run, and protocol findings](kannel/README.md)
-describe the verified x86-64/ARM64 build, authenticated simulator bind, and remaining
-HTTP/DLR integration requirements. Workflow target selection is not available
+describe the verified x86-64/ARM64 build, authenticated simulator bind, and local
+end-to-end HTTP/DLR correctness check. Workflow target selection is not available
 yet. The initial Kannel scope is HTTP ingress with SMPP forwarding and HTTP
 delivery reports; SMPP ingress is deferred.
 

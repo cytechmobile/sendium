@@ -11,7 +11,7 @@ import smoke
 
 
 class SmokeLifecycleTest(unittest.TestCase):
-    def failure_run(self, provider_shutdown_times_out):
+    def failure_run(self, provider_shutdown_times_out, traffic=False, export_failure=False):
         commands = []
 
         def execute(command, **_):
@@ -34,12 +34,30 @@ class SmokeLifecycleTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "evidence"
+            write_text = Path.write_text
+
+            def write(path, *args, **kwargs):
+                if export_failure and path == output / "traffic-result.json":
+                    raise OSError("Evidence export failed")
+                return write_text(path, *args, **kwargs)
+
+            def ready(directory, *_):
+                if traffic:
+                    (directory / "traffic-result.json").write_text(json.dumps({
+                        "status": "failed", "issues": ["INCONSISTENT_ACCOUNTING"],
+                    }))
+                elif (directory / "ready-once").exists():
+                    raise RuntimeError("gateway readiness failed")
+                (directory / "ready-once").touch()
+
             with patch.object(smoke.subprocess, "run", side_effect=execute), \
                     patch.object(smoke.secrets, "token_hex", side_effect=["provider-secret", "http-secret", "admin-secret"]), \
-                    patch.object(smoke, "wait_ready", side_effect=[None, RuntimeError("gateway readiness failed")]):
-                result = smoke.run_smoke(output, skip_build=True)
+                    patch.object(smoke, "wait_ready", side_effect=ready), \
+                    patch.object(smoke.time, "sleep"), \
+                    patch.object(Path, "write_text", autospec=True, side_effect=write):
+                result = smoke.run_smoke(output, skip_build=True, traffic=traffic)
             self.assertEqual("failed", result["status"])
-            self.assertIn("gateway readiness failed", result["issues"])
+            self.assertIn("Message/DLR correctness check failed" if traffic else "gateway readiness failed", result["issues"])
             self.assertEqual([], result["cleanupIssues"])
             if provider_shutdown_times_out:
                 self.assertIn("Provider probe did not stop within its shutdown budget", result["issues"])
@@ -48,12 +66,22 @@ class SmokeLifecycleTest(unittest.TestCase):
             for log in output.glob("*.log"):
                 self.assertEqual("[REDACTED] [REDACTED] [REDACTED]", log.read_text(encoding="utf-8"))
             self.assertEqual("failed", json.loads((output / "outcome.json").read_text())["status"])
+            if export_failure:
+                self.assertIn("Could not preserve traffic correctness evidence", result["issues"])
+            elif traffic:
+                self.assertEqual("failed", json.loads((output / "traffic-result.json").read_text())["status"])
 
     def test_failed_gateway_preserves_diagnostics_and_cleans_both_nodes_and_network(self):
         self.failure_run(provider_shutdown_times_out=False)
 
     def test_provider_shutdown_timeout_cannot_skip_container_cleanup(self):
         self.failure_run(provider_shutdown_times_out=True)
+
+    def test_http_readiness_cannot_mask_failed_message_accounting(self):
+        self.failure_run(provider_shutdown_times_out=False, traffic=True)
+
+    def test_traffic_evidence_export_failure_cannot_skip_cleanup(self):
+        self.failure_run(provider_shutdown_times_out=False, traffic=True, export_failure=True)
 
 
 if __name__ == "__main__":
