@@ -76,6 +76,7 @@ def main(root=Path("/probe"), kannel=Path("/opt/kannel"), agent=Path("/opt/probe
                             response.read(4096).strip() == b"Authorization failed for sendsms"):
                         break
             except OSError:
+                # The HTTP listener may still be starting; retry until the bounded deadline.
                 pass
             stopped.wait(0.1)
         samples = root / "kannel-resources.jsonl"
