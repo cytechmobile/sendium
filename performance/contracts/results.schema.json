@@ -70,11 +70,17 @@
           "workload": { "properties": { "ingressMode": { "const": "http" } } },
           "application": {
             "required": ["runtime", "source", "messageStore"],
-            "properties": { "runtime": { "const": "kannel" }, "dlrStorage": { "const": "internal" },
+            "properties": { "runtime": { "const": "kannel" }, "dlrStorage": { "enum": ["internal", "postgresql"] },
               "jvmArguments": { "maxItems": 0 }, "nativeArguments": false, "nativeBuild": false }
           },
           "infrastructure": { "required": ["kannel"], "properties": { "sendium": false } }
-        } },
+        }, "allOf": [{
+          "if": { "properties": { "application": { "properties": { "dlrStorage": { "const": "postgresql" } } } } },
+          "then": { "properties": { "infrastructure": { "properties": { "database": {
+            "required": ["provisioned", "engine", "sslMode"],
+            "properties": { "provisioned": { "const": true }, "engine": { "const": "postgresql" }, "sslMode": { "const": "verify-full" } }
+          } } } } }
+        }] },
         "resources": { "required": ["kannel"], "properties": { "sendium": false } }
       }
     },

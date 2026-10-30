@@ -65,6 +65,10 @@ class TargetContractTests(unittest.TestCase):
         legacy["configuration"]["application"].update(runtime="native", jvmArguments=[], nativeArguments=["-Xmx512m"])
         VALIDATOR.validate(legacy)
         VALIDATOR.validate(fixture("kannel"))
+        postgres = fixture("kannel")
+        postgres["configuration"]["application"]["dlrStorage"] = "postgresql"
+        postgres["configuration"]["infrastructure"]["database"] = {"engine": "postgresql", "provisioned": True, "sslMode": "verify-full"}
+        VALIDATOR.validate(postgres)
 
     def test_kannel_rejects_smpp_heap_flags_commit_claims_and_other_runtime_labels(self):
         mutations = [

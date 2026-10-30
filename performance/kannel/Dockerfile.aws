@@ -1,0 +1,35 @@
+# Build for the architecture resolved for the private EC2 gateway. No node downloads.
+ARG KANNEL_BASE_IMAGE=sendium-kannel-baseline:arm64
+FROM ${KANNEL_BASE_IMAGE} AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1
+RUN dnf install -y --setopt=install_weak_deps=False python3 && dnf clean all
+COPY performance/kannel/metadata.py performance/kannel/gateway.py performance/kannel/postgresql_probe.py /opt/probe/
+COPY performance/kannel/smoke.py performance/kannel/aws_runtime.py performance/kannel/dlr.sql /opt/probe/
+COPY performance/resources/sample_process.py /opt/probe/
+COPY performance/kannel/package_runtime.py /opt/package_runtime.py
+RUN python3 /opt/probe/metadata.py gateway && PYTHONPATH=/opt/probe python3 /opt/package_runtime.py
+
+FROM amazonlinux:2023@sha256:c04a1012acc483977f61f7f91c28624a39a621e56a59781319a75dec528be9b6 AS verification
+RUN dnf install -y --setopt=install_weak_deps=False python3 tar gzip && dnf clean all
+COPY --from=runtime /export/ /export/
+RUN mkdir -p /verify/application && tar -xzf /export/kannel.tar.gz -C /verify/application
+ENV PYTHONPATH=/verify/application/control
+ENV PYTHONDONTWRITEBYTECODE=1
+RUN python3 -c 'import json; from pathlib import Path; from types import SimpleNamespace; import aws_runtime; aws_runtime.install(SimpleNamespace(install=Path("/verify"), document={"kannelBuild": json.loads(Path("/export/build-metadata.json").read_text()), "deployment": {"database": {"caFile": "/unused-version-probe.pem"}}}))'
+
+FROM verification AS node-verification
+RUN dnf install -y --setopt=install_weak_deps=False python3-pip && dnf clean all \
+    && pip3 install --no-cache-dir jsonschema boto3
+COPY --from=eclipse-temurin:25-jdk /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+COPY --from=sendium-local:kannel-postgresql-verification /opt/probe/harness.jar /opt/probe/harness.jar
+COPY performance/deployment /workspace/performance/deployment
+COPY performance/infrastructure /workspace/performance/infrastructure
+COPY performance/contracts /workspace/performance/contracts
+COPY performance/presets /workspace/performance/presets
+COPY performance/resources /workspace/performance/resources
+COPY performance/kannel/verify_aws_nodes.py /workspace/performance/kannel/verify_aws_nodes.py
+ENTRYPOINT ["python3", "/workspace/performance/kannel/verify_aws_nodes.py"]
+
+FROM scratch AS export
+COPY --from=runtime /export/ /

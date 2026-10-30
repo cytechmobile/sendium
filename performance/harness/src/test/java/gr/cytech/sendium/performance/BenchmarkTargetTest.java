@@ -53,4 +53,17 @@ class BenchmarkTargetTest {
         assertThrows(IllegalArgumentException.class, () -> new ResultReport.Context(context.provenance(),
                 sendium, context.infrastructure(), List.of()));
     }
+
+    @Test
+    void postgresBackendRequiresExplicitProvisioningAndVerifiedTlsConfiguration() {
+        var context = KannelFixtures.context("postgres-identity");
+        context.application().put("dlrStorage", "postgresql");
+        assertThrows(IllegalArgumentException.class, () -> new ResultReport.Context(context.provenance(),
+                context.application(), context.infrastructure(), List.of()));
+        context.infrastructure().withObject("/database").put("engine", "postgresql").put("provisioned", true).put("sslMode", "verify-full");
+        assertDoesNotThrow(() -> new ResultReport.Context(context.provenance(), context.application(), context.infrastructure(), List.of()));
+        context.infrastructure().withObject("/database").put("sslMode", "prefer");
+        assertThrows(IllegalArgumentException.class, () -> new ResultReport.Context(context.provenance(),
+                context.application(), context.infrastructure(), List.of()));
+    }
 }

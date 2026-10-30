@@ -58,6 +58,83 @@ python performance/local/rehearse.py --scenarios http-dlr,bad-tls,concurrent --o
 `sendium-local:control` images; their recorded build context, not later source
 edits, is what runs. Leave it unset after code changes.
 
+## Select Sendium or Kannel
+
+`--benchmark-target sendium` is the default and retains the AWS-like Sendium /
+PostgreSQL rehearsal above. Kannel now uses the same launcher and Java benchmark
+engine, including rate scheduling, warm-up, measurement, drain, accounting,
+resource summaries, JSON/Markdown reporting, and offline finalization:
+
+```sh
+python performance/local/rehearse.py --benchmark-target kannel --output local-load-results
+```
+
+For Kannel, `load` selects **HTTP with DLR only**. Explicit Kannel scenarios are
+`http-dlr`, `http-no-dlr`, `app-crash`, `interrupted`, `database-unavailable`, and
+`bad-tls`. SMPP ingress and the
+Sendium-only `all` matrix are rejected before Docker builds or provisioning.
+Both workload containers retain **2 CPU / 2 GiB** limits. Kannel runs bearerbox
+and smsbox with PostgreSQL 17 DLR storage and an ephemeral message spool. Its
+separate database requires certificate-verified TLS, rejects plaintext, and is
+checked before gateway readiness. Database evidence records TLS sessions and
+DLR insert/delete activity, including final pending rows. PostgreSQL remains
+provisioned for no-DLR runs. The shared database engine does not establish equal
+durability guarantees; see [storage boundaries](../kannel/README.md#storage-boundary).
+
+Shared preset defaults remain **30 msg/s, 120-second warm-up, 600-second
+measurement, up to 120-second drain, worker TPS 0, and provider delays 5/1000 ms**.
+Both targets accept the same explicit local workload overrides:
+
+| Option | Meaning |
+|---|---|
+| `--offered-rate` | Offered message rate, including positive fractional values. |
+| `--worker-tps` | Outgoing cap; zero is unlimited. |
+| `--warmup-seconds` | Warm-up duration, 0–600. |
+| `--measurement-seconds` | Measured duration, 1–3600. |
+| `--drain-seconds` | Maximum drain duration, 0–600. |
+| `--provider-response-delay-ms` | Simulator submission-response delay, 0–10000. |
+| `--provider-dlr-delay-ms` | Simulator receipt delay, 0–60000. |
+
+For a shorter functional check crossing a minute boundary:
+
+```sh
+python performance/local/rehearse.py --benchmark-target kannel --scenarios http-dlr --warmup-seconds 2 --measurement-seconds 65 --drain-seconds 5 --output local-load-results
+```
+
+Kannel builds run natively for the Docker engine architecture. Image metadata
+records exact source/patch and binary hashes, compiler/configure identity, harness
+JAR/Java identity, source revision plus working-tree fingerprint, and image IDs.
+The controller, harness and gateway images are pinned by ID for execution.
+`--skip-build` reuses their recorded identities; it does not relabel old images
+as current source. Mismatched component identities are rejected.
+
+`--detach` and `--resume-session` work for both targets. Use the original target
+when collecting a detached run:
+
+```sh
+python performance/local/rehearse.py --benchmark-target kannel --skip-build --detach --output local-load-results
+python performance/local/rehearse.py --benchmark-target kannel --resume-session <printed-session> --output local-load-results
+```
+
+Results are under `<output>/<scenario>/results.json` and `summary.md`, alongside
+effective configuration, initial/final reports, raw resource evidence and redacted
+process logs. `rehearsal.json` describes case outcomes and
+`session-cleanup.json` confirms removal of session-owned containers, networks and
+volumes. Kannel's offline finalizer has no network, Docker socket or private
+credential inputs. Private runtime files are removed after child containers stop.
+
+A completed Kannel pipeline retains the report's original
+**valid/inconclusive/failed** classification. `loadQualified` is a completion
+check through drain, not a sustainable-throughput gate; unfinished work remains
+visible. For the two fault scenarios, a passing rehearsal means the requested
+fault produced and retained a failed report. Local container results do not
+reproduce Graviton hardware, EC2 CPU credits, or AWS capacity. Sendium's local RDS
+identity/CloudWatch series are explicitly modeled fixtures; application/database
+traffic, TLS, process sampling and message accounting are real.
+
+See [Kannel build and protocol details](../kannel/README.md) and
+[execution contracts](../harness/EXECUTION.md#target-aware-execution).
+
 ## Topology and execution boundaries
 
 ### Selected-branch regression comparisons

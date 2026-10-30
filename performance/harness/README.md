@@ -198,8 +198,9 @@ renders target-aware reports; missing target fields retain Sendium defaults.
 See [target-aware execution](EXECUTION.md#target-aware-execution) for readiness,
 source identity, and resource paths. The resource importer accepts validated named
 process groups and requires bearerbox plus smsbox for complete Kannel resource
-evidence. Kannel configuration generation, local full-benchmark orchestration,
-and workflow selection are subsequent tasks.
+evidence. The [local launcher](../local/README.md#select-sendium-or-kannel) prepares
+Kannel inputs and runs the full benchmark lifecycle, resource finalization and
+cleanup. AWS deployment and workflow selection are subsequent tasks.
 
 ## SMPP submission and forwarded receipts
 

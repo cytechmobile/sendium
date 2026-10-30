@@ -1,9 +1,9 @@
-# Build-compatibility probe only; local deployment is integrated in Task 1.2.
+# Pinned Kannel build shared by local correctness probes and the benchmark gateway.
 # The multi-architecture base digest fixes the AL2023 repository release as well.
 FROM amazonlinux:2023@sha256:c04a1012acc483977f61f7f91c28624a39a621e56a59781319a75dec528be9b6
 
 RUN dnf install -y --setopt=install_weak_deps=False \
-      gcc make bison flex libxml2-devel openssl-devel openssl \
+      gcc make bison flex libxml2-devel openssl-devel openssl libpq-devel \
       tar gzip xz patch diffutils perl-interpreter \
     && dnf clean all
 
@@ -12,6 +12,7 @@ RUN curl --fail --location --silent --show-error \
       https://deb.debian.org/debian/pool/main/k/kannel/kannel_1.4.5.orig.tar.gz \
       --output source.tar.gz \
     && echo 'f279606ea8317fd2c8fa6b0f591c084fdfa954612f1e7c9cb667a5f6b77387f3  source.tar.gz' | sha256sum --check --strict \
+    && sha256sum source.tar.gz > source-archive.sha256 \
     && tar -xzf source.tar.gz --strip-components=1 \
     && rm source.tar.gz
 
@@ -19,13 +20,15 @@ RUN curl --fail --location --silent --show-error \
       https://deb.debian.org/debian/pool/main/k/kannel/kannel_1.4.5-23.debian.tar.xz \
       --output debian.tar.xz \
     && echo '3d8d54e272699a5226368738ee0246c8873d152a63220f978ac149285895f5be  debian.tar.xz' | sha256sum --check --strict \
+    && sha256sum debian.tar.xz > patch-archive.sha256 \
     && tar -xJf debian.tar.xz \
     && patch --batch --fuzz=0 -p1 < debian/patches/Update-bison-source-for-newer-version.patch \
     && patch --batch --fuzz=0 -p1 < debian/patches/Fix-multiple-conflicting-defs-of-dispatch_to_wdp-wsp-push.patch \
+    && printf '%s\n' Update-bison-source-for-newer-version.patch Fix-multiple-conflicting-defs-of-dispatch_to_wdp-wsp-push.patch > applied-patches.txt \
     && rm debian.tar.xz
 
 RUN ./configure --prefix=/opt/kannel --disable-wap --disable-docs \
-      --with-defaults=speed --with-malloc=native --enable-ssl \
+      --with-defaults=speed --with-malloc=native --enable-ssl --with-pgsql \
     && make -j1 \
     && make install \
     && mkdir -p /opt/kannel/share/licenses \

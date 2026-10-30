@@ -45,7 +45,7 @@ public enum BenchmarkTarget {
         if (provenance.applicationCommit() != null || !"kannel".equals(application.path("runtime").asText())
                 || !application.path("jvmArguments").isArray() || !application.path("jvmArguments").isEmpty()
                 || application.has("nativeArguments") || application.has("nativeBuild")
-                || !"internal".equals(application.path("dlrStorage").asText())
+                || !java.util.List.of("internal", "postgresql").contains(application.path("dlrStorage").asText())
                 || !java.util.List.of("spool", "file", "disabled").contains(application.path("messageStore").asText())
                 || !source.path("version").isTextual() || source.path("version").asText().isBlank()
                 || source.path("version").asText().length() > 128
