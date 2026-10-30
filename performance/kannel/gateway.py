@@ -15,6 +15,7 @@ def main():
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stopped.set())
     processes = []
+    sampler = None
     deadline = time.monotonic() + 120
     Path("/tmp/kannel-store").mkdir()
     try:
@@ -49,21 +50,51 @@ def main():
             except OSError:
                 pass
             stopped.wait(0.1)
+        samples = Path("/probe/kannel-resources.jsonl")
+        sampler = subprocess.Popen([
+            "python3", "/opt/probe/sample_process.py",
+            "--process", f"bearerbox:{processes[0].pid}", "--process", f"smsbox:{processes[1].pid}",
+            "--duration-seconds", "180", "--interval-seconds", "1", "--max-samples", "256",
+            "--output", str(samples),
+        ])
+        while True:
+            check_running(processes, stopped)
+            if sampler.poll() is not None:
+                raise RuntimeError("Gateway sampler exited before its baseline")
+            if samples.exists():
+                with samples.open(encoding="utf-8") as source:
+                    if source.readline(8193).endswith("\n"):
+                        break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Gateway sampler startup timed out")
+            stopped.wait(0.1)
         Path("/probe/gateway-ready").write_text("ready\n", encoding="utf-8")
         deadline = time.monotonic() + 180
         while not stopped.wait(0.1):
             check_running(processes, stopped)
+            if sampler.poll() is not None:
+                raise RuntimeError("Gateway sampler stopped during the local run")
             if time.monotonic() >= deadline:
                 raise RuntimeError("Local gateway exceeded its lifetime")
     finally:
-        for process in reversed(processes):
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+        try:
+            # Retain the final complete group interval while both members are alive.
+            if sampler is not None and stop_process(sampler, 6) != 0:
+                raise RuntimeError("Gateway sampler did not finish successfully")
+        finally:
+            for process in reversed(processes):
+                stop_process(process, 5)
+
+
+def stop_process(process, timeout):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    return process.returncode
 
 
 def check_running(processes, stopped):

@@ -29,6 +29,24 @@ that path. The workload schema and Sendium preset/runtime validation are unchang
 
 See [prepared execution inputs](../harness/EXECUTION.md#target-aware-execution).
 
+### Process-group resource evidence
+
+Resource samples optionally contain `processes`, a bounded array of 2–16 named
+members with PID/start-tick identity, CPU percentage, and RSS bytes. Group-level
+`pid` and `processStartTicks` are null. CPU and RSS must equal the member sums;
+group and member baseline CPU values are all null. RSS sums can double-count
+shared pages. Host observations are not summed. Legacy single-PID samples omit
+`processes` and retain their existing format.
+
+The JVM importer rejects malformed sums, duplicate names/PIDs, conflicting
+single-process identities and unbounded groups. Resource validity checks stable
+membership/PID/start ticks, optional expected identities in
+`infrastructure.<source>.processes`, and exactly `bearerbox`/`smsbox` for Kannel.
+Missing group evidence is inconclusive; changed or wrong identities fail resource
+validity. The independent Python validator checks sums and ensures membership or
+identity violations cannot be published as valid. Raw member contributions survive
+offline resource finalization, and resource summaries label aggregation explicitly.
+
 ### Sendium application runtime
 
 The effective preset records `runtime.applicationRuntime` as `jvm` (default) or

@@ -339,6 +339,9 @@ public final class ResultReport {
         for (String source : List.of(target.id(), "harness")) {
             resourceRow(out, source, root.path("resources").path("summary").path("overall").path(source));
         }
+        if (root.path("resources").has("processGroupSemantics")) {
+            out.append("\nProcess-group CPU is the sum of member CPU over a common interval. Group RSS is the sum of member RSS snapshots; shared pages may be counted more than once. Host CPU and memory are observed once, not summed across members. Member identities and contributions are retained in the raw samples.\n");
+        }
         out.append("\n<details><summary>Per-minute resource measurements</summary>\n\n")
                 .append("| Phase / interval / source | Process CPU avg % | Process CPU max % | Host CPU avg % | Peak RSS MiB | Peak host used MiB | CPU coverage s |\n|---|---:|---:|---:|---:|---:|---:|\n");
         for (var interval : root.path("resources").path("summary").path("intervals")) {

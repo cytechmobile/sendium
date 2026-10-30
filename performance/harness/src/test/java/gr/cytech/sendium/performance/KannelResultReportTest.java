@@ -31,13 +31,19 @@ class KannelResultReportTest {
         writer.write(directory.resolve("initial"), initial);
         Path samples = directory.resolve("samples.jsonl");
         StringBuilder jsonl = new StringBuilder();
+        StringBuilder harness = new StringBuilder();
         for (int i = 0; i <= 1; i++) {
             jsonl.append(mapper.writeValueAsString(new ResourceEvidence.Sample(origin.plusSeconds(i).toString(),
-                    origin.plusSeconds(i - 1).toString(), 1.0, 50.0, 25.0, 100L, 200L, 1000L, 2, 11L, 123L))).append('\n');
+                    origin.plusSeconds(i - 1).toString(), 1.0, 50.0, 25.0, 100L, 200L, 1000L, 2, null, null,
+                    List.of(new ResourceEvidence.ProcessSample("bearerbox", 11L, 123L, 20.0, 40L),
+                            new ResourceEvidence.ProcessSample("smsbox", 12L, 124L, 30.0, 60L))))).append('\n');
+            harness.append(mapper.writeValueAsString(new ResourceEvidence.Sample(origin.plusSeconds(i).toString(),
+                    origin.plusSeconds(i - 1).toString(), 1.0, 50.0, 25.0, 100L, 200L, 1000L, 2, 21L, 456L))).append('\n');
         }
         Files.writeString(samples, jsonl);
+        Files.writeString(directory.resolve("harness.jsonl"), harness);
         Path inputs = directory.resolve("resources.json");
-        mapper.writeValue(inputs.toFile(), new ExecutionSettings.ResourceFiles(1, null, "samples.jsonl", null,
+        mapper.writeValue(inputs.toFile(), new ExecutionSettings.ResourceFiles(1, null, "harness.jsonl", null,
                 10, null, "samples.jsonl"));
         assertEquals(0, HarnessMain.run(new String[]{"finalize-report", directory.resolve("initial/results.json").toString(),
                 inputs.toString(), directory.resolve("final").toString()}));
@@ -57,6 +63,9 @@ class KannelResultReportTest {
         assertTrue(markdown.contains("Kannel version: **1.4.5**"));
         assertTrue(markdown.contains("Requests awaiting Kannel acknowledgement"));
         assertTrue(markdown.contains("|kannel|50.000|"));
+        assertTrue(markdown.contains("shared pages may be counted more than once"));
+        assertTrue(result.at("/resources/kannel/0/pid").isNull());
+        assertEquals("smsbox", result.at("/resources/kannel/0/processes/1/name").asText());
         assertFalse(markdown.contains("Requests awaiting Sendium acknowledgement"));
         writer.write(Path.of("target/report-fixtures/kannel-" + java.util.UUID.randomUUID()),
                 new ResultReport.Report((com.fasterxml.jackson.databind.node.ObjectNode) result, markdown));

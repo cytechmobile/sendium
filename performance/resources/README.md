@@ -50,6 +50,61 @@ CPU summaries weight each sample by overlap with the measurement/minute window.
 Missing spans are not filled with zero. Memory peaks use snapshots inside the
 half-open window. Raw samples remain available in `results.json`.
 
+### Named process groups (Kannel bearerbox and smsbox)
+
+The same agent can sample a fixed, explicitly named group on one Linux host:
+
+```sh
+python3 performance/resources/sample_process.py \
+  --process "bearerbox:$BEARERBOX_PID" \
+  --process "smsbox:$SMSBOX_PID" \
+  --duration-seconds 960 \
+  --interval-seconds 1 \
+  --max-samples 4096 \
+  --output kannel-resources.jsonl
+```
+
+`--process NAME:PID` is repeatable and mutually exclusive with the existing
+`--pid` option. Groups require 2–16 unique names and PIDs. Names use lowercase
+letters, digits, underscores and hyphens, start with a letter, and are at most
+32 characters. Membership is explicit and fixed; the agent does not discover
+children or replace restarted members by executable name.
+
+| Group field | Meaning |
+|---|---|
+| `processes` | Per-member `name`, `pid`, `processStartTicks`, `cpuPercent`, and `rssBytes`. |
+| `cpuPercent` | Sum of member CPU percentages over the same monotonic interval; 100% is one logical core. |
+| `rssBytes` | Sum of member RSS snapshots. Shared pages may be counted more than once; this is not unique physical memory. |
+| `pid`, `processStartTicks` | Null at group level; each member carries its own identity. |
+| Host fields | One `/proc/stat` and `/proc/meminfo` observation per group sample, not a sum across members. |
+
+Baseline CPU remains null for both the group and every member. Missing/dead
+members, PID/start-time changes, or regressing member CPU counters abort collection
+with nonzero status; no member silently disappears and no missing contribution
+becomes zero. Existing `--pid` samples retain their original JSON shape.
+
+The importer verifies group size, unique names/PIDs, matching CPU/RSS sums, and
+consistent baseline nulls. Validation checks every member's identity across the
+sample history. Kannel requires exactly `bearerbox` and `smsbox`; single-process
+Kannel evidence is inconclusive, and changed/mismatched group identity fails
+resource validity. An optional `infrastructure.kannel.processes` array can declare
+expected `name`, `pid`, and `processStartTicks` values for comparison with samples.
+Use the same PID namespace as the agent. Group metadata replaces the single
+`processId` field; declaring both a single-process identity and group evidence is
+an identity mismatch.
+
+Stop the sampler and wait for its final complete interval **before** stopping
+either member. The local Kannel supervisor does this automatically, starts the
+agent before publishing gateway readiness, and retains `kannel-resources.jsonl`
+beside the smoke diagnostics. The sample budget applies to complete group records,
+with a maximum of 16 members in each record. Raw contributions are retained in
+JSON reports and the Markdown summary describes aggregation explicitly.
+
+Container `/proc` host CPU/memory describe the Docker Linux host or VM, which can
+include other containers. They are distinct from the gateway container's 2 CPU /
+2 GiB limits and do not model EC2 CPU credits. The smoke run is correctness and
+collection evidence; the full benchmark observation window is integrated separately.
+
 ## Read-only AWS CPU-credit collector
 
 Run under the protected GitHub environment's OIDC-authenticated read-only

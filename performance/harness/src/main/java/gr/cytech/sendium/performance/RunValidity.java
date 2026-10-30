@@ -158,9 +158,58 @@ public final class RunValidity {
         }
         java.time.Instant previous = null;
         Long firstPid = null, firstStart = null;
+        Boolean grouped = null;
+        Map<String, List<Long>> firstGroup = null;
+        var sourceMetadata = context.infrastructure().path(source);
+        Map<String, List<Long>> expectedGroup = null;
+        if (sourceMetadata.hasNonNull("processes")) {
+            try {
+                var members = sourceMetadata.path("processes");
+                if (!members.isArray() || members.size() < 2 || members.size() > 16) { throw new IllegalArgumentException(); }
+                var identities = new java.util.HashMap<String, List<Long>>();
+                var pids = new java.util.HashSet<Long>();
+                for (var member : members) {
+                    String name = member.path("name").asText();
+                    if (!member.path("name").isTextual() || !name.matches("[a-z][a-z0-9_-]{0,31}")
+                            || !member.path("pid").isIntegralNumber() || !member.path("pid").canConvertToLong() || member.path("pid").asLong() < 1
+                            || !member.path("processStartTicks").isIntegralNumber() || !member.path("processStartTicks").canConvertToLong() || member.path("processStartTicks").asLong() < 0
+                            || !pids.add(member.path("pid").asLong())
+                            || identities.putIfAbsent(name, List.of(member.path("pid").asLong(), member.path("processStartTicks").asLong())) != null) {
+                        throw new IllegalArgumentException();
+                    }
+                }
+                expectedGroup = Map.copyOf(identities);
+            } catch (IllegalArgumentException exception) {
+                failed(reasons, "RESOURCE_PROCESS_GROUP_METADATA_INVALID", source + " expected process-group identity is invalid.");
+            }
+        }
         for (var sample : samples) {
-            var expectedPid = context.infrastructure().path(source).path("processId");
-            if (sample.pid() != null) {
+            boolean group = sample.processes() != null;
+            if (grouped != null && grouped != group) {
+                failed(reasons, "RESOURCE_PROCESS_IDENTITY_MISMATCH", source + " resource evidence changed between single-process and group sampling.");
+                break;
+            }
+            grouped = group;
+            var expectedPid = sourceMetadata.path("processId");
+            if (group) {
+                var identities = sample.identities();
+                if (source.equals("kannel") && !identities.keySet().equals(java.util.Set.of("bearerbox", "smsbox"))) {
+                    failed(reasons, "RESOURCE_PROCESS_GROUP_MISMATCH", "kannel resources must include bearerbox and smsbox exactly.");
+                    break;
+                }
+                if (firstGroup != null && !firstGroup.equals(identities)
+                        || expectedGroup != null && !expectedGroup.equals(identities) || sourceMetadata.hasNonNull("processId")) {
+                    failed(reasons, "RESOURCE_PROCESS_IDENTITY_MISMATCH", source + " resource evidence changed group membership/identity or differs from expected processes.");
+                    break;
+                }
+                firstGroup = identities;
+            } else if (expectedGroup != null) {
+                failed(reasons, "RESOURCE_PROCESS_IDENTITY_MISMATCH", source + " resource evidence omits the expected process group.");
+                break;
+            } else if (source.equals("kannel")) {
+                inconclusive(reasons, "RESOURCE_PROCESS_GROUP_MISSING", "kannel resource evidence does not identify both gateway processes.");
+            }
+            if (!group && sample.pid() != null) {
                 if (expectedPid.isIntegralNumber() && sample.pid() != expectedPid.asLong()
                         || firstPid != null && !firstPid.equals(sample.pid())
                         || firstStart != null && !firstStart.equals(sample.processStartTicks())) {
@@ -168,7 +217,7 @@ public final class RunValidity {
                     break;
                 }
                 firstPid = sample.pid(); firstStart = sample.processStartTicks();
-            } else if (expectedPid.isIntegralNumber()) {
+            } else if (!group && expectedPid.isIntegralNumber()) {
                 inconclusive(reasons, "RESOURCE_PROCESS_IDENTITY_MISSING", source + " resource samples do not identify the expected process.");
             }
             var current = ResourceEvidence.instant(sample.timestamp());

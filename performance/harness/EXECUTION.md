@@ -85,8 +85,14 @@ For Kannel resource imports, supply `resources.gatewaySamples` and leave
 both paths is rejected. Reports and offline `finalize-report` use the selected
 target's resource key (`kannel` or `sendium`) for raw samples, summaries, process
 identity checks, and Markdown labels. Missing evidence remains inconclusive.
-The actual bearerbox/smsbox group sampler and local benchmark launcher are the
-next integration steps.
+The [named process-group sampler](../resources/README.md#named-process-groups-kannel-bearerbox-and-smsbox)
+collects bearerbox and smsbox contributions together. Group samples carry member
+identities and have null top-level `pid`/`processStartTicks`; Kannel validity
+requires both named members. Optional `infrastructure.kannel.processes` declares
+their expected names, PIDs and start ticks instead of a single `processId`.
+CPU and RSS are summed across members, with possible shared-page double counting
+for RSS, while host metrics are observed once. The local full-benchmark launcher
+is the next integration step.
 
 Warm-up, measurement, and bounded drain then run automatically. Accounting is
 sealed, owned services stop, and JSON/Markdown reports are written. Atomically

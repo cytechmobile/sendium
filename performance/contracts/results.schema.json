@@ -204,6 +204,37 @@
         "latencies": { "type": "object", "required": ["acknowledgement", "submissionToProvider", "providerResponseCompletion", "receiptForwarding", "simulatorReceiptDelay"], "additionalProperties": { "$ref": "#/$defs/distribution" } }
       }
     },
-    "resourceSample": { "type": "object", "required": ["timestamp", "cpuPercent", "rssBytes", "hostMemoryUsedBytes"], "properties": { "timestamp": { "type": "string", "format": "date-time" }, "intervalStartTimestamp": { "type": ["string", "null"], "format": "date-time" }, "intervalSeconds": { "$ref": "#/$defs/nullableNonnegative" }, "cpuPercent": { "$ref": "#/$defs/nullableNonnegative" }, "hostCpuPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 }, "rssBytes": { "type": ["integer", "null"], "minimum": 0 }, "hostMemoryUsedBytes": { "type": ["integer", "null"], "minimum": 0 }, "hostMemoryTotalBytes": { "type": ["integer", "null"], "minimum": 0 }, "cpuCount": { "type": ["integer", "null"], "minimum": 1 }, "pid": { "type": ["integer", "null"], "minimum": 1 }, "processStartTicks": { "type": ["integer", "null"], "minimum": 0 } } }
+    "processSample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "pid", "processStartTicks", "cpuPercent", "rssBytes"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "processStartTicks": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "cpuPercent": { "$ref": "#/$defs/nullableNonnegative" },
+        "rssBytes": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
+      }
+    },
+    "resourceSample": {
+      "type": "object", "required": ["timestamp", "cpuPercent", "rssBytes", "hostMemoryUsedBytes"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "intervalStartTimestamp": { "type": ["string", "null"], "format": "date-time" },
+        "intervalSeconds": { "$ref": "#/$defs/nullableNonnegative" },
+        "cpuPercent": { "$ref": "#/$defs/nullableNonnegative" },
+        "hostCpuPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "rssBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "hostMemoryUsedBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "hostMemoryTotalBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "cpuCount": { "type": ["integer", "null"], "minimum": 1 },
+        "pid": { "type": ["integer", "null"], "minimum": 1 },
+        "processStartTicks": { "type": ["integer", "null"], "minimum": 0 },
+        "processes": { "type": ["array", "null"], "minItems": 2, "maxItems": 16, "items": { "$ref": "#/$defs/processSample" } }
+      },
+      "allOf": [{
+        "if": { "required": ["processes"], "properties": { "processes": { "type": "array" } } },
+        "then": { "properties": { "pid": { "type": "null" }, "processStartTicks": { "type": "null" } } }
+      }]
+    }
   }
 }
