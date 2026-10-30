@@ -15,7 +15,7 @@ PERFORMANCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PERFORMANCE / "deployment"))
 import deploy
 from aws_cli import AwsError
-from node import Node, digest, read, write
+from node import Node, digest, read
 
 
 class LocalTransport:
@@ -98,7 +98,7 @@ def main():
         def run(node):
             try:
                 node.supervise()
-            except BaseException as error:
+            except Exception as error:
                 failures.append(type(error).__name__)
         threads = []
         try:

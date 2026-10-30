@@ -1,7 +1,7 @@
 """Local S3/Secrets are real; this adapter models EC2/RDS/SSM/CloudFormation metadata."""
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import hashlib
 import io
 import json
