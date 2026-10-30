@@ -78,11 +78,17 @@
           "if": { "properties": { "application": { "properties": { "dlrStorage": { "const": "postgresql" } } } } },
           "then": { "properties": { "infrastructure": { "properties": { "database": {
             "required": ["provisioned", "engine", "sslMode"],
-            "properties": { "provisioned": { "const": true }, "engine": { "const": "postgresql" }, "sslMode": { "const": "verify-full" } }
+            "properties": { "provisioned": { "type": ["boolean", "null"] }, "engine": { "const": "postgresql" }, "sslMode": { "const": "verify-full" } }
           } } } } }
         }] },
         "resources": { "required": ["kannel"], "properties": { "sendium": false } }
-      }
+      },
+      "allOf": [{
+        "if": { "properties": { "measurementMetadata": { "required": ["observationAvailable"], "properties": { "observationAvailable": { "const": false } } } } },
+        "then": { "properties": { "validity": { "properties": { "status": { "const": "failed" } } } } },
+        "else": { "if": { "properties": { "configuration": { "properties": { "application": { "properties": { "dlrStorage": { "const": "postgresql" } } } } } } },
+                  "then": { "properties": { "configuration": { "properties": { "infrastructure": { "properties": { "database": { "properties": { "provisioned": { "const": true } } } } } } } } } }
+      }]
     },
     "else": {
       "properties": {

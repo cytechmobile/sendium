@@ -1,11 +1,17 @@
 name: Performance Tests
-run-name: Performance · ${{ github.ref_name }} · ${{ inputs.ingress_mode }}
+run-name: Performance · ${{ inputs.benchmark_target }} · ${{ github.ref_name }} · ${{ inputs.ingress_mode }}
 
 on:
   workflow_dispatch:
     inputs:
+      benchmark_target:
+        description: Gateway to benchmark (Kannel supports HTTP ingress only)
+        type: choice
+        options: [sendium, kannel]
+        default: sendium
+        required: true
       application_runtime:
-        description: Sendium application runtime (harness always JVM)
+        description: Sendium runtime (leave jvm for Kannel; harness always JVM)
         type: choice
         options: [jvm, native]
         default: jvm
@@ -17,7 +23,7 @@ on:
         default: http
         required: true
       sendium_instance_type:
-        description: Sendium EC2 instance type
+        description: Gateway EC2 instance type (Sendium or Kannel)
         type: string
         default: t4g.small
         required: true
@@ -84,6 +90,7 @@ jobs:
     outputs:
       controller_revision: ${{ steps.request.outputs.controller_revision }}
       run_identity: ${{ steps.request.outputs.run_identity }}
+      application_revision: ${{ steps.request.outputs.application_revision }}
     steps:
       - name: Snapshot maintained controller source
         uses: actions/checkout@v7
@@ -301,7 +308,7 @@ jobs:
       - name: Checkout exact dispatch commit
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.validate.outputs.application_revision }}
           path: application
           persist-credentials: false
       - name: Checkout pinned preparation code

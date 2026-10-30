@@ -2,8 +2,9 @@
 
 This directory contains the pinned Kannel build, standalone correctness probes,
 and local benchmark controller. Kannel is selectable through the shared local
-launcher. Prepared AWS deployment plans also support Kannel; GitHub Actions target
-selection remains subsequent work. See the [AWS deployment profile](../deployment/README.md#kannel-aws-deployment-profile).
+launcher. The manual AWS workflow also selects Kannel after the maintained
+controller changes merge to `main`. See the [dispatch instructions](../workflow/README.md#running-kannel-after-merge)
+and [AWS deployment profile](../deployment/README.md#kannel-aws-deployment-profile).
 
 The shared benchmark runner and version-1 report contracts also accept explicitly
 prepared Kannel execution inputs. Target-aware readiness, archive-based source
@@ -62,7 +63,8 @@ report. Detached execution and session collection are supported.
 See the [local target/parameter reference](../local/README.md#select-sendium-or-kannel).
 The benchmark uses PostgreSQL 17 DLR storage with certificate-verified TLS and
 an ephemeral message spool. It does not reproduce AWS hardware or CPU credits.
-Workflow target selection and AWS deployment remain the next phase.
+The AWS path is implemented; native architecture CI and a live AWS run remain
+the verification boundary before interpreting AWS results.
 
 ## Local startup and provider-bind smoke run
 

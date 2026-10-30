@@ -23,14 +23,15 @@ reviewers, with separate read-only and deletion-only roles. See
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
-allows 25 top-level dispatch inputs (checked 2026-10-16). All 12 required controls
+allows 25 top-level dispatch inputs (checked 2026-10-16). All 13 required controls
 therefore have individual fields; durations do not need a grouped string.
 
 | Input | Default | Validation |
 |---|---:|---|
-| `application_runtime` | `jvm` | `jvm` or `native`; harness remains JVM |
-| `ingress_mode` | `http` | `http` or `smpp` |
-| `sendium_instance_type` | `t4g.small` | EC2 type syntax; actual regional/type compatibility is preflight work |
+| `benchmark_target` | `sendium` | `sendium` or `kannel`; one target per dispatch |
+| `application_runtime` | `jvm` | Sendium: `jvm` or `native`; leave `jvm` for Kannel, which uses its C runtime |
+| `ingress_mode` | `http` | Sendium: `http` or `smpp`; Kannel: HTTP only |
+| `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
 | `offered_rate` | 30 | Finite, positive messages/sec, at most 1,000,000,000; fractional rates supported |
 | `worker_tps` | 0 | Nonnegative Java-compatible integer; 0 means unlimited |
@@ -55,11 +56,17 @@ types, invalid durations/delays and non-finite values fail preparation.
 
 ## Sources and privilege boundaries
 
-- **Application:** use the original dispatch `github.sha`, not a subsequent lookup
+- **Sendium application:** use the original dispatch `github.sha`, not a subsequent lookup
   of the moving branch. Record the branch/ref and exact source SHA.
 - **Harness/controller:** snapshot the maintained default branch once in the
   validation job, record its Git SHA and pin every later control/harness checkout
   to that SHA. Record `harnessRevision` separately from `applicationCommit`.
+- **Kannel application:** build the pinned upstream archive and selected build
+  patches with the maintained controller's packaging code. The application job
+  checks out the captured controller SHA for this target. Record source/archive/
+  patch and binary identities, `applicationCommit: null`, and the original
+  `dispatchRevision` separately. The branch selector does not select Kannel's
+  upstream version or substitute a Sendium commit for its archive identity.
 - **Workflow:** record `github.workflow_sha` separately. GitHub executes the
   workflow definition selected by dispatch; protected-environment admission for
   AWS jobs remains maintainer-controlled in Tasks 5.2/5.4.
@@ -74,6 +81,38 @@ types, invalid durations/delays and non-finite values fail preparation.
 - **Verification:** a fresh unprivileged job verifies every artifact as data. It
   executes neither the selected application nor a downloaded harness. Privileged
   orchestration likewise must not execute those artifacts.
+
+## Running Kannel after merge
+
+The controller/harness policy remains **default-branch-only**. Merge the complete
+workflow/controller changes to `main` before using the new target; dispatching an
+unmerged feature branch would still load the old maintained controller. No
+controller-revision override is introduced.
+
+After merge, dispatch **Performance Tests**, choose `benchmark_target: kannel`,
+`ingress_mode: http`, and leave `application_runtime: jvm` (the Sendium-only
+selector). Keep both instance types at `t4g.small`. Other workload controls use
+the same preset and generator. Kannel forwards to the same SMPP simulator and
+uses PostgreSQL 17 with verified TLS even when message-level DLR is disabled.
+Kannel/SMPP ingress and Kannel/Sendium-native combinations fail validation before
+builds or AWS provisioning.
+
+Both architectures build on native hosted runners and verify the runtime bundle
+on minimal AL2023 before protected AWS jobs can start. The separate
+**Performance tooling verification** PR workflow also checks native ARM64/x86_64
+packaging, Java harness tests, report fixtures and Python orchestration contracts
+without AWS credentials. Its packaging results must pass before the first AWS
+dispatch; local emulated ARM compilation exceeded its deadline during bring-up.
+
+Reports, CPU-credit evidence and permanent archive manifests identify Kannel and
+its source/storage profile. An unavailable report leaves database provisioning
+unresolved rather than claiming a successful database deployment. The message
+spool is ephemeral; PostgreSQL does not imply identical recovery semantics with
+Sendium. See the [deployment profile](../deployment/README.md#kannel-aws-deployment-profile)
+for schema, readiness and transport details. Live AWS execution remains to be
+validated after merge; local integration results are not AWS capacity findings.
+
+## Sendium build and runtime details
 
 The maintained `build_selected_application.py` helper validates the exact selected
 checkout, Linux runner architecture, Java 25 and absence of cloud credential

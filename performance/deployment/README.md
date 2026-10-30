@@ -296,8 +296,8 @@ docker network rm sendium-node-verification-352
 Prepared deployment plans can select `benchmarkTarget: "kannel"`. The shared
 CloudFormation topology, run-scoped IAM roles, private transport and cleanup
 remain the same: gateway and harness use `t4g.small`, with PostgreSQL 17 on RDS.
-Sendium remains the default when the target field is absent. Workflow dispatch
-selection is a separate integration step.
+Sendium remains the default when the target field is absent. The manual workflow
+exposes this selector after the maintained controller changes merge to `main`.
 
 Kannel plans require HTTP ingress, `provenance.applicationCommit: null`, and a
 `kannelBuild` object from the runtime bundle's `build-metadata.json`. The controller

@@ -5,6 +5,15 @@ checks out the exact maintained controller SHA, installs dependencies and downlo
 artifacts before assuming AWS credentials. Application/harness builds remain on
 separate unprivileged GitHub-hosted runners.
 
+`benchmark_target` selects Sendium (default) or Kannel. Kannel uses the same private
+EC2/RDS topology and default `t4g.small` gateway/harness instances. Its maintained
+native-architecture build packages binaries and dependencies; only the harness
+needs a JRE. PostgreSQL 17, verified TLS, the schema compatibility identity column,
+two-process readiness handoff and `kannel` sampling are described in the
+[deployment profile](../deployment/README.md#kannel-aws-deployment-profile).
+The complete controller/workflow integration must be merged to the default branch
+before Kannel dispatch; the branch selector does not override maintained code.
+
 ## Protected environment configuration
 
 Install/update [bootstrap](../infrastructure/README.md) and its

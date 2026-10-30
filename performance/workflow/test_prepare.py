@@ -163,7 +163,7 @@ class WorkflowTests(unittest.TestCase):
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 12)
+        self.assertEqual(len(inputs), 13)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)
@@ -182,7 +182,7 @@ class WorkflowTests(unittest.TestCase):
     def test_build_sources_are_immutable_and_both_architectures_use_native_runners(self):
         application = WORKFLOW["jobs"]["application"]
         checkout = [step for step in application["steps"] if step.get("with", {}).get("path") == "application"][0]
-        self.assertEqual(checkout["with"]["ref"], "${{ github.sha }}")
+        self.assertEqual(checkout["with"]["ref"], "${{ needs.validate.outputs.application_revision }}")
         harness = WORKFLOW["jobs"]["harness"]
         self.assertEqual(harness["steps"][0]["with"]["ref"], "${{ needs.validate.outputs.controller_revision }}")
         for job in (application, harness):

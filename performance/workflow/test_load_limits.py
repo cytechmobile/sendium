@@ -23,7 +23,7 @@ class LoadLimitsTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("local_load_lab", local / "lab.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        lab = Mock(source={"baseCommit": "ab" * 20})
+        lab = Mock(source={"baseCommit": "ab" * 20}, workload_overrides={})
         for scenario, mode, dlr in (("http-dlr", "http", True), ("http-no-dlr", "http", False),
                                     ("smpp-dlr", "smpp", True), ("smpp-no-dlr", "smpp", False)):
             with self.subTest(scenario=scenario):

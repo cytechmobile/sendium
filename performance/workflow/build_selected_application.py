@@ -25,6 +25,20 @@ def build(request, checkout, architecture, java_version, machine=None, system=No
     observed = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True,
                               capture_output=True, text=True, timeout=30).stdout.strip()
     prepare.require(observed == prepare.revision(request, "application"), "Application build checkout revision mismatch")
+    if prepare.benchmark_target(request) == "kannel":
+        image = "sendium-kannel-baseline:" + architecture
+        subprocess.run(["docker", "build", "--platform", PLATFORMS[architecture], "--file", "performance/kannel/Dockerfile.baseline",
+                        "--tag", image, "performance/kannel"], cwd=checkout, check=True, timeout=2400)
+        # Verify dependency closure on minimal AL2023 before exporting transport bytes.
+        subprocess.run(["docker", "build", "--platform", PLATFORMS[architecture], "--file", "performance/kannel/Dockerfile.aws",
+                        "--build-arg", "KANNEL_BASE_IMAGE=" + image, "--target", "verification", "."],
+                       cwd=checkout, check=True, timeout=600)
+        subprocess.run(["docker", "build", "--platform", PLATFORMS[architecture], "--file", "performance/kannel/Dockerfile.aws",
+                        "--build-arg", "KANNEL_BASE_IMAGE=" + image, "--target", "export",
+                        "--output", "type=local,dest=performance/kannel/target/aws-runtime", "."], cwd=checkout, check=True, timeout=600)
+        identity = prepare.read(checkout / "performance/kannel/target/aws-runtime/build-metadata.json")
+        prepare.validate_kannel_build(identity, architecture)
+        return identity
     mode = runtime_mode(request["preset"])
     command = ["bash", "./mvnw", "-B", "-ntp", "-DskipTests", "-pl", "sendium-app", "-am"]
     identity = None

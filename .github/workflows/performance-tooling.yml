@@ -1,0 +1,80 @@
+name: Performance tooling verification
+
+on:
+  pull_request:
+    paths:
+      - 'performance/**'
+      - '.github/workflows/performance-tests.yml'
+      - '.github/workflows/performance-tooling.yml'
+      - 'pom.xml'
+      - '.mvn/**'
+      - 'mvnw'
+  push:
+    branches: [main]
+    paths:
+      - 'performance/**'
+      - '.github/workflows/performance-tests.yml'
+      - '.github/workflows/performance-tooling.yml'
+      - 'pom.xml'
+      - '.mvn/**'
+      - 'mvnw'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Harness and orchestration contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          java-version: '25'
+          distribution: temurin
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install verification dependencies
+        run: python -m pip install -r performance/workflow/requirements-dev.txt boto3==1.42.97
+      - name: Verify harness and generate report fixtures
+        run: bash ./mvnw -B -ntp -f performance/harness/pom.xml verify
+      - name: Verify performance tooling against packaged harness
+        run: |
+          SENDIUM_PUBLISH_JAR="$(python -c 'from pathlib import Path; jars = [p for p in Path("performance/harness/target").glob("sendium-performance-harness-*.jar") if not p.name.endswith(("-shaded.jar", "-sources.jar", "-javadoc.jar", "-tests.jar"))]; assert len(jars) == 1; print(jars[0].resolve())')"
+          export SENDIUM_PUBLISH_JAR
+          for suite in contracts resources deployment workflow kannel local; do
+            python -m unittest discover -s "performance/$suite" -p 'test_*.py'
+          done
+
+  kannel-package:
+    name: Kannel AL2023 package (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Compile and verify runtime dependencies on native architecture
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          docker build --platform "linux/$ARCHITECTURE" --file performance/kannel/Dockerfile.baseline \
+            --tag "sendium-kannel-baseline:$ARCHITECTURE" performance/kannel
+          docker build --platform "linux/$ARCHITECTURE" --file performance/kannel/Dockerfile.aws \
+            --build-arg "KANNEL_BASE_IMAGE=sendium-kannel-baseline:$ARCHITECTURE" --target verification .

@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from preset_validation import validate_preset
 from application_runtime import runtime_mode, validate_native_build
+from kannel_identity import validate_build
 from jsonschema import Draft202012Validator, ValidationError
 
 
@@ -63,21 +64,10 @@ def benchmark_target(plan):
 
 
 def validate_kannel_build(build, architecture=None):
-    require(isinstance(build, dict) and build.get("schemaVersion") == 1 and build.get("role") == "gateway"
-            and build.get("postgresqlSupport") is True, "PostgreSQL-enabled Kannel build identity required")
-    source = build.get("source", {})
-    require(source.get("version") == "1.4.5"
-            and source.get("archiveSha256") == "f279606ea8317fd2c8fa6b0f591c084fdfa954612f1e7c9cb667a5f6b77387f3"
-            and source.get("patchArchiveSha256") == "3d8d54e272699a5226368738ee0246c8873d152a63220f978ac149285895f5be"
-            and source.get("patches") == ["Update-bison-source-for-newer-version.patch",
-                                        "Fix-multiple-conflicting-defs-of-dispatch_to_wdp-wsp-push.patch"],
-            "Kannel source identity differs from the reviewed baseline")
-    require(build.get("architecture") in ("aarch64", "x86_64"), "Unsupported Kannel build architecture")
-    if architecture is not None:
-        require(build["architecture"] == {"arm64": "aarch64", "x86_64": "x86_64"}.get(architecture),
-                "Kannel build architecture differs from gateway")
-    for name in ("bearerbox", "smsbox"):
-        require(re.fullmatch(r"[a-f0-9]{64}", build.get("binarySha256", {}).get(name, "")), "Kannel binary digest required")
+    try:
+        validate_build(build, architecture)
+    except ValueError as error:
+        raise DeploymentError(str(error)) from None
 
 
 def validate_plan(plan, preset):
