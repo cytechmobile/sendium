@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/cytechmobile/sendium/compare/v0.6.0...v0.6.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **dlr:** raise HTTP receipt dispatch batch to 500 ([fcc0a37](https://github.com/cytechmobile/sendium/commit/fcc0a37db368eee3b746c722ed7a244b0d1f2936))
+
 ## [0.6.0](https://github.com/cytechmobile/sendium/compare/v0.5.1...v0.6.0) (2026-10-23)
 
 ### Features
