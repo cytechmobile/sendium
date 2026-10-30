@@ -1,0 +1,23 @@
+ARG KANNEL_BASE_IMAGE=sendium-kannel-baseline:amd64
+
+FROM eclipse-temurin:25-jdk AS build
+WORKDIR /src
+COPY pom.xml mvnw ./
+COPY .mvn .mvn
+COPY performance/harness/pom.xml performance/harness/pom.xml
+COPY performance/harness/src/main performance/harness/src/main
+RUN chmod +x mvnw \
+    && ./mvnw -B -ntp -f performance/harness/pom.xml -Dmaven.test.skip=true package \
+    && mkdir /opt/probe \
+    && cp performance/harness/target/sendium-performance-harness-*.jar /opt/probe/harness.jar
+COPY performance/kannel/KannelBindProbe.java /src/KannelBindProbe.java
+RUN javac -cp /opt/probe/harness.jar -d /opt/probe KannelBindProbe.java
+
+FROM eclipse-temurin:25-jre AS provider
+COPY --from=build /opt/probe /opt/probe
+CMD ["java", "-cp", "/opt/probe/harness.jar:/opt/probe", "KannelBindProbe"]
+
+FROM ${KANNEL_BASE_IMAGE} AS gateway
+RUN dnf install -y --setopt=install_weak_deps=False python3 && dnf clean all
+COPY performance/kannel/gateway.py /opt/probe/gateway.py
+CMD ["python3", "/opt/probe/gateway.py"]
