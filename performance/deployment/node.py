@@ -7,6 +7,7 @@ import json
 import os
 import platform
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import signal
 import subprocess
@@ -132,6 +133,14 @@ def child_environment():
     # The JVM uses local files; do not inherit AWS keys/profiles or application overrides.
     return {key: value for key, value in os.environ.items() if not key.startswith(
         ("AWS_", "QUARKUS_", "SENDIUM_", "SMSG_", "JAVA_", "JDK_")) and key not in ("LOG_LEVEL", "_JAVA_OPTIONS")}
+
+
+def failure_details(phase, error):
+    details = {"exitCode": 1, "error": "NODE_" + phase.upper() + "_FAILED"}
+    if isinstance(error, AwsError):
+        code = error.code or "AWS_REQUEST_FAILED"
+        details["awsErrorCode"] = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", code) else "AWS_REQUEST_FAILED"
+    return details
 
 
 class Node:
@@ -273,6 +282,27 @@ class Node:
                 visit(read(path))
         return values
 
+    def receive_gateway_readiness(self):
+        marker = self.root / "gateway-ready.json"
+        if marker.exists():
+            return
+        key = self.prefix + "inputs/harness/generated/gateway-ready.json"
+        # Missing objects can return AccessDenied without bucket-list permission.
+        # Check the exact key first; real authorization failures must remain fatal.
+        listing = self.aws.call("s3api", "list-objects-v2", bucket=self.bucket, prefix=key, max_keys=1)
+        if not any(item.get("Key") == key for item in listing.get("Contents", [])):
+            return
+        temporary = marker.with_suffix(".tmp")
+        try:
+            self.aws.get(self.bucket, key, temporary)
+        except AwsError as error:
+            if error.code not in ("NoSuchKey", "404", "NotFound"):
+                raise
+            return
+        if temporary.stat().st_size > 16384:
+            raise ValueError("Gateway readiness exceeds its budget")
+        temporary.replace(marker)
+
     def supervise(self):
         captured = None
         sampler = None
@@ -319,17 +349,7 @@ class Node:
                         self.status("listening", processId=captured.process.pid)
                 if self.target == "kannel":
                     if self.source == "harness" and ready:
-                        marker = self.root / "gateway-ready.json"
-                        if not marker.exists():
-                            temporary = marker.with_suffix(".tmp")
-                            try:
-                                self.aws.get(self.bucket, self.prefix + "inputs/harness/generated/gateway-ready.json", temporary)
-                                if temporary.stat().st_size > 16384:
-                                    raise ValueError("Gateway readiness exceeds its budget")
-                                temporary.replace(marker)
-                            except AwsError as error:
-                                if error.code not in ("NoSuchKey", "404", "NotFound"):
-                                    raise
+                        self.receive_gateway_readiness()
                     elif self.source == "sendium" and not ready:
                         marker = self.root / "generated/kannel/gateway-ready.json"
                         if marker.is_file():
@@ -399,10 +419,10 @@ def main():
         else:
             (node.root / "stop").touch()
         return 0
-    except Exception:
+    except Exception as error:
         if node.root.is_dir():
             try:
-                node.status("failed", exitCode=1, error="NODE_" + args.phase.upper() + "_FAILED")
+                node.status("failed", **failure_details(args.phase, error))
             except Exception:
                 pass
         print("NODE_" + args.phase.upper() + "_FAILED", file=sys.stderr)

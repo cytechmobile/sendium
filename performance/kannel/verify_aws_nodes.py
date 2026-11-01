@@ -34,10 +34,16 @@ class LocalTransport:
     def get(self, bucket, key, path):
         target = self.root / bucket / key
         if not target.exists():
-            raise AwsError("Fixture object not published", code="NoSuchKey")
+            # Model GetObject without general bucket listing instead of hiding the AWS race.
+            raise AwsError("Fixture object not published", code="AccessDenied")
         shutil.copyfile(target, path)
 
     def call(self, service, operation, **parameters):
+        if (service, operation) == ("s3api", "list-objects-v2"):
+            key = parameters["prefix"]
+            if key != "runs/gh-12345-1/inputs/harness/generated/gateway-ready.json" or parameters["max_keys"] != 1:
+                raise AwsError("Fixture listing is outside readiness scope", code="AccessDenied")
+            return {"Contents": [{"Key": key}]} if (self.root / parameters["bucket"] / key).is_file() else {}
         assert (service, operation) == ("secretsmanager", "get-secret-value")
         return {"SecretString": json.dumps({"username": "kannel_perf", "password": Path("/tls/password").read_text().strip()})}
 

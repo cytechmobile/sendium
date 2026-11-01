@@ -226,6 +226,14 @@ Resources:
             Principal: '*'
             Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
             Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/*'
+          - Sid: ListGatewayReadiness
+            Effect: Allow
+            Principal: '*'
+            Action: s3:ListBucket
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+            Condition:
+              StringEquals:
+                's3:prefix': !Sub 'runs/${RunIdentity}/inputs/harness/generated/gateway-ready.json'
       Tags:
         - {Key: 'sendium:managed-by', Value: performance-tests}
         - {Key: 'sendium:repository', Value: !Ref Repository}

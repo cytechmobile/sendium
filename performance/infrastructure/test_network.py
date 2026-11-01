@@ -88,9 +88,13 @@ class NetworkTest(unittest.TestCase):
             self.assertEqual(spec["SecurityGroupIds"], [{"Ref": "EndpointSecurityGroup"}])
         spec = endpoints["S3Endpoint"]
         self.assertEqual(spec["RouteTableIds"], [{"Ref": "PrivateRoutes"}])
-        statement, = spec["PolicyDocument"]["Statement"]
+        statement, listing = spec["PolicyDocument"]["Statement"]
         self.assertEqual(statement["Resource"], {"Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/*"})
         self.assertEqual(set(statement["Action"]), {"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"})
+        self.assertEqual(listing, {
+            "Sid": "ListGatewayReadiness", "Effect": "Allow", "Principal": "*", "Action": "s3:ListBucket",
+            "Resource": {"Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}"},
+            "Condition": {"StringEquals": {"s3:prefix": {"Fn::Sub": "runs/${RunIdentity}/inputs/harness/generated/gateway-ready.json"}}}})
 
     def test_ownership_and_deletion_contract(self):
         for name, spec in RESOURCES.items():

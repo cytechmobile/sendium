@@ -249,6 +249,13 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/common/*'
                   - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/harness/*'
+              - Sid: ListGatewayReadiness
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+                Condition:
+                  StringEquals:
+                    's3:prefix': !Sub 'runs/${RunIdentity}/inputs/harness/generated/gateway-ready.json'
               - Sid: WriteNodeEvidence
                 Effect: Allow
                 Action: [s3:PutObject, s3:AbortMultipartUpload]
