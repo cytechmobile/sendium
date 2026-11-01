@@ -328,6 +328,16 @@ through `inputs/harness/generated/`. The harness atomically receives that marker
 and verifies run/process/database identities before workload phases, including
 zero-warm-up runs.
 
+While waiting, the harness lists the exact run-owned marker key before issuing
+`GetObject`. S3 can return `AccessDenied` for a missing object when the caller
+lacks bucket-list permission; treating only 404 as pending would stop the
+harness before Kannel starts. The harness role and private S3 endpoint permit
+`ListBucket` only with the exact readiness-key prefix, not general bucket or
+run listing. The existing runtime permissions boundary already covers this
+grant. Real listing/download authorization failures remain fatal. Failed node
+status includes a bounded `awsErrorCode` when available, without AWS stderr or
+credentials.
+
 Existing transport-role paths and CloudFormation outputs retain the name
 `sendium`; on a Kannel run this is the gateway **role**, not the measured software.
 Reports use `configuration.application.runtime: kannel`, `infrastructure.kannel`

@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import deploy
-from node import Node, write
+from aws_cli import AwsError
+from node import Node, failure_details, write
 from test_deployment import MemoryAws, staged, deployment_outputs
 
 
@@ -34,6 +35,98 @@ def instances(result):
 
 
 class KannelDeploymentTests(unittest.TestCase):
+    def test_harness_waits_for_late_marker_without_getting_a_missing_s3_key(self):
+        identity = "gh-1-1"
+        key = "runs/" + identity + "/inputs/harness/generated/gateway-ready.json"
+        marker = {"schemaVersion": 1, "runIdentity": identity, "processes": [], "database": {"tlsVerified": True}}
+
+        class S3Transport(MemoryAws):
+            listings = 0
+            readiness_gets = 0
+
+            def call(self, service, operation, **parameters):
+                self.calls.append((service, operation, parameters))
+                if (service, operation) != ("s3api", "list-objects-v2") or parameters != {"bucket": "bucket", "prefix": key, "max_keys": 1}:
+                    raise AwsError("Listing denied", code="AccessDenied")
+                self.listings += 1
+                if self.listings == 2:
+                    self.objects["bucket", key] = json.dumps(marker).encode()
+                return {"Contents": [{"Key": key}]} if ("bucket", key) in self.objects else {}
+
+            def get(self, bucket, object_key, path):
+                if object_key == key:
+                    self.readiness_gets += 1
+                    if (bucket, object_key) not in self.objects:
+                        raise AwsError("Missing key without bucket-list permission", code="AccessDenied")
+                return super().get(bucket, object_key, path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            aws = S3Transport()
+            for name in ("runtime-settings.json", "run-config.json", "effective-configuration.json"):
+                aws.objects["bucket", "runs/" + identity + "/inputs/harness/generated/" + name] = b"{}"
+            node = Node({"source": "harness", "benchmarkTarget": "kannel", "runIdentity": identity, "region": "eu-west-1",
+                         "bucket": "bucket", "execution": {}, "sampleIntervalSeconds": 1, "sampleBudget": 30,
+                         "jvmArguments": [], "timeoutSeconds": 10}, root=directory, install=directory, aws=aws)
+            node.root.mkdir(parents=True)
+            write(node.root / "runtime.json", {"java": "java"})
+            (node.root / "report").mkdir()
+            write(node.root / "report/state.json", {"listenersReady": True})
+            captured = Mock()
+            captured.process.pid = 123
+            captured.process.poll.side_effect = [None, None, None, 0, 0]
+            captured.log.return_value = ""
+
+            def while_waiting(_):
+                captured.stop.assert_not_called()
+                if aws.listings == 1:
+                    self.assertEqual(aws.readiness_gets, 0)
+                    self.assertFalse((node.root / "gateway-ready.json").exists())
+                else:
+                    self.assertEqual(json.loads((node.root / "gateway-ready.json").read_text()), marker)
+
+            with patch("node.CapturedProcess", return_value=captured), patch("node.time.sleep", side_effect=while_waiting):
+                self.assertEqual(node.supervise(), 0)
+            self.assertEqual((aws.listings, aws.readiness_gets), (2, 1))
+
+    def test_readiness_authorization_failures_are_not_retried_as_absence(self):
+        for denied_operation in ("listing", "get"):
+            with self.subTest(denied_operation=denied_operation), tempfile.TemporaryDirectory() as directory:
+                aws = Mock()
+                node = Node({"source": "harness", "benchmarkTarget": "kannel", "runIdentity": "gh-1-1",
+                             "region": "eu-west-1", "bucket": "bucket"}, root=directory, install=directory, aws=aws)
+                node.root.mkdir(parents=True)
+                key = node.prefix + "inputs/harness/generated/gateway-ready.json"
+                aws.call.return_value = {"Contents": [{"Key": key}]}
+                getattr(aws, "call" if denied_operation == "listing" else "get").side_effect = AwsError("Denied", code="AccessDenied")
+                with self.assertRaises(AwsError) as error:
+                    node.receive_gateway_readiness()
+                self.assertEqual(error.exception.code, "AccessDenied")
+                aws.call.assert_called_once()
+                self.assertEqual(aws.get.call_count, 0 if denied_operation == "listing" else 1)
+
+    def test_readiness_requires_the_exact_key_and_rejects_oversized_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            aws = Mock()
+            node = Node({"source": "harness", "benchmarkTarget": "kannel", "runIdentity": "gh-1-1",
+                         "region": "eu-west-1", "bucket": "bucket"}, root=directory, install=directory, aws=aws)
+            node.root.mkdir(parents=True)
+            key = node.prefix + "inputs/harness/generated/gateway-ready.json"
+            aws.call.return_value = {"Contents": [{"Key": key + "-other"}]}
+            node.receive_gateway_readiness()
+            aws.get.assert_not_called()
+            aws.call.return_value = {"Contents": [{"Key": key}]}
+            aws.get.side_effect = lambda bucket, key, path: Path(path).write_bytes(b"x" * 16385)
+            with self.assertRaisesRegex(ValueError, "exceeds its budget"):
+                node.receive_gateway_readiness()
+            self.assertFalse((node.root / "gateway-ready.json").exists())
+
+    def test_failed_node_retains_only_safe_aws_error_codes(self):
+        self.assertEqual(failure_details("supervise", AwsError("private-password", code="AccessDenied")), {
+            "exitCode": 1, "error": "NODE_SUPERVISE_FAILED", "awsErrorCode": "AccessDenied"})
+        for code in (None, 123, "unsafe\nprivate-password", "x" * 129):
+            self.assertEqual(failure_details("supervise", AwsError("private-password", code=code))["awsErrorCode"], "AWS_REQUEST_FAILED")
+        self.assertNotIn("awsErrorCode", failure_details("supervise", RuntimeError("private-password")))
+
     def test_staging_keeps_archive_identity_and_uses_existing_private_transport(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

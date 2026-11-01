@@ -78,6 +78,15 @@ def grants(documents, action, resource):
 
 
 class RunTests(unittest.TestCase):
+    def test_harness_can_list_only_the_exact_run_gateway_readiness_key(self):
+        listing, = [statement for statement in statements("HarnessRole") if statement["Action"] == "s3:ListBucket"]
+        self.assertEqual(listing["Resource"], f"arn:aws:s3:::{BUCKET}")
+        self.assertEqual(listing["Condition"], {"StringEquals": {
+            "s3:prefix": f"runs/{RUN}/inputs/harness/generated/gateway-ready.json"}})
+        self.assertFalse(any(statement["Action"] == "s3:ListBucket" for statement in statements("SendiumRole")))
+        for prefix in ("", f"runs/{RUN}/", f"runs/{RUN}/inputs/harness/", "runs/gh-999-1/inputs/harness/generated/gateway-ready.json"):
+            self.assertNotEqual(listing["Condition"]["StringEquals"]["s3:prefix"], prefix)
+
     def test_private_instances_match_preset_and_resolved_ami_storage(self):
         self.assertFalse(ERRORS)
         for node in ("Sendium", "Harness"):
