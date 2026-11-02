@@ -59,6 +59,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -959,6 +961,18 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     public PduResponse parseDlrAndCreateResponse(DeliverSm deliverSm) {
+        return parseDlrResponse(deliverSm, false).toCompletableFuture().join();
+    }
+
+    public boolean isDlrProcessingAsynchronous() {
+        return messageTracker != null && messageTracker.isDlrProcessingAsynchronous();
+    }
+
+    public CompletionStage<PduResponse> parseDlrAndCreateResponseAsync(DeliverSm deliverSm) {
+        return parseDlrResponse(deliverSm, true);
+    }
+
+    private CompletionStage<PduResponse> parseDlrResponse(DeliverSm deliverSm, boolean asynchronous) {
         try {
             final var from = deliverSm.getSourceAddress().getAddress();
             final var to = deliverSm.getDestAddress().getAddress();
@@ -997,32 +1011,46 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
             String providerMessageId = decodeMessageID(true, receipt.getMessageId());
             if (Strings.isNullOrEmpty(providerMessageId)) {
                 logger.warn("Invalid provider message ID, skipping unknown DLR {}", MessageTrace.pdu(deliverSm));
-                return deliverSm.createGenericNack(SmppConstants.STATUS_SYSERR);
+                return CompletableFuture.completedFuture(deliverSm.createGenericNack(SmppConstants.STATUS_SYSERR));
             }
             if (!DlrService.isTerminalDlrState(state)) {
                 logger.debug("Ignoring intermediate DLR state={} providerMessageId={}", state,
                         MessageTrace.value(providerMessageId));
-                return deliverSm.createResponse();
+                return CompletableFuture.completedFuture(deliverSm.createResponse());
             }
             String errcode = extractErrorCode(receipt.getRawErrorCode(), receipt.getErrorCode());
             HashMap<String, String> tlvs = extractTlvs(this.tlvsDlrs, deliverSm);
-            messageTracker.createAndEnqueueDLR(0, providerMessageId, getHashedMessageID(providerMessageId),
-                    from, to, dlrBody, state, errcode, tlvs);
+            CompletionStage<Void> persisted;
+            if (asynchronous) {
+                persisted = messageTracker.createAndEnqueueDlrAsync(0, providerMessageId,
+                        getHashedMessageID(providerMessageId), from, to, dlrBody, state, errcode, tlvs);
+            } else {
+                messageTracker.createAndEnqueueDLR(0, providerMessageId, getHashedMessageID(providerMessageId),
+                        from, to, dlrBody, state, errcode, tlvs);
+                persisted = CompletableFuture.completedFuture(null);
+            }
+            return persisted.handle((ignored, failure) -> {
+                PduResponse response = deliverSm.createResponse();
+                if (failure != null) {
+                    logger.warn("DLR persistence failed for providerMessageId={}", MessageTrace.value(providerMessageId), failure);
+                    response.setCommandStatus(SmppConstants.STATUS_SYSERR);
+                }
+                return response;
+            });
         } catch (DlrStorageException e) {
             logger.warn("DLR storage unavailable while processing provider receipt {}", MessageTrace.pdu(deliverSm));
             PduResponse resp = deliverSm.createResponse();
             resp.setCommandStatus(SmppConstants.STATUS_SYSERR);
-            return resp;
+            return CompletableFuture.completedFuture(resp);
         } catch (Exception e) {
             //our own extended delivery receipt parsing method will not throw exception for dlr field validation
             //so this means that something else went really wrong
             logger.warn("caught exception while parsing dlr {}", MessageTrace.pdu(deliverSm), e);
             PduResponse resp = deliverSm.createResponse();
             resp.setCommandStatus(SmppConstants.STATUS_SYSERR);
-            return resp;
+            return CompletableFuture.completedFuture(resp);
         }
 
-        return deliverSm.createResponse();
     }
 
     protected String extractErrorCode(String rawErrcode, int intErrCode) {

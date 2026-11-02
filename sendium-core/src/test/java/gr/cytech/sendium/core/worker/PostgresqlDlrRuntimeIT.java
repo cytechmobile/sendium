@@ -48,6 +48,9 @@ class PostgresqlDlrRuntimeIT {
     ManagedDlrStorage managedStorage;
 
     @Inject
+    DlrService dlrService;
+
+    @Inject
     @DataSource("dlr")
     InjectableInstance<AgroalDataSource> dataSource;
 
@@ -91,6 +94,26 @@ class PostgresqlDlrRuntimeIT {
         assertThat(meterRegistry.getMeters())
                 .extracting(meter -> meter.getId().getName())
                 .anyMatch(name -> name.startsWith("agroal"));
+    }
+
+    @Test
+    void asynchronousProviderEventsUseTheManagedBatchTransaction() throws Exception {
+        long before = metricCount("provider_batch", "success");
+        String providerId = "batch-" + UUID.randomUUID();
+        MessageState message = new MessageState(UUID.randomUUID().toString(), "account", "system",
+                "source", "destination", null);
+        message.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        var accepted = dlrService.recordProviderAcceptedAsync(message, "provider", providerId).toCompletableFuture();
+        var resolved = dlrService.resolveDlrAsync("provider", providerId, 1, "000").toCompletableFuture();
+
+        accepted.get(10, TimeUnit.SECONDS);
+        assertThat(resolved.get(10, TimeUnit.SECONDS)).get().satisfies(state -> {
+            assertThat(state.getGatewayMsgId()).isEqualTo(message.getGatewayMsgId());
+            assertThat(state.getDeliveryStatus()).isEqualTo(MessageState.DeliveryStatus.PENDING);
+        });
+        assertThat(storage.getState(message.getGatewayMsgId())).isPresent();
+        assertThat(metricCount("provider_batch", "success")).isGreaterThan(before);
+        assertThat(storage.resolveDlr("provider", providerId, MessageState.MessageStatus.DELIVERED, 1, "000")).isEmpty();
     }
 
     @Test

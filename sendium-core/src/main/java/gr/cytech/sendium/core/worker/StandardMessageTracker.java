@@ -12,6 +12,8 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 public class StandardMessageTracker implements Tracker<StandardMessage> {
 
@@ -61,11 +63,16 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         }
 
         outWorker.getWorkerResources().getDlrService()
-                .recordProviderAccepted(state.get(), providerName, providerMessageId);
-        if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_PROVIDER_LINKED)) {
-            logger.info("message.provider.linked providerMessageId={} {}", MessageTrace.value(providerMessageId),
-                    MessageTrace.identifiers(message));
-        }
+                .recordProviderAcceptedAsync(state.get(), providerName, providerMessageId)
+                .whenComplete((ignored, failure) -> {
+                    if (failure != null) {
+                        logger.error("Failed to persist provider acceptance gatewayMsgId={} providerMessageId={}",
+                                gatewayMessageId, MessageTrace.value(providerMessageId), failure);
+                    } else if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_PROVIDER_LINKED)) {
+                        logger.info("message.provider.linked providerMessageId={} gatewayMsgId={}",
+                                MessageTrace.value(providerMessageId), gatewayMessageId);
+                    }
+                });
         return 1;
     }
 
@@ -106,6 +113,29 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
     }
 
     @Override
+    public boolean isDlrProcessingAsynchronous() {
+        return outWorker.getWorkerResources().isDlrPersistenceEnabled();
+    }
+
+    @Override
+    public CompletionStage<Void> createAndEnqueueDlrAsync(int mqid, String providerMessageId,
+            String hashedProviderMessageId, String from, String to, String body, int state,
+            String errorCode, HashMap<String, String> tlvs) {
+        if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return outWorker.getWorkerResources().getDlrService()
+                .resolveDlrAsync(outWorker.getDlrProviderName(), providerMessageId, state, errorCode)
+                .thenAccept(resolved -> {
+                    if (resolved.isEmpty()) {
+                        logger.warn("DLR received for unknown/expired provider message ID");
+                    } else if (resolved.get().getDeliveryChannel() == MessageState.DeliveryChannel.SMPP) {
+                        enqueueDlr(resolved.get(), providerMessageId, body, state, errorCode);
+                    }
+                });
+    }
+
+    @Override
     public void createAndEnqueueSubmissionFailure(StandardMessage message, String providerMessageId,
                                                    String hashedProviderMessageId, String body,
                                                    int state, String errorCode,
@@ -118,10 +148,17 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
             return;
         }
         String providerName = outWorker.getDlrProviderName();
-        Optional<MessageState> rejected = outWorker.getWorkerResources().getDlrService()
-                .recordProviderRejected(returnState.get(), providerName, providerMessageId, state, errorCode);
-        rejected.filter(result -> result.getDeliveryChannel() == MessageState.DeliveryChannel.SMPP)
-                .ifPresent(result -> enqueueDlr(result, providerMessageId, body, state, errorCode));
+        String gatewayMessageId = message.serial;
+        outWorker.getWorkerResources().getDlrService()
+                .recordProviderRejectedAsync(returnState.get(), providerName, providerMessageId, state, errorCode)
+                .whenComplete((rejected, failure) -> {
+                    if (failure != null) {
+                        logger.error("Failed to persist provider rejection gatewayMsgId={}", gatewayMessageId, failure);
+                    } else {
+                        rejected.filter(result -> result.getDeliveryChannel() == MessageState.DeliveryChannel.SMPP)
+                                .ifPresent(result -> enqueueDlr(result, providerMessageId, body, state, errorCode));
+                    }
+                });
     }
 
     private Optional<MessageState> toMessageState(StandardMessage message) {

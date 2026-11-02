@@ -86,6 +86,53 @@ Size the pool against measured gateway concurrency and the database connection b
 
 `SENDIUM_DLR_DELIVERY_CLAIM_DURATION` controls how long an active HTTP or SMPP delivery claim excludes other Sendium replicas. It defaults to `5M`. Configure a duration longer than the longest downstream delivery operation; an expired claim can be acquired by another replica while the original sender is still running.
 
+## Provider Outcome And Receipt Batching
+
+The standard tracker queues provider acceptance/rejection outcomes and terminal
+receipts for a single background persistence processor. Events are processed in
+enqueue order and share a transaction commit. SMPP network threads do not wait
+for that database work. A matched terminal provider receipt receives a successful
+`deliver_sm_resp` only after its resolution transaction commits; a failed batch
+or exhausted queue produces `STATUS_SYSERR` so the provider can retry.
+
+| Property | Environment variable | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `sendium.dlr.batch.size` | `SENDIUM_DLR_BATCH_SIZE` | `100` | Maximum provider events per transaction, from 1 to 1,000. Acceptance, rejection and receipt events share the limit; this is not a count of complete SMS lifecycles. |
+| `sendium.dlr.batch.max-delay` | `SENDIUM_DLR_BATCH_MAX_DELAY` | `500ms` | Maximum collection wait starting from the first event's enqueue time. A full batch flushes earlier. Must be positive. |
+| `sendium.dlr.batch.queue-capacity` | `SENDIUM_DLR_BATCH_QUEUE_CAPACITY` | `10000` | Positive bound on queued, persisting and completing events together. Admission fails immediately when this capacity is exhausted. |
+
+The collection delay is not an end-to-end latency bound: existing backlog,
+database locks, database processing and protocol writes can add waiting time.
+Configure provider request timeouts accordingly. Response writes run separately
+from persistence, with their pending work included in the same capacity bound.
+
+Each batch acquires distinct provider-correlation advisory locks in hash-key
+order, locks affected existing message rows in UUID order, then reads correlation
+owners using a fresh statement snapshot after any row-lock waits. This protects
+provider-ID reuse and multipart correlation changes without a separate lock and
+lookup sequence for every receipt. Events are then applied in order and committed
+together. A SQL failure rolls back the entire batch. PostgreSQL deadlocks
+(`40P01`) retry the rolled-back batch up to three total attempts; other failures
+are returned without retrying an ambiguous commit or resending the SMS. An acceptance attempting to
+overwrite an already-terminal row fails that event without undoing unrelated
+valid events in the batch.
+
+Queued events remain process-local until commit. A crash in this interval can
+lose provider-outcome metadata, and a provider success cannot be rejected or
+recovered by resending the SMS. Queue rejection or persistence failure is logged;
+the original SMS is not automatically resent. A receipt already queued behind its
+acceptance cannot overtake it; receipts handled by a different process before
+the acceptance batch commits can still be unknown. The existing unknown-receipt
+acknowledgement policy is unchanged; the in-memory batching interval can extend
+that cross-process window.
+
+Graceful destruction stops new admissions and flushes partial batches. Database
+drain and response-completion drain each wait up to 30 seconds. A forced timeout
+fails unfinished futures rather than reporting successful receipt persistence;
+a late database commit can still leave a durable pending receipt for replay.
+Custom embedded trackers keep their existing synchronous receipt handling unless
+they explicitly opt into the asynchronous tracker methods.
+
 ## Startup And Monitoring
 
 Check readiness rather than only checking whether the HTTP listener is open:
@@ -102,7 +149,7 @@ Inspect storage and datasource metrics with:
 curl -fsS http://127.0.0.1:8080/q/metrics | grep -E 'sendium_dlr_storage|agroal'
 ```
 
-Relevant metrics include storage-operation latency/counts tagged by backend, operation, and success or error outcome. PostgreSQL pool metrics use the Agroal metric prefix.
+Relevant metrics include storage-operation latency/counts tagged by backend, operation, and success or error outcome. Standard-tracker batched persistence uses operation `provider_batch`: its count is batch operations, not individual messages. `sendium.dlr.batch.pending` measures admitted events still queued, persisting or completing; `sendium.dlr.batch.rejected` counts capacity/shutdown admission rejections. The `sendium.dlr.batch.events` distribution records the number of events in each attempted batch. PostgreSQL pool metrics use the Agroal metric prefix.
 
 PostgreSQL is required when the subsystem is enabled, and startup fails rather than selecting another backend. At runtime, HTTP and downstream SMPP ingress validation, acknowledgement, and routing do not write PostgreSQL and therefore are not blocked by a database outage. The DLR return metadata travels only with the in-memory outbound message until an upstream provider outcome. Readiness still reports `DOWN` while PostgreSQL is unavailable because new provider outcomes cannot be made durable.
 
@@ -110,7 +157,7 @@ Provider message IDs are correlated within the outbound provider namespace rathe
 
 Sendium requests final delivery receipts from upstream SMPP providers. A valid unsolicited `ACCEPTD` or `ENROUTE` receipt, including a receipt identified through its SMPP ESM class, is acknowledged successfully but is not forwarded and does not consume its provider correlation. The first terminal receipt consumes every correlation for the gateway message and produces the downstream DLR; later receipts for those provider message IDs cannot resolve it. Multipart submissions retain this first-terminal behavior and do not aggregate delivery states across every segment. A terminal persistence failure returns `deliver_sm_resp` with `STATUS_SYSERR` so the provider can retry. A successful provider acknowledgement confirms durable resolution only; it does not wait for downstream HTTP or SMPP delivery.
 
-An accepted upstream `submit_sm_resp` with a provider message ID creates the message row and correlation atomically. If that transaction fails, Sendium preserves the provider success and does not resend the SMS; the later DLR may be lost because it cannot be correlated. An accepted response without a usable provider message ID is also not persisted. A provider rejection is persisted directly as terminal pending delivery so it can be returned downstream without waiting for a provider receipt.
+An accepted upstream `submit_sm_resp` with a provider message ID queues an atomic message-row/correlation write. It becomes durable when its batch commits. If admission or persistence fails, Sendium preserves the provider success and does not resend the SMS; the later DLR may be lost because it cannot be correlated. An accepted response without a usable provider message ID is also not persisted. A provider rejection queues terminal pending delivery directly so it can be returned downstream after commit without waiting for a provider receipt.
 
 A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP delivery is pending or after HTTP delivery reaches terminal `FAILED` status. The delivery attempt number is a fencing token: a stale completion or failure cannot mutate a newer attempt. HTTP and SMPP use leased PostgreSQL claims across replicas.
 
@@ -137,6 +184,7 @@ Cleanup is best-effort maintenance and is isolated from message handling. One ca
 | :--- | :--- | :--- |
 | HTTP and downstream SMPP ingress | No PostgreSQL write occurs. Body-free DLR return metadata travels with the message through in-memory queues. Graceful shutdown fences protocol ingress, drains queued events, flushes multipart assembly, drains again, and then closes sessions. | A process crash can lose acknowledged or accepted outbound work because router and worker queues are in memory. |
 | Gateway-to-provider message correlation | The `dlr_message` row and exact provider correlation are committed atomically after provider acceptance. Intermediate `ACCEPTD` and `ENROUTE` receipts leave the correlation intact. | Provider success is not retried if this write fails, so a later receipt may be unresolvable. Success without a provider ID is not tracked. The first terminal receipt consumes every correlation for the gateway message. |
+| Provider-event batching | A matched terminal receipt is acknowledged successfully only after its batch commits. Events queued in acceptance/receipt order are processed in that order. | The pre-commit queue is in memory and bounded. A SQL failure rolls back the batch, capacity rejection fails immediately, and unpersisted provider outcomes cannot be reconstructed after a crash. |
 | Provider submission rejection | A terminal pending-delivery row is committed directly without a correlation. | If this write fails, no durable downstream rejection exists. The outbound submission is not retried because the provider already returned an outcome. |
 | Terminal HTTP/SMPP delivery | The common payload and exact provider outcome remain in one row until fenced completion. | Delivery is at-least-once; acknowledgement can be received before the final delete commits. |
 | Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. HTTP batch claims and SMPP attempt starts use a database lease so active replicas cannot start the same delivery. | An attempt that outlives its lease can overlap a replacement. |

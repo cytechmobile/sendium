@@ -56,7 +56,7 @@ public class ManagedDlrStorage implements DlrStorage {
 
     private final Map<String, Timer> timers = new ConcurrentHashMap<>();
 
-    private DlrStorage delegate;
+    private PostgresqlDlrStorage delegate;
     private AgroalDataSource selectedPostgresqlDataSource;
 
     @PostConstruct
@@ -94,6 +94,10 @@ public class ManagedDlrStorage implements DlrStorage {
     public void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
         timed("record_provider_accepted", () -> delegate.recordProviderAccepted(
                 state, providerName, providerMessageId));
+    }
+
+    public List<ProviderDlrEvent.Result> applyProviderBatch(List<ProviderDlrEvent> events) {
+        return timed("provider_batch", () -> delegate.applyProviderBatch(events));
     }
 
     @Override

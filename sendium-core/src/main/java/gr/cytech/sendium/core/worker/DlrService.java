@@ -7,12 +7,36 @@ import jakarta.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 @ApplicationScoped
 @IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class DlrService {
     @Inject
     DlrStorage storage;
+
+    @Inject
+    ProviderDlrProcessor processor;
+
+    public CompletionStage<Optional<MessageState>> recordProviderAcceptedAsync(
+            MessageState state, String providerName, String providerMessageId) {
+        return processor.submit(new ProviderDlrEvent.Accepted(state, providerName, providerMessageId));
+    }
+
+    public CompletionStage<Optional<MessageState>> recordProviderRejectedAsync(
+            MessageState state, String providerName, String providerMessageId, int dlrState, String errorCode) {
+        return processor.submit(new ProviderDlrEvent.Rejected(state, providerName, providerMessageId, dlrState, errorCode));
+    }
+
+    public CompletionStage<Optional<MessageState>> resolveDlrAsync(
+            String providerName, String providerMessageId, int dlrState, String errorCode) {
+        if (!isTerminalDlrState(dlrState)) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        return processor.submit(new ProviderDlrEvent.Receipt(
+                providerName, providerMessageId, mapDlrState(dlrState), dlrState, errorCode));
+    }
 
     public void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
         storage.recordProviderAccepted(state, providerName, providerMessageId);

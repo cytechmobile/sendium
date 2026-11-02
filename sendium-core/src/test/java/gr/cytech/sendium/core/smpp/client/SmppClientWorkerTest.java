@@ -21,6 +21,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -131,6 +133,32 @@ class SmppClientWorkerTest {
 
         assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
         assertThat(tracker.dlrAttempts).isEqualTo(1);
+    }
+
+    @Test
+    void asynchronousParserWaitsForPersistenceAndMapsRollbackToRetryableError() throws Exception {
+        var commit = new CompletableFuture<Void>();
+        CapturingTracker tracker = new CapturingTracker() {
+            @Override
+            public CompletionStage<Void> createAndEnqueueDlrAsync(int mqid, String providerMessageId,
+                    String hash, String from, String to, String body, int state, String errorCode,
+                    HashMap<String, String> tlvs) {
+                return commit;
+            }
+        };
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), tracker);
+        DeliverSm receipt = new DeliverSm();
+        receipt.setSourceAddress(new Address((byte) 1, (byte) 1, "smsc"));
+        receipt.setDestAddress(new Address((byte) 1, (byte) 1, "recipient"));
+        receipt.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+        receipt.setShortMessage(CharsetUtil.encode(
+                "id:abc123 sub:001 dlvrd:001 submit date:2401010000 done date:2401010001 stat:DELIVRD err:000 text:ok",
+                CharsetUtil.NAME_GSM));
+
+        var response = worker.parseDlrAndCreateResponseAsync(receipt).toCompletableFuture();
+        assertThat(response).isNotDone();
+        commit.completeExceptionally(new DlrStorageException("batch rolled back"));
+        assertThat(response.join().getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
     }
 
     @Test
