@@ -124,6 +124,9 @@ public class NativeE2eSmoke {
                 + "&text=" + URLEncoder.encode("container restart http e2e", StandardCharsets.UTF_8)
                 + "&dlr-url=" + URLEncoder.encode(dlrUrl, StandardCharsets.UTF_8);
         try {
+            HttpResponse<String> metricsBefore = get("/q/metrics");
+            require(metricsBefore.statusCode() == HttpURLConnection.HTTP_OK, "Cannot read storage metrics before submission");
+            double committedBatchesBefore = successfulStorageOperationCount(metricsBefore.body(), "provider_batch");
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("http://localhost:" + SENDIUM_HTTP_PORT + "/sendsms?" + query))
                     .timeout(Duration.ofSeconds(10))
@@ -137,7 +140,7 @@ public class NativeE2eSmoke {
             require(!gatewayId.isBlank(), "HTTP /sendsms did not return a gateway message id");
             require(upstream.awaitSubmitCount(expectedSubmitCount),
                     "Upstream SMPP server did not receive the HTTP-originated message");
-            awaitSuccessfulStorageOperation("record_provider_accepted");
+            awaitSuccessfulStorageOperation("provider_batch", committedBatchesBefore);
 
             int boundSessionsBeforeRestart = upstream.boundSessionCount();
             require(stopContainer(containerName), "Failed to remove Sendium container before restart");
@@ -270,12 +273,12 @@ public class NativeE2eSmoke {
         throw new IllegalStateException("Timed out waiting for PostgreSQL-backed Sendium readiness");
     }
 
-    private static void awaitSuccessfulStorageOperation(String operation) throws Exception {
+    private static void awaitSuccessfulStorageOperation(String operation, double countBeforeSubmission) throws Exception {
         long deadline = System.nanoTime() + TIMEOUT.toNanos();
         while (System.nanoTime() < deadline) {
             HttpResponse<String> response = get("/q/metrics");
             if (response.statusCode() == HttpURLConnection.HTTP_OK
-                    && hasSuccessfulStorageOperation(response.body(), operation)) {
+                    && hasSuccessfulStorageOperation(response.body(), operation, countBeforeSubmission)) {
                 return;
             }
             Thread.sleep(250);
@@ -283,20 +286,25 @@ public class NativeE2eSmoke {
         throw new IllegalStateException("Timed out waiting for successful DLR storage operation: " + operation);
     }
 
-    static boolean hasSuccessfulStorageOperation(String metrics, String operation) {
+    static boolean hasSuccessfulStorageOperation(String metrics, String operation, double countBeforeSubmission) {
+        return successfulStorageOperationCount(metrics, operation) > countBeforeSubmission;
+    }
+
+    static double successfulStorageOperationCount(String metrics, String operation) {
         return metrics.lines()
                 .filter(line -> line.startsWith("sendium_dlr_storage_operation_seconds_count"))
                 .filter(line -> line.contains("backend=\"postgresql\""))
                 .filter(line -> line.contains("operation=\"" + operation + "\""))
                 .filter(line -> line.contains("outcome=\"success\""))
                 .map(line -> line.substring(line.lastIndexOf(' ') + 1))
-                .anyMatch(value -> {
+                .mapToDouble(value -> {
                     try {
-                        return Double.parseDouble(value) >= 1.0;
+                        double count = Double.parseDouble(value);
+                        return Double.isFinite(count) && count >= 0 ? count : 0;
                     } catch (NumberFormatException ignored) {
-                        return false;
+                        return 0;
                     }
-                });
+                }).max().orElse(0);
     }
 
     private static HttpResponse<String> get(String path) throws IOException, InterruptedException {
