@@ -16,6 +16,8 @@ import org.mockito.quality.Strictness;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -42,6 +44,8 @@ class StandardMessageTrackerTest {
         when(workerResources.getDlrService()).thenReturn(dlrService);
         when(outWorker.getType()).thenReturn("testWorker");
         when(outWorker.getDlrProviderName()).thenReturn("provider-1");
+        when(dlrService.recordProviderAcceptedAsync(any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Optional.empty()));
 
         tracker = new StandardMessageTracker(outWorker);
     }
@@ -58,7 +62,7 @@ class StandardMessageTrackerTest {
 
         assertEquals(1, result);
         ArgumentCaptor<MessageState> captor = ArgumentCaptor.forClass(MessageState.class);
-        verify(dlrService).recordProviderAccepted(
+        verify(dlrService).recordProviderAcceptedAsync(
                 captor.capture(), eq("provider-1"), eq("provider-message-456"));
         assertEquals("gw-123", captor.getValue().getGatewayMsgId());
         assertEquals("accountId", captor.getValue().getAccountId());
@@ -75,7 +79,7 @@ class StandardMessageTrackerTest {
         int result = tracker.updateSendStatusAndExtID(null, pMsg, "provider-message-456");
 
         assertEquals(0, result);
-        verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
+        verify(dlrService, never()).recordProviderAcceptedAsync(any(), any(), any());
     }
 
     @Test
@@ -86,21 +90,20 @@ class StandardMessageTrackerTest {
         int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, null);
 
         assertEquals(0, result);
-        verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
+        verify(dlrService, never()).recordProviderAcceptedAsync(any(), any(), any());
     }
 
     @Test
-    void updateSendStatusAndExtID_WhenStorageFails_PropagatesToProtocolBoundary() {
+    void updateSendStatusAndExtID_WhenAsyncStorageFails_DoesNotResendAcceptedSms() throws InterruptedException {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = "gw-123";
         pMsg.dlrReturnMetadata = DlrReturnMetadata.smpp(
                 "accountId", "systemId", "from", "to");
-        doThrow(new DlrStorageException("Failed to link provider DLR ID"))
-                .when(dlrService).recordProviderAccepted(
-                        any(MessageState.class), eq("provider-1"), eq("provider-message-456"));
+        when(dlrService.recordProviderAcceptedAsync(any(MessageState.class), eq("provider-1"), eq("provider-message-456")))
+                .thenReturn(CompletableFuture.failedFuture(new DlrStorageException("Failed to link provider DLR ID")));
 
-        assertThrows(DlrStorageException.class,
-                () -> tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456"));
+        assertEquals(1, tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456"));
+        verify(outWorker, never()).enqueueToRouter(any());
     }
 
     @Test
@@ -123,7 +126,7 @@ class StandardMessageTrackerTest {
         int result = tracker.updateSendStatusAndExtID("gw-123", pMsg, "provider-message-456");
 
         assertEquals(0, result);
-        verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
+        verify(dlrService, never()).recordProviderAcceptedAsync(any(), any(), any());
     }
 
     @Test
@@ -135,8 +138,9 @@ class StandardMessageTrackerTest {
         MessageState rejected = new MessageState(
                 "gw-123", "accountId", "systemId", "from", "to", null);
         rejected.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
-        when(dlrService.recordProviderRejected(any(), eq("provider-1"), eq("provider-message-456"),
-                eq(StandardMessage.DLR_STAT_FAILED), eq("22"))).thenReturn(java.util.Optional.of(rejected));
+        when(dlrService.recordProviderRejectedAsync(any(), eq("provider-1"), eq("provider-message-456"),
+                eq(StandardMessage.DLR_STAT_FAILED), eq("22")))
+                .thenReturn(CompletableFuture.completedFuture(Optional.of(rejected)));
 
         tracker.createAndEnqueueSubmissionFailure(message, "provider-message-456", "hash",
                 "5", StandardMessage.DLR_STAT_FAILED, "22", null);
@@ -158,8 +162,9 @@ class StandardMessageTrackerTest {
         MessageState rejected = new MessageState(
                 "gw-http", "accountId", "accountId", "from", "to", "https://example.test/dlr");
         rejected.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
-        when(dlrService.recordProviderRejected(any(), eq("provider-1"), isNull(),
-                eq(StandardMessage.DLR_STAT_FAILED), eq("22"))).thenReturn(java.util.Optional.of(rejected));
+        when(dlrService.recordProviderRejectedAsync(any(), eq("provider-1"), isNull(),
+                eq(StandardMessage.DLR_STAT_FAILED), eq("22")))
+                .thenReturn(CompletableFuture.completedFuture(Optional.of(rejected)));
 
         tracker.createAndEnqueueSubmissionFailure(message, null, "",
                 "5", StandardMessage.DLR_STAT_FAILED, "22", null);
@@ -176,6 +181,22 @@ class StandardMessageTrackerTest {
                 1, "provider-message-456", "gw-123", "from", "to", "test body", 0, "0", new HashMap<>()));
 
         verify(outWorker, never()).enqueueToRouter(any());
+    }
+
+    @Test
+    void asynchronousReceiptDoesNotRouteBeforeCommittedStateIsAvailable() throws InterruptedException {
+        var commit = new CompletableFuture<Optional<MessageState>>();
+        when(dlrService.resolveDlrAsync("provider-1", "provider-message", 0, "000")).thenReturn(commit);
+        var pending = tracker.createAndEnqueueDlrAsync(0, "provider-message", "hash",
+                "source", "destination", "receipt", 0, "000", null).toCompletableFuture();
+        verify(outWorker, never()).enqueueToRouter(any());
+        assertFalse(pending.isDone());
+
+        var state = new MessageState("gw-123", "account", "system", "source", "destination", null);
+        state.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        commit.complete(Optional.of(state));
+        pending.join();
+        verify(outWorker).enqueueToRouter(any());
     }
 
     @Test

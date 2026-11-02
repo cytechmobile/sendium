@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.smpp.client;
 
 import com.cloudhopper.smpp.PduAsyncResponse;
 import com.cloudhopper.smpp.SmppConstants;
+import com.cloudhopper.smpp.SmppSession;
 import com.cloudhopper.smpp.pdu.DeliverSm;
 import com.cloudhopper.smpp.pdu.EnquireLink;
 import com.cloudhopper.smpp.pdu.PduResponse;
@@ -13,10 +14,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -57,6 +61,46 @@ class SmppClientSessionHandlerTest {
         assertThat(response).isSameAs(expected);
         assertThat(response.getReferenceObject()).isSameAs(handler);
         verify(worker, never()).parseMoAndCreateResponse(any());
+    }
+
+    @Test
+    void asynchronousReceiptIsAcknowledgedOnlyAfterPersistenceCompletes() throws Exception {
+        DeliverSm receipt = new DeliverSm();
+        receipt.setSequenceNumber(17);
+        receipt.setEsmClass(SmppConstants.ESM_CLASS_MT_SMSC_DELIVERY_RECEIPT);
+        var committed = new CompletableFuture<PduResponse>();
+        SmppSession session = mock(SmppSession.class);
+        handler.setSession(session);
+        when(worker.isDlrProcessingAsynchronous()).thenReturn(true);
+        when(worker.parseDlrAndCreateResponseAsync(receipt)).thenReturn(committed);
+
+        assertThat(handler.firePduRequestReceived(receipt)).isNull();
+        verify(session, never()).sendResponsePdu(any(), anyLong());
+        SmppSession replacement = mock(SmppSession.class);
+        handler.setSession(replacement);
+        PduResponse response = receipt.createResponse();
+        committed.complete(response);
+        verify(session).sendResponsePdu(eq(response), anyLong());
+        verify(replacement, never()).sendResponsePdu(any(), anyLong());
+        assertThat(response.getSequenceNumber()).isEqualTo(17);
+        assertThat(response.getReferenceObject()).isSameAs(handler);
+    }
+
+    @Test
+    void asynchronousFailureReturnsRetryableErrorInsteadOfSuccess() throws Exception {
+        DeliverSm receipt = new DeliverSm();
+        receipt.setEsmClass(SmppConstants.ESM_CLASS_MT_SMSC_DELIVERY_RECEIPT);
+        var committed = new CompletableFuture<PduResponse>();
+        SmppSession session = mock(SmppSession.class);
+        handler.setSession(session);
+        when(worker.isDlrProcessingAsynchronous()).thenReturn(true);
+        when(worker.parseDlrAndCreateResponseAsync(receipt)).thenReturn(committed);
+
+        assertThat(handler.firePduRequestReceived(receipt)).isNull();
+        committed.completeExceptionally(new IllegalStateException("rollback"));
+        ArgumentCaptor<PduResponse> response = ArgumentCaptor.forClass(PduResponse.class);
+        verify(session).sendResponsePdu(response.capture(), anyLong());
+        assertThat(response.getValue().getCommandStatus()).isEqualTo(SmppConstants.STATUS_SYSERR);
     }
 
     @Test

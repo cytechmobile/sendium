@@ -23,6 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.channels.ClosedChannelException;
+import java.util.concurrent.CompletionStage;
 
 public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
     public SmppSession session;
@@ -98,6 +99,13 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                 DeliverSm deliverSm = (DeliverSm) pduRequest;
                 //check if this is a dlr or an mo:
                 if (SmppUtil.isMessageTypeAnyDeliveryReceipt(deliverSm.getEsmClass())) {
+                    if (smppClientWorker.isDlrProcessingAsynchronous()) {
+                        long processingStart = System.currentTimeMillis();
+                        SmppSession sourceSession = session;
+                        CompletionStage<PduResponse> persisted = smppClientWorker.parseDlrAndCreateResponseAsync(deliverSm);
+                        persisted.whenComplete((response, failure) -> sendDeferredDlrResponse(sourceSession, deliverSm, response, failure, processingStart));
+                        return null;
+                    }
                     resp = smppClientWorker.parseDlrAndCreateResponse(deliverSm);
                 } else if (SmppUtil.isMessageTypeIntermediateDeliveryReceipt(deliverSm.getEsmClass())) {
                     resp = deliverSm.createResponse();
@@ -136,6 +144,25 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
         }
 
         return resp;
+    }
+
+    private void sendDeferredDlrResponse(SmppSession sourceSession, DeliverSm request, PduResponse response,
+                                         Throwable failure, long processingStart) {
+        if (failure != null || response == null) {
+            response = request.createResponse();
+            response.setCommandStatus(SmppConstants.STATUS_SYSERR);
+        }
+        response.setReferenceObject(this);
+        try {
+            if (sourceSession != null) {
+                sourceSession.sendResponsePdu(response, processingStart);
+            }
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            logger.warn("Unable to acknowledge persisted provider receipt", e);
+        }
     }
 
     /**

@@ -54,6 +54,9 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `SENDIUM_DLR_POSTGRESQL_POOL_MAX_SIZE` | `10` | Maximum datasource pool size. |
 | `SENDIUM_DLR_POSTGRESQL_ACQUISITION_TIMEOUT` | `5S` | Maximum wait for a pooled connection. |
 | `SENDIUM_DLR_DELIVERY_CLAIM_DURATION` | `5M` | PostgreSQL lease duration for an active HTTP or SMPP DLR delivery attempt. |
+| `SENDIUM_DLR_BATCH_SIZE` | `100` | Maximum provider outcomes/receipt events per batch transaction (1–1,000). |
+| `SENDIUM_DLR_BATCH_MAX_DELAY` | `500ms` | Positive maximum batch collection wait; full batches flush earlier. Database/backlog waiting is additional. |
+| `SENDIUM_DLR_BATCH_QUEUE_CAPACITY` | `10000` | Positive bound on provider events queued, persisting or completing per process. |
 
 PostgreSQL is the only DLR persistence backend, and startup is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
 
