@@ -1,0 +1,12 @@
+{
+  "environments": [
+    "sendium-performance",
+    "sendium-performance-recovery"
+  ],
+  "branch_patterns": [
+    "main",
+    "feat/*",
+    "fix/*",
+    "perf/*"
+  ]
+}

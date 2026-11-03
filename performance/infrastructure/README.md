@@ -67,6 +67,39 @@ read-only diagnostics and deletion-only cleanup roles, not the provisioning role
 This lets collection/deletion proceed automatically after success, failure or
 cancellation without opening an unreviewed path to creating benchmark resources.
 
+### GitHub deployment branch policy
+
+Both environments must use **Selected branches and tags** and allow `main`,
+`feat/*`, `fix/*`, and `perf/*`. Keep the same branch rules on execution and
+recovery: otherwise a run can pass builds but be blocked before provisioning,
+or have its diagnostics, cleanup and archive rejected separately.
+
+The versioned policy is
+[`environment-branches.json`](../workflow/environment-branches.json). After
+creating/configuring the existing environments, use an authenticated `gh` CLI
+account with repository/environment administration access, from the repository
+root:
+
+```sh
+# Read-only; exits 1 when required rules are missing.
+python performance/workflow/environment_branches.py --repository cytechmobile/sendium --check
+
+# Add missing branch rules to both environments, then verify them.
+python performance/workflow/environment_branches.py --repository cytechmobile/sendium --apply
+```
+
+The helper is additive and safe to repeat. It does not replace environment
+settings, remove other branch/tag rules, change required reviewers, or modify
+secrets, variables or AWS roles. It refuses to change an environment that is not
+already configured for selected branch/tag rules. The normal Actions token is
+not used to administer these settings; benchmark workflows keep their existing
+permissions.
+
+**Merging a policy change does not update GitHub settings automatically.** Apply
+the policy from the merged `main` checkout before retrying the benchmark. Then
+rerun the failed jobs or dispatch a new run from the application branch and
+approve provisioning through the existing Maintainers review requirement.
+
 ### Outputs used by deployment/workflow code
 
 | Output | Consumer |

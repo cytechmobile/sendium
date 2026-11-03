@@ -38,6 +38,12 @@ environment **without required reviewers** for automatic diagnostics and cleanup
 its variables and role boundaries are described in [REPORTING.md](REPORTING.md).
 Do not grant its OIDC subject access to the provisioning role.
 
+Allow `main`, `feat/*`, `fix/*`, and `perf/*` in the selected deployment branches
+for **both** environments. See the versioned policy and idempotent GitHub-setting
+[check/apply command](../infrastructure/README.md#github-deployment-branch-policy).
+CloudFormation does not apply these GitHub settings, and updating only the
+execution environment can leave recovery jobs blocked.
+
 The job requests `id-token: write` and `contents: read`, then assumes the configured
 role using GitHub OIDC. Its 10,800-second session matches the bootstrap role limit
 and 180-minute execution-job timeout. No permanent AWS keys or application build

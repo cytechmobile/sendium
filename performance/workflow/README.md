@@ -20,6 +20,14 @@ Diagnostics and cleanup use `sendium-performance-recovery` without required
 reviewers, with separate read-only and deletion-only roles. See
 [recovery environment configuration](REPORTING.md#configuration).
 
+Both environments use selected deployment branches: `main`, `feat/*`, `fix/*`,
+and `perf/*`. The maintained [branch policy](environment-branches.json) and
+[check/apply helper](../infrastructure/README.md#github-deployment-branch-policy)
+keep execution and recovery aligned. These are GitHub repository settings, so
+merging the policy alone does not apply them. If GitHub rejects a branch before
+any AWS job steps start, check these rules before interpreting the run as a
+performance failure.
+
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
