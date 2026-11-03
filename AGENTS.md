@@ -2,6 +2,16 @@
 
 These instructions apply to all work in this repository.
 
+## Prefer Simple, Proportionate Solutions
+
+- Choose the smallest clear solution that fully addresses the actual problem. Prefer existing capabilities and configuration over new code or tooling.
+- First identify where the problem is controlled: application code, workflow configuration, or external service settings. Fix it at that layer.
+- Do not turn a one-time administrative change into a script, framework, synchronization mechanism, or new workflow unless repeated use or another concrete requirement justifies it.
+- A request to fix an issue is not a request to build general-purpose tooling. Do not expand scope merely to make the solution reusable or future-proof.
+- If a direct settings change is sufficient, explain that option before proposing repository changes. Do not create a PR solely because the request mentions one; explain when the effective fix lives outside Git.
+- Before adding an abstraction, dependency, service, or maintenance command, explain what necessary benefit it provides over the simpler alternative.
+- Keep changes focused. Include tests and documentation proportionate to the behavior changed; avoid scaffolding that only supports unnecessary complexity.
+
 ## Release Notes and Commit Messages
 
 - Classify changes by the distributed artifact and behavior they affect, not merely whether the work introduces something new. Sendium application releases publish Maven artifacts and rebuild the JVM and native application images.
