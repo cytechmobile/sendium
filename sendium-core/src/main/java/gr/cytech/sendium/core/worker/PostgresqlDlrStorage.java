@@ -449,13 +449,13 @@ public class PostgresqlDlrStorage implements DlrStorage {
             if (event.providerMessageId() != null && !event.providerMessageId().isBlank()) {
                 keys.add(new CorrelationKey(event.providerName(), event.providerMessageId()));
             }
-            switch (event) {
-                case ProviderDlrEvent.Accepted accepted -> messageIds.add(prepareAccepted(
+            if (event instanceof ProviderDlrEvent.Accepted accepted) {
+                messageIds.add(prepareAccepted(
                         accepted.message(), accepted.providerName(), accepted.providerMessageId()));
-                case ProviderDlrEvent.Rejected rejected -> messageIds.add(prepareRejected(
+            } else if (event instanceof ProviderDlrEvent.Rejected rejected) {
+                messageIds.add(prepareRejected(
                         rejected.message(), rejected.providerName(), rejected.providerMessageId(),
                         rejected.dlrState(), rejected.errorCode()));
-                case ProviderDlrEvent.Receipt ignored -> { }
             }
         }
         checkExpiry();
