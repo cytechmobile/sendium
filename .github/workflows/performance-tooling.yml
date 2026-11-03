@@ -1,6 +1,7 @@
 name: Performance tooling verification
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - 'performance/**'
@@ -29,6 +30,7 @@ concurrency:
 jobs:
   contracts:
     name: Harness and orchestration contracts
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -56,6 +58,7 @@ jobs:
 
   kannel-package:
     name: Kannel AL2023 package (${{ matrix.architecture }})
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
