@@ -8,25 +8,70 @@ Only **`memory/memory/memory`** is implemented: unfinished work is lost on proce
 The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
 This is the initial slice of [#338](https://github.com/cytechmobile/sendium/issues/338), under [#337](https://github.com/cytechmobile/sendium/issues/337).
 
+## Flow Overview
+
+The coordinator governs ownership and transitions across the stages below. **Numbers show shipped
+defaults; references such as (1) point to the stage notes.** Store capacities and per-cycle take limits
+are separate bounds.
+
+```mermaid
+flowchart TB
+    ingress["HTTP / SMPP"]
+    cycle["Cycle (7)<br/>100 ms idle backoff"] -.-> selected
+    ingress --> pending["Pending (1)<br/>10,000 sources max"]
+    pending -. "Admitted" .-> ack["Client ACK"]
+    pending -->|"100/cycle max"| selected["Selected (2)<br/>1,000 unassigned items max"]
+    selected -->|"100/cycle max"| routing["Routing"]
+    routing --> routed["Routed (3)<br/>10,000 selections max"]
+    routed -->|"100/worker/cycle max"| dispatch["Dispatch (4)<br/>1 preparation slot/worker"]
+    dispatch --> provider["Provider"]
+    provider -. "Retry" .-> dispatch
+    provider --> handoff["Handoff (5)"]
+    handoff --> cleanup["Cleanup (6)"]
+```
+
+**Only Pending, Selected and Routed are outbound stores.** Dispatch, handoff and cleanup are processing
+phases. Arrows show progression, not deletion of earlier records.
+
+### Stage Notes
+
+- **(1) Pending — `PendingMessageStore`:** retains up to **10,000 accepted sources**, including held
+  multipart parts and in-flight sources, before HTTP 202 / SMPP success. When full, new admissions fail
+  with **HTTP 503** or **SMPP `STATUS_THROTTLED`**. Existing work continues processing; cleanup frees
+  space. Moving to a later stage does not free a Pending slot. An aggregate retains every original source ID.
+- **(2) Selected — `SelectedRouterStore`:** holds up to **1,000 queued or taken unassigned items**.
+  Select up to **100 ready items/cycle**, limited by free slots, and route up to **100 takes/cycle**
+  through routing rules. When full, additional ready work stays in Pending. Recording a destination
+  frees the routing slot but keeps bookkeeping until cleanup. A routing miss or recoverable lookup
+  failure returns the item for another attempt; a terminal routing drop discards it. An aggregate uses
+  one selected slot; held parts wait for reassembly/publication before selection.
+- **(3) Routed — `RoutedWorkStore`:** retains up to **10,000 selections across all destinations**,
+  using the same configured capacity as Pending. Records the chosen destination and queues work for
+  that worker. Unfinished work includes items waiting to send, awaiting provider outcomes, running
+  retries, or waiting for required handoff/cleanup. Taking an item does not remove its ownership record.
+  If destination recording fails, retain the original assignment intent and retry without repeating
+  routing lookup.
+- **(4) Dispatch:** takes up to **100 items per eligible worker/cycle** into per-worker FIFO execution.
+  Preparation concurrency is `threadCount` (**default 1**); the shared worker TPS cap defaults to
+  **0 = unlimited**. Busy or paused workers leave work waiting. Async responses do not hold preparation
+  slots, but their messages still occupy Pending capacity. Provider outcomes drive completion or the
+  configured retry policy; multipart requests and replacement attempts keep the original source ownership.
+- **(5) Handoff:** finishes required tracking/persistence, including its commit and any required DLR
+  enqueue. On failure, retain ownership and retry the handoff, not an already accepted provider request.
+  This does not wait for final handset delivery or client acknowledgement of a later receipt.
+- **(6) Cleanup:** after all provider parts/replacement attempts are terminal and required handoffs
+  succeed, complete routed work, release pending sources, remove selected bookkeeping, then forget the
+  routed record. **This frees Pending and Routed capacity.** If cleanup partly fails, retry remaining
+  steps without resending provider requests or repeating a successful handoff.
+- **(7) Cycle:** one standalone processing thread drives selection, routing and provider takes. All
+  three **100-item** limits share `sendium.message.selection-batch-size`, applied separately. Cycles
+  do not wait for batches to fill. Continue immediately after productive routing/dispatch; back off
+  **100 ms** when idle, paused or unsuccessful.
+
 ## Components
 
 `sendium-core` supplies reusable contracts and implementations. `sendium-app` constructs and runs the
 standalone pipeline; importing the core library alone does not activate this storage assembly.
-
-```mermaid
-flowchart LR
-    ingress["HTTP / SMPP admission"] --> coordinator["OutboundCoordinator<br/>ownership and transitions"]
-    pipeline["StandaloneOutboundPipeline<br/>construction, polling, shutdown"] --> coordinator
-    pipeline --> dispatch["StandardOutboundDispatch<br/>routing and provider executions"]
-    dispatch --> coordinator
-    dispatch --> routing["StandardRoutingManager<br/>rules and filters"]
-    dispatch --> provider["SmppClientWorker<br/>requests and callbacks"]
-    provider --> handoff["Tracker / DlrStorage<br/>required handoff"]
-    handoff -->|Completion condition| coordinator
-    coordinator --> pending["PendingMessageStore<br/>accepted sources"]
-    coordinator --> selected["SelectedRouterStore<br/>selected backlog"]
-    coordinator --> routed["RoutedWorkStore<br/>recorded destinations"]
-```
 
 | Component | Responsibility |
 |---|---|
@@ -37,7 +82,7 @@ flowchart LR
 | `SelectedRouterStore` / `MemorySelectedRouterStore` | Own bounded selection and unassigned routing work; retain selected bookkeeping after routing. |
 | `RoutedWorkStore` / `MemoryRoutedWorkStore` | Record one destination per selection and schedule its unfinished work by destination. |
 | `DefaultOutboundCoordinator` / `OutboundWork` | Enforce typed source/selection/work ownership, transitions, handoff-dependent completion and retryable cleanup. |
-| `StandardRoutingManager` / `StandardOutboundDispatch` | Resolve rules/filters, retain recording intents and schedule tracked provider attempts. |
+| `StandardRoutingManager` / `StandardOutboundDispatch` | Resolve routing rules, retain recording intents and schedule tracked provider attempts. |
 | `SmppClientWorker` / `SmppClientSessionHandler` / `CoordinatedSmppSubmission` | Prepare/send requests, process callbacks once and join part/replacement outcomes. |
 | `Tracker` / `StandardMessageTracker` | Signal successful required handoff; integrate with the independently configured DLR subsystem. |
 
@@ -59,7 +104,7 @@ sequenceDiagram
     D->>C: selectToRouter - select bounded ready work into router backlog
     D->>C: Take selected work for routing
     C-->>D: Selected payload + original source IDs
-    D->>R: Resolve one destination and apply routing filters
+    D->>R: Resolve one destination using routing rules
     R-->>D: Destination
     D->>C: recordToRouted - record choice and mark selected work routed
     D->>C: takeFromRouted - take assigned work for execution
@@ -88,7 +133,7 @@ sequenceDiagram
 - **DLR boundary:** completion waits for required handoff acceptance, not a later handset-delivery receipt.
   Receipt storage/delivery remains independent of outbound backend selection.
 
-`StandardOutboundDispatch.routeSelected()` performs routing lookup and filters.
+`StandardOutboundDispatch.routeSelected()` performs routing lookup.
 `OutboundCoordinator.recordToRouted(selected, destination)` records that already-chosen result and
 advances stage ownership; it does not choose the destination or send the message.
 `takeFromRouted(destination, timeout)` takes one assigned item without completing ownership;
@@ -126,14 +171,12 @@ A group of N accepted multipart sources uses N pending slots but one selected sl
 Partial terminal cleanup can retain routed records after source removal, so equal capacities do not
 eliminate cleanup-related backpressure or provide cross-store transactions.
 
-The processor schedules the next bounded cycle without a mandatory delay after successful routing
-or provider scheduling. Idle, paused, or unsuccessful cycles back off for 100 milliseconds;
-selection or returning an unroutable item alone does not count as progress. Shutdown prevents
-further cycle scheduling. Batch size is not TPS or provider
+Selection or returning an unroutable item alone does not count as productive cycle progress.
+Shutdown prevents further cycle scheduling. Batch size is not TPS or provider
 concurrency: attempts use the worker's shared rate limiter and a dispatcher-owned execution pool
 sized by its `threadCount`. At most that many preparation loops execute concurrently, taking waiting
 attempts from the worker FIFO. The default shared two-thread scheduler handles destination resolution
-and timed retries; rate waits, worker filters, and SMPP sends run on the worker's pool.
+and timed retries; rate waits and SMPP sends run on the worker's pool.
 Stopped-worker pools are retired during transition maintenance, and dispatcher close shuts down
 its worker pools after provider drain even when the timer scheduler is application-owned.
 Awaiting asynchronous outcomes does not hold a sending slot. Count limits do not bound message bytes.
@@ -167,7 +210,7 @@ attempts, not either storage-return operation.
 | Admission capacity/unavailability | HTTP 503; SMPP capacity returns `STATUS_THROTTLED`. Failed admission is not acknowledged as success. |
 | Routing miss / nonterminal lookup failure | Use `requeueForRouting` with ownership retained. A terminal routing drop uses `discard`. |
 | Copied route / unsupported standalone destination | Reject before assignment, even if a copied rule resolves to one target. The existing legacy copied-routing API remains separate. |
-| Destination-recording failure | Retry the retained original intent without repeating lookup or routing filters. |
+| Destination-recording failure | Retry the retained original intent without repeating routing lookup. |
 | Required handoff failure | Retain ownership and retry the handoff, not an accepted provider request. |
 | Terminal cleanup failure | Retry unfinished cleanup without awaiting another successful handoff or redispatching provider work. |
 
