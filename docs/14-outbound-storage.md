@@ -12,44 +12,65 @@ contracts, multipart admission and the [versioned CBOR representation](15-pendin
 
 ## Flow Overview
 
-The coordinator governs ownership and transitions across the stages below. Numbers show shipped
-defaults. Store capacities and per-cycle take limits are separate bounds.
+The coordinator governs ownership and transitions across the stages below. **Numbers show shipped
+defaults; references such as (1) point to the stage notes.** Store capacities and per-cycle take limits
+are separate bounds.
 
 ```mermaid
 flowchart TB
     ingress["HTTP / SMPP"]
-    cycle["Cycle<br/>100 ms idle backoff"] -.-> selected
-    ingress --> pending["Pending<br/>10,000 sources max"]
+    cycle["Cycle (7)<br/>100 ms idle backoff"] -.-> selected
+    ingress --> pending["Pending (1)<br/>10,000 sources max"]
     pending -. "Admitted" .-> ack["Client ACK"]
-    pending -->|"100/cycle max"| selected["Selected<br/>1,000 unassigned items max"]
+    pending -->|"100/cycle max"| selected["Selected (2)<br/>1,000 unassigned items max"]
     selected -->|"100/cycle max"| routing["Routing"]
-    routing --> routed["Routed<br/>10,000 selections max"]
-    routed -->|"100/worker/cycle max"| dispatch["Dispatch<br/>1 preparation slot/worker"]
+    routing --> routed["Routed (3)<br/>10,000 selections max"]
+    routed -->|"100/worker/cycle max"| dispatch["Dispatch (4)<br/>1 preparation slot/worker"]
     dispatch --> provider["Provider"]
     provider -. "Retry" .-> dispatch
-    provider --> handoff["Handoff"]
-    handoff --> cleanup["Cleanup"]
+    provider --> handoff["Handoff (5)"]
+    handoff --> cleanup["Cleanup (6)"]
 ```
 
-Only Pending, Selected and Routed are outbound stores. Dispatch, handoff and cleanup are processing
-phases. Arrows show progression, not deletion of earlier records. Pending capacity includes held
-multipart parts and in-flight sources; later-stage progress does not free a Pending slot. Full Pending
-capacity rejects new admissions with HTTP 503 or SMPP `STATUS_THROTTLED` while existing work continues.
-An aggregate retains every original source ID and occupies one Selected slot.
+**Only Pending, Selected and Routed are outbound stores.** Dispatch, handoff and cleanup are processing
+phases. Arrows show progression, not deletion of earlier records.
 
-Selected capacity includes queued and taken unassigned items. Recording a destination frees its routing
-slot but retains bookkeeping until cleanup. Routed capacity covers all destinations and unfinished
-provider attempts, retries, handoffs and cleanup. Taking work does not remove its ownership record.
+### Stage Notes
 
-Dispatch preparation concurrency is `threadCount` (default 1); the shared worker TPS cap defaults to
-0 (unlimited). Async responses release preparation slots while their sources still occupy Pending.
-Required handoff includes persistence commit and required DLR enqueue, rather than final handset delivery.
-Cleanup completes routed work, releases pending sources, removes selected bookkeeping and forgets the
-routed record. Partial cleanup retries do not resend provider requests or repeat successful handoffs.
-
-One standalone processing thread drives selection, routing and provider takes. Their separate 100-item
-limits share `sendium.message.selection-batch-size`. Cycles continue immediately after productive routing
-or dispatch, backing off 100 ms when idle, paused or unsuccessful.
+- **(1) Pending — `PendingMessageStore`:** retains up to **10,000 accepted sources**, including held
+  multipart parts and in-flight sources, before HTTP 202 / SMPP success. When full, new admissions fail
+  with **HTTP 503** or **SMPP `STATUS_THROTTLED`**. Existing work continues processing; cleanup frees
+  space. Moving to a later stage does not free a Pending slot. An aggregate retains every original source ID.
+  Acknowledged duplicate multipart handles remain owned with their original ordinal until terminal completion
+  and required DLR handoff; their payloads are not routed independently.
+- **(2) Selected — `SelectedRouterStore`:** holds up to **1,000 queued or taken unassigned items**.
+  Select up to **100 ready items/cycle**, limited by free slots, and route up to **100 takes/cycle**
+  through routing rules. When full, additional ready work stays in Pending. Recording a destination
+  frees the routing slot but keeps bookkeeping until cleanup. A routing miss or recoverable lookup
+  failure returns the item for another attempt; a terminal routing drop discards it. An aggregate uses
+  one selected slot; held parts wait for reassembly/publication before selection.
+- **(3) Routed — `RoutedWorkStore`:** retains up to **10,000 selections across all destinations**,
+  using the same configured capacity as Pending. Records the chosen destination and queues work for
+  that worker. Unfinished work includes items waiting to send, awaiting provider outcomes, running
+  retries, or waiting for required handoff/cleanup. Taking an item does not remove its ownership record.
+  If destination recording fails, retain the original assignment intent and retry without repeating
+  routing lookup.
+- **(4) Dispatch:** takes up to **100 items per eligible worker/cycle** into per-worker FIFO execution.
+  Preparation concurrency is `threadCount` (**default 1**); the shared worker TPS cap defaults to
+  **0 = unlimited**. Busy or paused workers leave work waiting. Async responses do not hold preparation
+  slots, but their messages still occupy Pending capacity. Provider outcomes drive completion or the
+  configured retry policy; multipart requests and replacement attempts keep the original source ownership.
+- **(5) Handoff:** finishes required tracking/persistence, including its commit and any required DLR
+  enqueue. On failure, retain ownership and retry the handoff, not an already accepted provider request.
+  This does not wait for final handset delivery or client acknowledgement of a later receipt.
+- **(6) Cleanup:** after all provider parts/replacement attempts are terminal and required handoffs
+  succeed, complete routed work, release pending sources, remove selected bookkeeping, then forget the
+  routed record. **This frees Pending and Routed capacity.** If cleanup partly fails, retry remaining
+  steps without resending provider requests or repeating a successful handoff.
+- **(7) Cycle:** one standalone processing thread drives selection, routing and provider takes. All
+  three **100-item** limits share `sendium.message.selection-batch-size`, applied separately. Cycles
+  do not wait for batches to fill. Continue immediately after productive routing/dispatch; back off
+  **100 ms** when idle, paused or unsuccessful.
 
 ## Components
 
