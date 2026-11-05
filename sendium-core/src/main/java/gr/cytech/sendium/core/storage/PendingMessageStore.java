@@ -2,8 +2,13 @@ package gr.cytech.sendium.core.storage;
 
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 public interface PendingMessageStore<M extends StandardMessage> extends OutboundStage {
     /**
@@ -13,11 +18,46 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * not be acknowledged. This admits ready work, subject to the selection eligibility policy.
      * Repeating either admission method preserves the first accepted payload and held/ready disposition.
      * Deduplication after terminal source removal is not promised.
+     * Returns the supplied stable source handle only after backend acceptance; never returns null
+     * or substitutes another source ID. Callers must use this result before acknowledging success.
      */
-    void admit(SourceId source, M message);
+    SourceId admit(SourceId source, M message);
 
     /** Retains an accepted source without making it eligible for selection until makeHeldReady succeeds. */
-    void admitHeld(SourceId source, M message);
+    SourceId admitHeld(SourceId source, M message);
+
+    /**
+     * Atomically accepts a held part with its immutable membership before acknowledgement. Join the open,
+     * unexpired matching group or create a new group. The first accepted source for an ordinal wins;
+     * later sources report duplicate membership referencing that original source, without replacing its payload.
+     * All accepted handles remain owned until terminal completion. The first part fixes the deadline using timeout;
+     * later arrivals never extend it. An internal retry of a retained multipart source returns its original membership.
+     * A source already admitted without multipart membership cannot be converted through this method.
+     */
+    MultipartMembership admitPart(SourceId source, M message, Duration timeout);
+
+    /** Returns recorded membership for a retained multipart source; ordinary or absent sources have no membership. */
+    Optional<MultipartMembership> findMultipart(SourceId source);
+
+    /**
+     * Returns retained handles assigned to one group, including duplicates, bounded by pending source capacity.
+     * Includes members awaiting ingress processing, so expiry does not depend on notification order.
+     * Unknown or fully completed groups return an empty list; backend failures must still propagate.
+     */
+    List<SourceId> multipartSources(UUID groupId);
+
+    /** Returns an isolated accepted payload, or absence established by a ready backend; failures are not absence. */
+    Optional<M> find(SourceId source);
+
+    /**
+     * Returns at most limit retained source handles, including held/selected/routed sources, in UUID.compareTo
+     * order strictly after afterExclusive. Pass null to start; continue from the last returned ID, even if that
+     * source has since completed. An empty page ends traversal. limit must be positive. Pages are immutable.
+     * This is bounded recovery access, not selection or a payload backlog copy. A quiescent scan visits all
+     * retained sources once. Concurrent admission at/before the cursor may be missed; completed sources may
+     * disappear before find. Startup recovery must quiesce admission/processing rather than assume a snapshot.
+     */
+    List<SourceId> sourcesAfter(SourceId afterExclusive, int limit);
 
     /**
      * Makes held sources ready using one execution message referring to their nonempty source set. Original
@@ -26,12 +66,19 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * While all sources remain retained, repeating the exact source set preserves the first published
      * payload and cannot duplicate work, including after selection/routing. Missing, ordinarily admitted,
      * or differently grouped sources fail explicitly. The caller owns assembly/expiry policy.
+     * Assigned multipart ordinals may be published together only as their complete recorded group;
+     * partial/expired ordinals are published individually, never mixed with another group or unassigned held sources.
+     * Publication of original sources atomically includes every retained duplicate of those ordinals, even if
+     * its ingress notification has not been processed. A duplicate cannot be published without its original.
      */
     void makeHeldReady(Set<SourceId> sources, M message);
 
     /**
-     * Called only after all work and required handoffs are terminal. Missing sources are already
-     * complete. Partial multi-source completion is allowed; retrying the full set must be safe.
+     * Called only after all work and required handoffs are terminal. Successful return confirms that
+     * every requested source is absent. Missing sources count as complete only when a ready backend can
+     * establish their absence; unavailability, corrupt state, or inaccessible ownership must fail explicitly.
+     * A failed call may have removed some or all requested sources before its result became uncertain.
+     * Retrying the full source set must therefore be safe; a failure must never be treated as established absence.
      */
     void complete(Set<SourceId> sources);
 }

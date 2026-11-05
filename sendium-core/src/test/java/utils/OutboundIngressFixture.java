@@ -18,7 +18,7 @@ public final class OutboundIngressFixture implements AutoCloseable {
     public final DefaultOutboundCoordinator<StandardMessage> coordinator;
 
     public OutboundIngressFixture(int capacity) {
-        pending = new MemoryPendingMessageStore<>(capacity, OutboundIngressFixture::snapshot);
+        pending = spy(new MemoryPendingMessageStore<>(capacity, OutboundIngressFixture::snapshot));
         router = new MemorySelectedRouterStore<>(pending, capacity);
         routed = new MemoryRoutedWorkStore<>(capacity, OutboundIngressFixture::snapshot);
         coordinator = spy(new DefaultOutboundCoordinator<>(pending, router, routed));
