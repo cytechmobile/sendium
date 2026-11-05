@@ -77,7 +77,7 @@ class ForwardDlrServiceTest {
     void largeBatchKeepsPerHostConcurrencyBoundedAndRetriesOnlyTheFailedCallback() throws Exception {
         List<MessageState> deliveries = IntStream.range(0, 500).mapToObj(index -> {
             var state = new MessageState("message-" + index, "account", "system", "source", "destination",
-                    "https://example.test/dlr?id=%s");
+                    "https://example.test/dlr?id=%I");
             state.setStatus(MessageState.MessageStatus.DELIVERED);
             state.setDeliveryChannel(MessageState.DeliveryChannel.HTTP);
             state.setDeliveryAttemptCount(1);
@@ -136,7 +136,8 @@ class ForwardDlrServiceTest {
 
     @Test
     void successfulResponseCompletesExpectedAttempt() throws Exception {
-        MessageState due = dueState("https://example.test/dlr?id=%s&type=%d");
+        MessageState due = dueState("https://example.test/dlr?id=%I&provider=%F&type=%d");
+        due.setProviderMessageId("provider-42");
         dueAttempt(due, 1);
         respondWith(204);
         when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
@@ -146,12 +147,30 @@ class ForwardDlrServiceTest {
         ArgumentCaptor<HttpRequest> request = ArgumentCaptor.forClass(HttpRequest.class);
         verify(httpClient).send(request.capture(), anyBodyHandler());
         assertThat(request.getValue().uri().toString())
-                .isEqualTo("https://example.test/dlr?id=" + GATEWAY_ID + "&type=1");
+                .isEqualTo("https://example.test/dlr?id=" + GATEWAY_ID + "&provider=provider-42&type=1");
         assertThat(request.getValue().timeout()).contains(java.time.Duration.ofSeconds(5));
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
         var order = inOrder(dlrService, httpClient);
         order.verify(dlrService).claimDueHttpDeliveries(500);
         order.verify(httpClient).send(any(HttpRequest.class), anyBodyHandler());
+    }
+
+    @Test
+    void failedTerminalReceiptUsesProviderIdentityAndFailureType() throws Exception {
+        MessageState due = dueState("https://example.test/dlr?id=%I&provider=%F&type=%d");
+        due.setStatus(MessageState.MessageStatus.FAILED);
+        due.setProviderMessageId("provider&failed");
+        dueAttempt(due, 1);
+        respondWith(200);
+        when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
+
+        service.dispatchDueDeliveries();
+
+        ArgumentCaptor<HttpRequest> request = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpClient).send(request.capture(), anyBodyHandler());
+        assertThat(request.getValue().uri().toString())
+                .isEqualTo("https://example.test/dlr?id=" + GATEWAY_ID + "&provider=provider%26failed&type=2");
+        verify(dlrService).completeDelivery(GATEWAY_ID, 1);
     }
 
     @Test
@@ -306,8 +325,29 @@ class ForwardDlrServiceTest {
         assertThat(service.mapToKannelType(MessageState.MessageStatus.DELIVERED)).isEqualTo(1);
         assertThat(service.mapToKannelType(MessageState.MessageStatus.FAILED)).isEqualTo(2);
         assertThat(service.mapToKannelType(null)).isEqualTo(4);
-        assertThat(service.buildForwardUrl("https://example.test?id=%s&type=%d", "msg-1", 2))
-                .isEqualTo("https://example.test?id=msg-1&type=2");
+        assertThat(service.buildForwardUrl("https://example.test?id=%I&provider=%F&type=%d", "msg-1", "smsc-2", 2))
+                .isEqualTo("https://example.test?id=msg-1&provider=smsc-2&type=2");
+    }
+
+    @Test
+    void substitutionEncodesIdsWithoutReinterpretingTheirContents() {
+        assertThat(service.buildForwardUrl("https://example.test/%I?provider=%F&again=%F", "gateway/id",
+                "a b+&/é%I", 1))
+                .isEqualTo("https://example.test/gateway%2Fid?provider=a+b%2B%26%2F%C3%A9%25I"
+                        + "&again=a+b%2B%26%2F%C3%A9%25I");
+    }
+
+    @Test
+    void percentEscapesAndUnsupportedTokensFollowPinnedKannelTemplateRules() {
+        assertThat(service.buildForwardUrl("https://example.test/?space=%20&pct=%%25&token=%%I"
+                + "&unknown=%X&old=%s&tail=%", "gateway", "provider", 1))
+                .isEqualTo("https://example.test/?space=%20&pct=%25&token=%I&unknown=%X&old=%s&tail=%");
+    }
+
+    @Test
+    void unavailableIdsExpandToEmptyValues() {
+        assertThat(service.buildForwardUrl("https://example.test/?id=%I&provider=%F&type=%d", null, null, 2))
+                .isEqualTo("https://example.test/?id=&provider=&type=2");
     }
 
     private void assertHttpFailureSchedulesRetry(int statusCode) throws Exception {
@@ -335,9 +375,8 @@ class ForwardDlrServiceTest {
     }
 
     private void dueAttempt(MessageState due, int attempt) {
-        MessageState started = dueState(due.getForwardDlrUrl());
-        started.setDeliveryAttemptCount(attempt);
-        when(dlrService.claimDueHttpDeliveries(500)).thenReturn(List.of(started));
+        due.setDeliveryAttemptCount(attempt);
+        when(dlrService.claimDueHttpDeliveries(500)).thenReturn(List.of(due));
     }
 
     private MessageState dueState(String callbackUrl) {

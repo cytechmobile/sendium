@@ -9,10 +9,12 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -36,9 +38,6 @@ public class ForwardDlrService {
     private static final int DLR_FAILED = 2;
     private static final int DLR_BUFFERED = 4;
     private static final int DLR_SMSC_SUBMIT = 8;
-
-    private static final String DLR_TYPE_PLACEHOLDER = "%d";
-    private static final String MSG_ID_PLACEHOLDER = "%s";
 
     private final DlrService dlrService;
     private final HttpClient httpClient;
@@ -129,7 +128,8 @@ public class ForwardDlrService {
             throw new IllegalArgumentException("Missing callback URI");
         }
         String forwardUrl = buildForwardUrl(
-                callbackTemplate, state.getGatewayMsgId(), mapToKannelType(state.getStatus()));
+                callbackTemplate, state.getGatewayMsgId(), state.getProviderMessageId(),
+                mapToKannelType(state.getStatus()));
         URI uri = URI.create(forwardUrl);
         String scheme = uri.getScheme();
         String normalizedScheme = scheme == null ? "" : scheme.toLowerCase(Locale.ROOT);
@@ -200,8 +200,27 @@ public class ForwardDlrService {
         };
     }
 
-    String buildForwardUrl(String baseUrl, String msgId, int kannelType) {
-        String result = baseUrl.replace(DLR_TYPE_PLACEHOLDER, String.valueOf(kannelType));
-        return result.replace(MSG_ID_PLACEHOLDER, msgId != null ? msgId : "");
+    String buildForwardUrl(String template, String gatewayId, String providerId, int kannelType) {
+        StringBuilder result = new StringBuilder(template.length());
+        for (int index = 0; index < template.length(); index++) {
+            char current = template.charAt(index);
+            if (current != '%' || index + 1 == template.length()) {
+                result.append(current);
+                continue;
+            }
+            char token = template.charAt(++index);
+            switch (token) {
+                case 'I' -> result.append(urlEncode(gatewayId));
+                case 'F' -> result.append(urlEncode(providerId));
+                case 'd' -> result.append(kannelType);
+                case '%' -> result.append('%');
+                default -> result.append('%').append(token);
+            }
+        }
+        return result.toString();
+    }
+
+    private static String urlEncode(String value) {
+        return value == null ? "" : URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 }

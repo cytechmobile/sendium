@@ -119,7 +119,7 @@ public final class HttpAdmissionClient implements AutoCloseable {
                 + "&text=" + encode(token) + "&coding=0&charset=UTF-8";
         if (config.dlrEnabled()) {
             String callback = settings.callbackBase().toASCIIString() + "?token=" + encode(token)
-                    + "&messageId=" + (protocol == HttpGatewayProtocol.KANNEL ? "%F" : "%s") + "&status=%d";
+                    + "&messageId=" + (protocol == HttpGatewayProtocol.KANNEL ? "%F" : "%I") + "&status=%d";
             query += "&dlr-url=" + encode(callback);
             if (protocol == HttpGatewayProtocol.KANNEL) { query += "&dlr-mask=1"; }
         }
