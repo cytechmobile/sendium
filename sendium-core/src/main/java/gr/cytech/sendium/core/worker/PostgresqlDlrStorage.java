@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
+import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,7 +39,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
             gateway_message_id, account_id, system_id, source_address, destination_address,
             provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
             dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
-            last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask
+            last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask, http_callback_format
             """;
 
     private static final String RECORD_PROVIDER_ACCEPTED_SQL = """
@@ -47,8 +48,8 @@ public class PostgresqlDlrStorage implements DlrStorage {
                     (gateway_message_id, account_id, system_id, source_address, destination_address,
                      provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
                      dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
-                     last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask, http_callback_format)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (gateway_message_id) DO UPDATE SET
                     account_id = EXCLUDED.account_id,
                     system_id = EXCLUDED.system_id,
@@ -58,6 +59,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
                     provider_message_id = EXCLUDED.provider_message_id,
                     forward_dlr_url = EXCLUDED.forward_dlr_url,
                     dlr_mask = EXCLUDED.dlr_mask,
+                    http_callback_format = EXCLUDED.http_callback_format,
                     reassembled_parts = EXCLUDED.reassembled_parts,
                     provider_status = EXCLUDED.provider_status,
                     updated_at = EXCLUDED.updated_at
@@ -87,8 +89,8 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 (gateway_message_id, account_id, system_id, source_address, destination_address,
                  provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
                  dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
-                 last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask, http_callback_format)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (gateway_message_id) DO UPDATE SET
                 account_id = EXCLUDED.account_id,
                 system_id = EXCLUDED.system_id,
@@ -98,6 +100,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 provider_message_id = EXCLUDED.provider_message_id,
                 forward_dlr_url = EXCLUDED.forward_dlr_url,
                 dlr_mask = EXCLUDED.dlr_mask,
+                http_callback_format = EXCLUDED.http_callback_format,
                 reassembled_parts = EXCLUDED.reassembled_parts,
                 provider_status = EXCLUDED.provider_status,
                 dlr_state = EXCLUDED.dlr_state,
@@ -560,10 +563,10 @@ public class PostgresqlDlrStorage implements DlrStorage {
                                      String provider, String providerId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(RECORD_PROVIDER_ACCEPTED_SQL)) {
             setStateParameters(connection, statement, messageId, state);
-            statement.setString(22, provider);
-            statement.setString(23, providerId);
-            statement.setString(24, provider);
-            statement.setString(25, providerId);
+            statement.setString(23, provider);
+            statement.setString(24, providerId);
+            statement.setString(25, provider);
+            statement.setString(26, providerId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() && rows.getBoolean(1);
             }
@@ -840,6 +843,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
         setTimestamp(statement, 19, state.getResolvedAt());
         statement.setObject(20, toOffsetDateTime(state.getTimestamp()));
         statement.setInt(21, state.getDlrMask());
+        statement.setString(22, state.getHttpCallbackFormat().name());
     }
 
     private MessageState readState(ResultSet resultSet) throws SQLException {
@@ -857,6 +861,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
         state.setStatus(MessageState.MessageStatus.valueOf(resultSet.getString("provider_status")));
         state.setDlrState(resultSet.getObject("dlr_state", Integer.class));
         state.setErrorCode(resultSet.getString("error_code"));
+        state.setHttpCallbackFormat(HttpCallbackFormat.valueOf(resultSet.getString("http_callback_format")));
         state.setDeliveryChannel(MessageState.DeliveryChannel.valueOf(resultSet.getString("delivery_channel")));
         state.setDeliveryStatus(MessageState.DeliveryStatus.valueOf(resultSet.getString("delivery_status")));
         state.setDeliveryAttemptCount(resultSet.getInt("delivery_attempt_count"));

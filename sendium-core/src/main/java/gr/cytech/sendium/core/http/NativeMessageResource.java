@@ -74,7 +74,7 @@ public class NativeMessageResource {
         message.dcs = ucs2 ? StandardMessage.DCS_16BIT : StandardMessage.DCS_7BIT;
         message.acked = request.callbackUrl() != null;
         if (message.acked) {
-            message.dlrReturnMetadata = DlrReturnMetadata.http(principal.accountId(), message.from, message.to, request.callbackUrl());
+            message.dlrReturnMetadata = DlrReturnMetadata.httpJson(principal.accountId(), message.from, message.to, request.callbackUrl());
         }
         try {
             if (coordinators.isUnsatisfied()) {

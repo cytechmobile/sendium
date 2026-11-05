@@ -117,6 +117,22 @@ class StandardMessageTrackerTest {
     }
 
     @Test
+    void nativeCallbackFormatSurvivesTrackingAndProviderEventSnapshot() {
+        var message = new StandardMessage();
+        message.serial = UUID.randomUUID().toString();
+        message.dlrReturnMetadata = DlrReturnMetadata.httpJson("account", "from", "to", "https://example.test/callback");
+
+        tracker.handoffProviderAccepted("hash", message, "provider-id").toCompletableFuture().join();
+
+        var state = ArgumentCaptor.forClass(MessageState.class);
+        verify(dlrService).recordProviderAcceptedAsync(state.capture(), eq("provider-1"), eq("provider-id"));
+        var event = new ProviderDlrEvent.Accepted(state.getValue(), "provider-1", "provider-id");
+        state.getValue().setHttpCallbackFormat(DlrReturnMetadata.HttpCallbackFormat.KANNEL_GET);
+        assertEquals(DlrReturnMetadata.HttpCallbackFormat.JSON_POST, event.message().getHttpCallbackFormat());
+        assertEquals("account", event.message().getAccountId());
+    }
+
+    @Test
     void updateSendStatusAndExtID_WithNullGatewayMessageId_Returns0() {
         StandardMessage pMsg = new StandardMessage();
         pMsg.serial = null;

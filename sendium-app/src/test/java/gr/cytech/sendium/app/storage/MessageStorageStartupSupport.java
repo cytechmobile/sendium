@@ -1,6 +1,9 @@
 package gr.cytech.sendium.app.storage;
 
+import gr.cytech.sendium.auth.CredentialFileWatcher;
 import io.quarkus.test.QuarkusExtensionTest;
+import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Singleton;
 import org.jboss.logmanager.ExtLogRecord;
 
 import java.util.logging.LogRecord;
@@ -17,7 +20,7 @@ final class MessageStorageStartupSupport {
         return new QuarkusExtensionTest()
                 .withApplicationRoot(archive -> archive.addClasses(
                         StandaloneMessageStorage.class, MessageStorageProfile.class, MessageAdmissionProbe.class,
-                        MessageStorageStartupSupport.class))
+                        MessageStorageStartupSupport.class, EmptyCredentials.class))
                 // Exercise the standalone assembly independently of protocol worker beans.
                 .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
                 .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
@@ -44,5 +47,15 @@ final class MessageStorageStartupSupport {
 
     static String message(LogRecord record) {
         return record instanceof ExtLogRecord extended ? extended.getFormattedMessage() : record.getMessage();
+    }
+
+    /** REST discovers native authentication even when this fixture excludes the core worker beans. */
+    @Singleton
+    public static class EmptyCredentials {
+        @Produces
+        @Singleton
+        CredentialFileWatcher credentials() {
+            return new CredentialFileWatcher();
+        }
     }
 }

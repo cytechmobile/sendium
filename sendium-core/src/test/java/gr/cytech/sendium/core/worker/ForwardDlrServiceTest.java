@@ -1,6 +1,8 @@
 package gr.cytech.sendium.core.worker;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -8,6 +10,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -16,11 +20,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -149,6 +155,7 @@ class ForwardDlrServiceTest {
         assertThat(request.getValue().uri().toString())
                 .isEqualTo("https://example.test/dlr?id=" + GATEWAY_ID + "&provider=provider-42&type=1");
         assertThat(request.getValue().timeout()).contains(java.time.Duration.ofSeconds(5));
+        assertThat(request.getValue().method()).isEqualTo("GET");
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
         var order = inOrder(dlrService, httpClient);
         order.verify(dlrService).claimDueHttpDeliveries(500);
@@ -212,8 +219,9 @@ class ForwardDlrServiceTest {
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
     }
 
-    @Test
-    void directRedirectSchedulesRetryAndIsNotFollowed() throws Exception {
+    @ParameterizedTest
+    @EnumSource(HttpCallbackFormat.class)
+    void directRedirectSchedulesRetryAndIsNotFollowed(HttpCallbackFormat format) throws Exception {
         AtomicInteger redirectTargetRequests = new AtomicInteger();
         server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         server.createContext("/redirect", exchange -> {
@@ -229,6 +237,7 @@ class ForwardDlrServiceTest {
         server.start();
         MessageState due = dueState("http://" + server.getAddress().getHostString() + ':'
                 + server.getAddress().getPort() + "/redirect");
+        due.setHttpCallbackFormat(format);
         dueAttempt(due, 1);
         when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(1), eq("http_failure"), anyLong()))
                 .thenReturn(true);
@@ -240,6 +249,71 @@ class ForwardDlrServiceTest {
         verify(dlrService, never()).completeDelivery(GATEWAY_ID, 1);
         assertThat(redirectTargetRequests).hasValue(0);
         assertThat(ForwardDlrService.newHttpClient().followRedirects()).isEqualTo(HttpClient.Redirect.NEVER);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = MessageState.MessageStatus.class, names = {"DELIVERED", "FAILED"})
+    void nativeCallbackPostsOnlyTheDefinedJsonFieldsAndCompletesAfterSuccess(MessageState.MessageStatus status) throws Exception {
+        var method = new AtomicReference<String>();
+        var contentType = new AtomicReference<String>();
+        var body = new AtomicReference<String>();
+        var query = new AtomicReference<String>();
+        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/callback", exchange -> {
+            method.set(exchange.getRequestMethod());
+            contentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
+            query.set(exchange.getRequestURI().getRawQuery());
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+        var due = dueState("http://" + server.getAddress().getHostString() + ':'
+                + server.getAddress().getPort() + "/callback?token=a%20b");
+        due.setHttpCallbackFormat(HttpCallbackFormat.JSON_POST);
+        due.setStatus(status);
+        due.setDlrMask(0);
+        if (status == MessageState.MessageStatus.FAILED) {
+            due.setLastDeliveryResult("provider_rejected");
+        }
+        due.setErrorCode(status == MessageState.MessageStatus.FAILED ? "\"failure\"\\code" : null);
+        dueAttempt(due, 1);
+        when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
+        service = new ForwardDlrService(dlrService, ForwardDlrService.newHttpClient());
+
+        service.dispatchDueDeliveries();
+
+        assertThat(method.get()).isEqualTo("POST");
+        assertThat(contentType.get()).isEqualTo("application/json");
+        assertThat(query.get()).isEqualTo("token=a%20b");
+        var json = new ObjectMapper().readTree(body.get());
+        assertThat(json.size()).isEqualTo(3);
+        assertThat(json.get("messageId").asText()).isEqualTo(GATEWAY_ID);
+        assertThat(json.get("status").asText()).isEqualTo(status == MessageState.MessageStatus.DELIVERED ? "delivered" : "failed");
+        if (status == MessageState.MessageStatus.DELIVERED) {
+            assertThat(json.get("errorCode").isNull()).isTrue();
+        } else {
+            assertThat(json.get("errorCode").asText()).isEqualTo(due.getErrorCode());
+        }
+        verify(dlrService).completeDelivery(GATEWAY_ID, 1);
+    }
+
+    @Test
+    void nativeCallbackRetriesTheSameMessageWithoutChangingItsFormat() throws Exception {
+        var due = dueState("https://example.test/callback");
+        due.setHttpCallbackFormat(HttpCallbackFormat.JSON_POST);
+        dueAttempt(due, 2);
+        respondWith(503);
+        when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(2), eq("http_failure"), anyLong())).thenReturn(true);
+
+        service.dispatchDueDeliveries();
+
+        var request = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpClient).send(request.capture(), anyBodyHandler());
+        assertThat(request.getValue().method()).isEqualTo("POST");
+        verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(2), eq("http_failure"), anyLong());
+        verify(dlrService, never()).completeDelivery(anyString(), anyInt());
+        assertThat(due.getHttpCallbackFormat()).isEqualTo(HttpCallbackFormat.JSON_POST);
     }
 
     @Test

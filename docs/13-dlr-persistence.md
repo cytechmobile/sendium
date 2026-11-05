@@ -161,6 +161,33 @@ An accepted upstream `submit_sm_resp` with a provider message ID queues an atomi
 
 A terminal receipt remains in `sendium_dlr.dlr_message` while HTTP or SMPP delivery is pending or after HTTP delivery reaches terminal `FAILED` status. The delivery attempt number is a fencing token: a stale completion or failure cannot mutate a newer attempt. HTTP and SMPP use leased PostgreSQL claims across replicas.
 
+### HTTP callback formats
+
+Kannel submissions retain their GET callbacks, including `%I` (gateway message ID), `%F` (provider
+message ID), and `%d` (Kannel outcome) URL substitution and receipt-mask filtering. Native
+`/api/v1/messages` submissions use JSON POST callbacks independent of Kannel receipt masks:
+
+```json
+{
+  "messageId": "123e4567-e89b-12d3-a456-426614174000",
+  "status": "delivered",
+  "errorCode": null
+}
+```
+
+`status` is `delivered` or `failed`, using the existing terminal provider-outcome mapping; provider
+rejection also produces `failed`. `errorCode` carries the recorded provider error code, or null when
+absent. Requests use `Content-Type: application/json`. The callback URL is used as supplied, without
+Kannel placeholder substitution or callback-host preapproval. Receipt callbacks require DLR persistence
+to be enabled. Both formats share the existing delivery policy: a 5-second request timeout, any 2xx
+response completes the attempt, other responses/transport failures retry after one hour, and attempt
+10 failure marks delivery `FAILED`. Redirects are not followed. Receivers must handle duplicate
+callbacks idempotently by `messageId`.
+
+The initial V1 schema includes `http_callback_format`, defaulting Kannel writers to `KANNEL_GET`;
+native callbacks persist `JSON_POST`. The format survives provider-event batching, process restart,
+and callback retries.
+
 ## Retention
 
 The V1 retention thresholds are fixed application behavior, not environment settings:

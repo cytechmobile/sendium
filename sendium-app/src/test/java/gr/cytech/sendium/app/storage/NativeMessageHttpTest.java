@@ -9,6 +9,7 @@ import gr.cytech.sendium.core.http.NativeApiError;
 import gr.cytech.sendium.core.http.NativeApiPrincipal;
 import gr.cytech.sendium.core.http.NativeMessageRequest;
 import gr.cytech.sendium.core.http.NativeMessageResource;
+import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
@@ -113,6 +114,7 @@ class NativeMessageHttpTest {
         assertThat(message.acked).isTrue();
         assertThat(message.dlrReturnMetadata.accountId()).isEqualTo("account-one");
         assertThat(message.dlrReturnMetadata.forwardDlrUrl()).isEqualTo("https://customer.example/receipts");
+        assertThat(message.dlrReturnMetadata.httpCallbackFormat()).isEqualTo(HttpCallbackFormat.JSON_POST);
         coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
     }
 

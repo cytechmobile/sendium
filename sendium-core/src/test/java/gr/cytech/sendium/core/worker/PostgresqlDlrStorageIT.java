@@ -1,5 +1,8 @@
 package gr.cytech.sendium.core.worker;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
+import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.core.message.StandardMessage;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -12,9 +15,12 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import javax.sql.DataSource;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -30,6 +36,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -133,6 +140,56 @@ class PostgresqlDlrStorageIT {
     }
 
     @Test
+    void nativeCallbackFormatSurvivesBatchPersistenceRecreationAndHttpRetry() throws Exception {
+        var received = new CopyOnWriteArrayList<String>();
+        var methods = new CopyOnWriteArrayList<String>();
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/callback", exchange -> {
+            methods.add(exchange.getRequestMethod());
+            received.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(received.size() == 1 ? 503 : 204, -1);
+            exchange.close();
+        });
+        server.start();
+        try (var client = ForwardDlrService.newHttpClient()) {
+            var message = state(MessageState.DeliveryChannel.HTTP, "account",
+                    "http://" + server.getAddress().getHostString() + ':' + server.getAddress().getPort() + "/callback");
+            message.setHttpCallbackFormat(HttpCallbackFormat.JSON_POST);
+            storage.applyProviderBatch(List.of(acceptedEvent(message, "native-provider-id")));
+            var recreated = new PostgresqlDlrStorage(dataSource);
+            assertThat(recreated.getState(message.getGatewayMsgId())).get()
+                    .extracting(MessageState::getHttpCallbackFormat).isEqualTo(HttpCallbackFormat.JSON_POST);
+            recreated.applyProviderBatch(List.of(receiptEvent("native-provider-id")));
+            var service = new DlrService();
+            service.storage = recreated;
+            var forwarder = new ForwardDlrService(service, client);
+
+            forwarder.dispatchDueDeliveries();
+
+            assertThat(recreated.getState(message.getGatewayMsgId())).get().satisfies(actual -> {
+                assertThat(actual.getHttpCallbackFormat()).isEqualTo(HttpCallbackFormat.JSON_POST);
+                assertThat(actual.getDeliveryAttemptCount()).isEqualTo(1);
+                assertThat(actual.getLastDeliveryResult()).isEqualTo("http_failure");
+                assertThat(actual.getNextAttemptAt()).isGreaterThan(System.currentTimeMillis());
+            });
+            setNextAttemptAt(message.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '1 second'");
+            service.storage = new PostgresqlDlrStorage(dataSource);
+
+            new ForwardDlrService(service, client).dispatchDueDeliveries();
+
+            assertThat(methods).containsExactly("POST", "POST");
+            assertThat(received).hasSize(2);
+            assertThat(received.get(1)).isEqualTo(received.getFirst());
+            var payload = new ObjectMapper().readTree(received.getFirst());
+            assertThat(payload.get("messageId").asText()).isEqualTo(message.getGatewayMsgId());
+            assertThat(payload.get("status").asText()).isEqualTo("delivered");
+            assertThat(storage.getState(message.getGatewayMsgId())).isEmpty();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void maskSurvivesBatchedAcceptanceTerminalResolutionAndStorageRecreation() {
         MessageState message = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
         message.setDlrMask(2);
@@ -141,6 +198,22 @@ class PostgresqlDlrStorageIT {
         resolve("mask-provider-id");
         assertThat(storage.claimDueHttpDeliveries(10)).singleElement()
                 .satisfies(actual -> assertThat(actual.getDlrMask()).isEqualTo(2));
+    }
+
+    @Test
+    void nativeProviderRejectionPersistsFormatAndProducesADueFailedReceipt() {
+        var message = state(MessageState.DeliveryChannel.HTTP, "account", "https://example.test/callback");
+        message.setHttpCallbackFormat(HttpCallbackFormat.JSON_POST);
+        storage.applyProviderBatch(List.of(new ProviderDlrEvent.Rejected(message, PROVIDER, null,
+                StandardMessage.DLR_STAT_REJECTD, "rejected")));
+
+        var due = new PostgresqlDlrStorage(dataSource).claimDueHttpDeliveries(1);
+
+        assertThat(due).singleElement().satisfies(actual -> {
+            assertThat(actual.getHttpCallbackFormat()).isEqualTo(HttpCallbackFormat.JSON_POST);
+            assertThat(actual.getStatus()).isEqualTo(MessageState.MessageStatus.FAILED);
+            assertThat(actual.getErrorCode()).isEqualTo("rejected");
+        });
     }
 
     @Test

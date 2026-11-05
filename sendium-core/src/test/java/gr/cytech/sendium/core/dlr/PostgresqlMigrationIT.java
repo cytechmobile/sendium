@@ -73,7 +73,7 @@ class PostgresqlMigrationIT {
             assertThat(loadColumnNames(connection, "dlr_message"))
                     .contains("dlr_state", "error_code", "delivery_channel", "delivery_status",
                             "delivery_attempt_count", "last_attempt_at", "next_attempt_at",
-                            "claimed_until", "last_delivery_result", "resolved_at", "dlr_mask")
+                            "claimed_until", "last_delivery_result", "resolved_at", "dlr_mask", "http_callback_format")
                     .doesNotContain("generation_id");
         }
     }
@@ -115,6 +115,40 @@ class PostgresqlMigrationIT {
 
         assertThat(repeatedMigration.success).isTrue();
         assertThat(repeatedMigration.migrationsExecuted).isZero();
+    }
+
+    @Test
+    void callbackFormatDefaultsToGetAndRejectsUnsupportedFormats() throws SQLException {
+        UUID id = UUID.randomUUID();
+        try (Connection connection = connection()) {
+            insertMessage(connection, id);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT http_callback_format FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?")) {
+                    statement.setObject(1, id);
+                    try (ResultSet row = statement.executeQuery()) {
+                        assertThat(row.next()).isTrue();
+                        assertThat(row.getString(1)).isEqualTo("KANNEL_GET");
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE sendium_dlr.dlr_message SET http_callback_format = ? WHERE gateway_message_id = ?")) {
+                    statement.setObject(2, id);
+                    statement.setString(1, "JSON_POST");
+                    assertThat(statement.executeUpdate()).isOne();
+                    statement.setString(1, "UNKNOWN");
+                    assertThatThrownBy(statement::executeUpdate).isInstanceOf(SQLException.class);
+                    statement.setString(1, null);
+                    assertThatThrownBy(statement::executeUpdate).isInstanceOf(SQLException.class);
+                }
+            } finally {
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?")) {
+                    statement.setObject(1, id);
+                    statement.executeUpdate();
+                }
+            }
+        }
     }
 
     @Test

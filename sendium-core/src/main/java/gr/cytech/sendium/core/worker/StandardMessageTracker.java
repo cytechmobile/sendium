@@ -202,6 +202,7 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
                 metadata.sourceAddress(), metadata.destinationAddress(), metadata.forwardDlrUrl());
         state.setDlrMask(metadata.dlrMask());
         state.setDeliveryChannel(MessageState.DeliveryChannel.valueOf(metadata.channel().name()));
+        state.setHttpCallbackFormat(metadata.httpCallbackFormat());
         state.setReassembledParts(message.reassembledParts);
         return Optional.of(state);
     }

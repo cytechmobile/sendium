@@ -9,6 +9,7 @@ CREATE TABLE sendium_dlr.dlr_message (
     provider_name TEXT,
     provider_message_id TEXT,
     forward_dlr_url TEXT,
+    http_callback_format TEXT NOT NULL DEFAULT 'KANNEL_GET',
     dlr_mask INTEGER NOT NULL DEFAULT 3 CHECK (dlr_mask BETWEEN 0 AND 3),
     reassembled_parts TEXT[],
     provider_status TEXT NOT NULL,
@@ -34,6 +35,8 @@ CREATE TABLE sendium_dlr.dlr_message (
         CHECK (provider_status IN ('SENT', 'DELIVERED', 'FAILED')),
     CONSTRAINT dlr_message_delivery_channel_check
         CHECK (delivery_channel IN ('HTTP', 'SMPP')),
+    CONSTRAINT dlr_message_http_callback_format_check
+        CHECK (http_callback_format IN ('KANNEL_GET', 'JSON_POST')),
     CONSTRAINT dlr_message_delivery_status_check
         CHECK (delivery_status IN ('WAITING_PROVIDER', 'PENDING', 'FAILED')),
     CONSTRAINT dlr_message_delivery_attempt_count_check
