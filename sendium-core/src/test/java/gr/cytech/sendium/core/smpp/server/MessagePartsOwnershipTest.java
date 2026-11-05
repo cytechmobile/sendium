@@ -1,10 +1,15 @@
 package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.pending.MultipartKey;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import java.time.Instant;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -51,6 +56,34 @@ class MessagePartsOwnershipTest {
             assertThat(scheduler.tasks).hasSize(1);
             handler.stop();
         }
+    }
+
+    @Test
+    void acceptedGroupInstancesDoNotMergeRepeatedOrdinals() {
+        try (var scheduler = new CapturingScheduler()) {
+            var listener = new Listener();
+            var handler = new MessagePartsHandler<>(listener, 60_000, scheduler);
+            UUID firstGroup = UUID.randomUUID();
+            UUID secondGroup = UUID.randomUUID();
+            var first = part(1, "first");
+            var repeated = part(1, "repeated");
+            var second = part(2, "second");
+            handler.addAcceptedPart(first, membership(first, firstGroup, 1));
+            handler.addAcceptedPart(repeated, membership(repeated, secondGroup, 1));
+            handler.addAcceptedPart(second, membership(second, firstGroup, 2));
+            assertThat(listener.groups).hasSize(1);
+            assertThat(listener.groups.getFirst()).extracting(message -> message.body).containsExactly("first", "second");
+            assertThat(listener.duplicate).isNull();
+            handler.new DelayedMessagePartsTask(secondGroup.toString()).call();
+            assertThat(listener.groups.getLast()).containsExactly(repeated);
+            handler.stop();
+        }
+    }
+
+    private static MultipartMembership membership(StandardMessage part, UUID group, int ordinal) {
+        SourceId source = new SourceId(UUID.randomUUID());
+        part.serial = source.value().toString();
+        return new MultipartMembership(source, group, MultipartKey.from(part), ordinal, Instant.now().plusSeconds(60), 0);
     }
 
     private static StandardMessage part(int ordinal, String body) {

@@ -6,7 +6,9 @@ Accepted sources remain owned until provider processing and every required track
 
 Only **`memory/memory/memory`** is implemented: unfinished work is lost on process closure or restart.
 The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
-This is the initial slice of [#338](https://github.com/cytechmobile/sendium/issues/338), under [#337](https://github.com/cytechmobile/sendium/issues/337).
+The working lifecycle comes from [#338](https://github.com/cytechmobile/sendium/issues/338), with pending-source
+contracts, multipart admission and the [versioned CBOR representation](15-pending-record-schema.md) refined by
+[#343](https://github.com/cytechmobile/sendium/issues/343), under [#337](https://github.com/cytechmobile/sendium/issues/337).
 
 ## Flow Overview
 
@@ -39,6 +41,8 @@ phases. Arrows show progression, not deletion of earlier records.
   multipart parts and in-flight sources, before HTTP 202 / SMPP success. When full, new admissions fail
   with **HTTP 503** or **SMPP `STATUS_THROTTLED`**. Existing work continues processing; cleanup frees
   space. Moving to a later stage does not free a Pending slot. An aggregate retains every original source ID.
+  Acknowledged duplicate multipart handles remain owned with their original ordinal until terminal completion
+  and required DLR handoff; their payloads are not routed independently.
 - **(2) Selected — `SelectedRouterStore`:** holds up to **1,000 queued or taken unassigned items**.
   Select up to **100 ready items/cycle**, limited by free slots, and route up to **100 takes/cycle**
   through routing rules. When full, additional ready work stays in Pending. Recording a destination
@@ -73,16 +77,34 @@ phases. Arrows show progression, not deletion of earlier records.
 `sendium-core` supplies reusable contracts and implementations. `sendium-app` constructs and runs the
 standalone pipeline; importing the core library alone does not activate this storage assembly.
 
+```mermaid
+flowchart LR
+    ingress["HTTP / SMPP admission"] --> coordinator["OutboundCoordinator<br/>ownership and transitions"]
+    pipeline["StandaloneOutboundPipeline<br/>construction, polling, shutdown"] --> coordinator
+    pipeline --> dispatch["StandardOutboundDispatch<br/>routing and provider executions"]
+    dispatch --> coordinator
+    dispatch --> routing["StandardRoutingManager<br/>rules and filters"]
+    dispatch --> provider["SmppClientWorker<br/>requests and callbacks"]
+    provider --> handoff["Tracker / DlrStorage<br/>required handoff"]
+    handoff -->|Completion condition| coordinator
+    coordinator --> pending["PendingMessageStore<br/>accepted sources"]
+    coordinator --> selected["SelectedRouterStore<br/>selected backlog"]
+    coordinator --> routed["RoutedWorkStore<br/>recorded destinations"]
+```
+
 | Component | Responsibility |
 |---|---|
 | `MessageStorageProfile` / `StandaloneMessageStorage` | Validate startup selectors, produce the profile and report its non-durable guarantee. |
 | `StandaloneOutboundPipeline` | Start one shared coordinator; drive bounded selection, routing, dispatch, retries and drain-first shutdown. |
 | `KannelResource` / `SmppServerWorker` | Admit before HTTP 202 / SMPP success; retain original source identities through multipart preparation. |
 | `PendingMessageStore` / `MemoryPendingMessageStore` | Retain accepted sources, held parts and ready work through source completion. |
+| `MultipartKey` / `MultipartMembership` | Match compatible parts and retain each source's assigned group, ordinal, absolute deadline and group creation order. |
+| `PendingSourceRecord` / `PendingMessageData` / `PendingRecordCodec` | Explicit accepted-source representation and versioned Jackson CBOR codec; not a physical backend or automatic memory-store encoding. |
+| `PendingMultipartRecovery` | Shared record-driven assembly/expiry entrypoint using bounded reads; backend/application startup integration is explicit. |
 | `SelectedRouterStore` / `MemorySelectedRouterStore` | Own bounded selection and unassigned routing work; retain selected bookkeeping after routing. |
 | `RoutedWorkStore` / `MemoryRoutedWorkStore` | Record one destination per selection and schedule its unfinished work by destination. |
 | `DefaultOutboundCoordinator` / `OutboundWork` | Enforce typed source/selection/work ownership, transitions, handoff-dependent completion and retryable cleanup. |
-| `StandardRoutingManager` / `StandardOutboundDispatch` | Resolve routing rules, retain recording intents and schedule tracked provider attempts. |
+| `StandardRoutingManager` / `StandardOutboundDispatch` | Resolve rules/filters, retain recording intents and schedule tracked provider attempts. |
 | `SmppClientWorker` / `SmppClientSessionHandler` / `CoordinatedSmppSubmission` | Prepare/send requests, process callbacks once and join part/replacement outcomes. |
 | `Tracker` / `StandardMessageTracker` | Signal successful required handoff; integrate with the independently configured DLR subsystem. |
 
@@ -98,13 +120,13 @@ sequenceDiagram
     participant P as Provider execution and callbacks
     participant H as Required tracking / DLR handoff
     Client->>Ingress: Submit message
-    Ingress->>C: accept source or acceptHeld part
-    C-->>Ingress: Accepted ownership
+    Ingress->>C: accept source or acceptPart with timeout
+    C-->>Ingress: Confirmed source handle / multipart membership
     Ingress-->>Client: Success + gateway UUID
     D->>C: selectToRouter - select bounded ready work into router backlog
     D->>C: Take selected work for routing
     C-->>D: Selected payload + original source IDs
-    D->>R: Resolve one destination using routing rules
+    D->>R: Resolve one destination and apply routing filters
     R-->>D: Destination
     D->>C: recordToRouted - record choice and mark selected work routed
     D->>C: takeFromRouted - take assigned work for execution
@@ -122,9 +144,10 @@ sequenceDiagram
 - **Identity:** HTTP/SMPP reuse each gateway UUID as its typed `SourceId`. `SelectionId` and `WorkId`
   identify later steps independently of mutable payloads and provider IDs. Return the actual take handle,
   with its updated payload, rather than a reconstructed wrapper; stale returns must not overwrite live work.
-- **Incoming multipart:** `acceptHeld` retains each part before acknowledgement. The existing reassembler
-  makes an aggregate or expired individual parts ready using `makeHeldReady(originalSourceIds, payload)`.
-  This creates no new admission; publication retries do not re-acknowledge or reassemble the input.
+- **Incoming multipart:** `acceptPart` retains each part and its group membership before acknowledgement.
+  The reassembler makes an aggregate or expired individual parts ready using `makeHeldReady(originalSourceIds, payload)`.
+  This creates no new admission; in-process publication retries do not re-acknowledge input or create
+  another source binding.
 - **Outgoing multipart:** provider requests and replacements share one routed parent and original source
   set. They are not copied-route branches. No source is removed until all required completion conditions succeed.
 - **Completion:** `complete(workId, stage)` can register an outstanding condition; it does not immediately
@@ -133,7 +156,7 @@ sequenceDiagram
 - **DLR boundary:** completion waits for required handoff acceptance, not a later handset-delivery receipt.
   Receipt storage/delivery remains independent of outbound backend selection.
 
-`StandardOutboundDispatch.routeSelected()` performs routing lookup.
+`StandardOutboundDispatch.routeSelected()` performs routing lookup and filters.
 `OutboundCoordinator.recordToRouted(selected, destination)` records that already-chosen result and
 advances stage ownership; it does not choose the destination or send the message.
 `takeFromRouted(destination, timeout)` takes one assigned item without completing ownership;
@@ -141,6 +164,73 @@ advances stage ownership; it does not choose the destination or send the message
 `makeHeldReady(sources, preparedMessage)` binds held sources to the caller-prepared payload without
 assembling or accepting new input. `selectToRouter(limit)` then selects eligible work into the router
 backlog and returns the newly staged count; it does not evaluate routing rules.
+
+## Pending Sources and Multipart Groups
+
+`PendingMessageStore.admit` and `admitHeld` return the supplied stable `SourceId` only after acceptance.
+`OutboundCoordinator.accept` and `acceptHeld` propagate that confirmed handle. A null or substituted
+backend result is an ownership failure, never permission to acknowledge untracked work. `acceptPart`
+similarly confirms the source in its returned `MultipartMembership`. `admitHeld` remains available for
+generic held work without assigning it to a multipart group.
+
+`find(source)` returns an isolated copy of the **accepted** payload. It does not return the later routing
+or provider-mutated execution message. `findMultipart(source)` returns immutable membership when present.
+`sourcesAfter(cursor, limit)` enumerates immutable pages of at most `limit` handles in `UUID.compareTo`
+order; start with a null cursor and continue after the last returned handle. Completion of that cursor
+does not invalidate progress. This is a bounded read API, not selection. Recovery callers quiesce ingress
+and processing; concurrent admission/completion is not a consistent snapshot.
+
+Every new client submission receives its own source ID, including a repeated multipart ordinal.
+Only an **internal retry of the same retained source ID** preserves the first accepted value without
+consuming another source slot. A successful earlier client response does not make a later submission
+with the same content/reference a deduplicated internal retry.
+
+Multipart matching uses account/system, sender, recipient, reference width/value, declared total and
+normalized UDH. Other header bytes are preserved, so different ports or headers do not share a group.
+The parser supports one valid 8-bit or 16-bit concatenation element alongside other length-checked IEs.
+Assign the part to the open, unexpired matching group; otherwise create a new group instance.
+The first accepted source for each ordinal wins. Later sources report duplicate membership referencing
+that original source and cannot replace its payload. The first accepted part fixes
+the absolute deadline, and subsequent parts or timeout-configuration changes do not extend it.
+
+For **A=part1, B=part1, C=part2, D=part3**, assemble **A+C+D** and retain B's accepted handle with the
+same group. All four submissions are acknowledged after admission. Completing the aggregate removes
+all four source records after terminal processing and required handoff. B is never routed separately.
+On expiry, each received original part publishes with its duplicate handles. Publication atomically
+includes those handles even when their ingress notifications have not been processed. Mixing group
+instances or publishing an incomplete assigned aggregate is rejected.
+
+The [schema reference](15-pending-record-schema.md) specifies all 54 accepted message fields, DLR return
+metadata, multipart membership, extension types and validation rules. It does not serialize
+`StandardMessage` directly or instantiate application classes from stored names. Normal memory
+operation continues to use its existing snapshot policy; the standalone CBOR mapper is an explicit
+library contract for backends, not a new serialization step on every memory admission.
+
+### Record-driven reconstruction
+
+`PendingMultipartRecovery` rebuilds runtime assembly from accepted records, saved assignments and
+absolute deadlines. It validates bounded source pages and group-handle indexes before reporting ready.
+Complete retained groups assemble in ordinal order; expired incomplete groups release received parts;
+unexpired incomplete groups schedule only the time remaining. A restart at 12:00:50 with a saved
+12:01:00 deadline leaves ten seconds, not another full timeout.
+
+Waiting groups retain handles/metadata, not a second payload backlog. `multipartSources(groupId)` reads
+one group's retained handles, including duplicates and parts still awaiting ingress notification,
+bounded by pending source capacity. There are at most 255 distinct ordinals.
+Payloads are fetched for assembly or expiry. Closing recovery cancels its timers; source completion
+still belongs to the coordinator after terminal processing and required DLR handoff.
+
+There is **no new durable checkpoint of a runtime assembly, release or publication decision**.
+Pending-only recovery may repeat processing. Selection/destination decisions survive only under
+their own configured stage guarantees. Within a running process, `makeHeldReady` retains the first
+source-to-projection binding and prepared payload, making publication retries idempotent.
+
+`SmppServerWorker.reconstructPendingParts(pending, pageSize)` is an explicit pre-ingress startup hook
+using its selected coordinator's publication boundary. It prevents worker startup/admission success
+after failed reconstruction. It is **not** automatic restart recovery in the current standalone memory
+profile. Opening/indexing a physical durable backend, invoking reconstruction before ingress/dispatch,
+reconciling later stages and enabling a supported durable profile remain backend/application work in
+#339 and later issues. The current coordinator still rejects durable stages.
 
 ## Ownership and Capacity
 
@@ -171,12 +261,14 @@ A group of N accepted multipart sources uses N pending slots but one selected sl
 Partial terminal cleanup can retain routed records after source removal, so equal capacities do not
 eliminate cleanup-related backpressure or provide cross-store transactions.
 
-Selection or returning an unroutable item alone does not count as productive cycle progress.
-Shutdown prevents further cycle scheduling. Batch size is not TPS or provider
+The processor schedules the next bounded cycle without a mandatory delay after successful routing
+or provider scheduling. Idle, paused, or unsuccessful cycles back off for 100 milliseconds;
+selection or returning an unroutable item alone does not count as progress. Shutdown prevents
+further cycle scheduling. Batch size is not TPS or provider
 concurrency: attempts use the worker's shared rate limiter and a dispatcher-owned execution pool
 sized by its `threadCount`. At most that many preparation loops execute concurrently, taking waiting
 attempts from the worker FIFO. The default shared two-thread scheduler handles destination resolution
-and timed retries; rate waits and SMPP sends run on the worker's pool.
+and timed retries; rate waits, worker filters, and SMPP sends run on the worker's pool.
 Stopped-worker pools are retired during transition maintenance, and dispatcher close shuts down
 its worker pools after provider drain even when the timer scheduler is application-owned.
 Awaiting asynchronous outcomes does not hold a sending slot. Count limits do not bound message bytes.
@@ -210,12 +302,15 @@ attempts, not either storage-return operation.
 | Admission capacity/unavailability | HTTP 503; SMPP capacity returns `STATUS_THROTTLED`. Failed admission is not acknowledged as success. |
 | Routing miss / nonterminal lookup failure | Use `requeueForRouting` with ownership retained. A terminal routing drop uses `discard`. |
 | Copied route / unsupported standalone destination | Reject before assignment, even if a copied rule resolves to one target. The existing legacy copied-routing API remains separate. |
-| Destination-recording failure | Retry the retained original intent without repeating routing lookup. |
+| Destination-recording failure | Retry the retained original intent without repeating lookup or routing filters. |
 | Required handoff failure | Retain ownership and retry the handoff, not an accepted provider request. |
 | Terminal cleanup failure | Retry unfinished cleanup without awaiting another successful handoff or redispatching provider work. |
+| Uncertain source absence | Completion fails explicitly; only established absence on a ready backend permits idempotent success. |
+| Corrupt/unknown-version recovery input | Fail reconstruction/readiness explicitly; do not skip the source or treat it as completed. |
 
 Each provider response is claimed once; duplicate callbacks cannot create another replacement or
-complete unrelated sources. Admission deduplication applies while ownership is retained, not forever.
+complete unrelated sources. Same-source-ID admission idempotence applies while ownership is retained,
+not forever; new client submissions remain independent.
 Runtime worker removal's legacy queue return does not migrate coordinator-owned parent records.
 
 Provider preparation uses a per-worker FIFO of already-owned runtime attempts. Up to the worker's
@@ -288,8 +383,17 @@ existing router/worker startup. A failing coordinated admission never falls back
 Future profiles are not selectable today. Memory remains the non-durable default; planned file profiles
 are opt-in. Durable recovery must reconcile identities and resume the latest recorded stage without
 scheduling earlier retained records independently. It requires surviving storage and remains at least
-once: provider submission before recorded completion may repeat. Physical backends, codecs and durable
-provider-outcome checkpoints belong to subsequent issues.
+once: provider submission before recorded completion may repeat. The CBOR source codec is implemented;
+physical backends and durable later-stage implementations belong to subsequent issues. Durable provider
+outcome/retry checkpoints remain outside this delivery.
+
+### Delivery and rollback boundary
+
+#343 adds pending contracts, source representation, shared runtime reconstruction and behavioral proofs.
+It adds no spool directory/publication scheme, PostgreSQL outbound schema, durable profile or durable-data
+migration. Its dependent commits can be reverted together, in reverse order, to the working #338 memory
+baseline while retaining that baseline's performance fixes. This code-only rollback does not recover
+unfinished memory work across a restart. Existing PostgreSQL DLR storage remains independently owned.
 
 ## Embedding and API Reference
 
@@ -306,6 +410,8 @@ Detailed operation, idempotence and failure rules are defined in the tracked Jav
 
 - [OutboundCoordinator](../sendium-core/src/main/java/gr/cytech/sendium/core/outbound/OutboundCoordinator.java) and [OutboundWork](../sendium-core/src/main/java/gr/cytech/sendium/core/outbound/OutboundWork.java)
 - [PendingMessageStore](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/PendingMessageStore.java)
+- [PendingRecordCodec](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/pending/PendingRecordCodec.java) and [pending record schema](15-pending-record-schema.md)
+- [PendingMultipartRecovery](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/pending/PendingMultipartRecovery.java)
 - [SelectedRouterStore](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/SelectedRouterStore.java)
 - [RoutedWorkStore](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/RoutedWorkStore.java)
 - [OutboundStage](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/OutboundStage.java) and [OutboundStorageException](../sendium-core/src/main/java/gr/cytech/sendium/core/storage/OutboundStorageException.java)
@@ -316,3 +422,9 @@ shutdown ordering and startup rejection. Provider transport/handoffs use control
 external provider. Key tests are [StandaloneOutboundPipelineTest](../sendium-app/src/test/java/gr/cytech/sendium/app/storage/StandaloneOutboundPipelineTest.java),
 [SmppClientWorkerTest](../sendium-core/src/test/java/gr/cytech/sendium/core/smpp/client/SmppClientWorkerTest.java) and
 [OutboundEmbeddedLifecycleTest](../sendium-core/src/test/java/gr/cytech/sendium/core/outbound/consumer/OutboundEmbeddedLifecycleTest.java).
+Pending-specific proofs are [MemoryPendingMessageStoreContractTest](../sendium-core/src/test/java/gr/cytech/sendium/core/storage/pending/MemoryPendingMessageStoreContractTest.java),
+[PendingRecordMappingTest](../sendium-core/src/test/java/gr/cytech/sendium/core/storage/pending/PendingRecordMappingTest.java),
+[PendingRecordCodecTest](../sendium-core/src/test/java/gr/cytech/sendium/core/storage/pending/PendingRecordCodecTest.java),
+[PendingCompletionFailureTest](../sendium-core/src/test/java/gr/cytech/sendium/core/storage/pending/PendingCompletionFailureTest.java) and
+[PendingMultipartRecoveryTest](../sendium-core/src/test/java/gr/cytech/sendium/core/storage/pending/PendingMultipartRecoveryTest.java).
+Codec-backed reconstruction fixtures are not physical file-publication or forced-process restart tests.
