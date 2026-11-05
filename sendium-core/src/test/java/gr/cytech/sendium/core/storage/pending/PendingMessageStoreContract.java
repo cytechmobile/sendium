@@ -161,7 +161,9 @@ abstract class PendingMessageStoreContract {
             var first = acceptPart(pending, original);
             var repeated = acceptPart(pending, multipart("0500037F0301"));
             assertThat(repeated.source()).isNotEqualTo(first.source());
-            assertThat(repeated.groupId()).isNotEqualTo(first.groupId());
+            assertThat(repeated.groupId()).isEqualTo(first.groupId());
+            assertThat(repeated.originalSource()).isEqualTo(first.source());
+            assertThat(repeated.duplicate()).isTrue();
             var retry = multipart("0500037F0302");
             retry.serial = original.serial;
             retry.body = "replacement must not win";
@@ -182,15 +184,15 @@ abstract class PendingMessageStoreContract {
             pending.open();
             var a = acceptPart(pending, multipart("0500037F0301"));
             var b = acceptPart(pending, multipart("0500037F0301"));
-            assertThat(a.groupOrder()).isLessThan(b.groupOrder());
+            assertThat(a.groupOrder()).isEqualTo(b.groupOrder());
             var c = acceptPart(pending, multipart("0500037F0302"));
             var d = acceptPart(pending, multipart("0500037F0303"));
-            assertThat(c.groupId()).isEqualTo(a.groupId()).isNotEqualTo(b.groupId());
+            assertThat(c.groupId()).isEqualTo(a.groupId()).isEqualTo(b.groupId());
             assertThat(d.groupId()).isEqualTo(a.groupId());
             assertThat(c.groupOrder()).isEqualTo(a.groupOrder());
             assertThat(d.groupOrder()).isEqualTo(a.groupOrder());
             var next = acceptPart(pending, multipart("0500037F0302"));
-            assertThat(next.groupId()).isEqualTo(b.groupId());
+            assertThat(next.groupId()).isNotEqualTo(a.groupId());
         }
     }
 
@@ -255,10 +257,11 @@ abstract class PendingMessageStoreContract {
             var groups = new java.util.HashSet<UUID>();
             for (var task : tasks) {
                 var accepted = task.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                assertThat(groups.add(accepted.groupId())).isTrue();
+                groups.add(accepted.groupId());
                 assertThat(pending.findMultipart(accepted.source())).contains(accepted);
             }
             assertThat(pending.sourcesAfter(null, 32)).hasSize(32);
+            assertThat(groups).hasSize(1);
         }
     }
 

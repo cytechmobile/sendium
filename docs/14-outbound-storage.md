@@ -167,15 +167,17 @@ with the same content/reference a deduplicated internal retry.
 Multipart matching uses account/system, sender, recipient, reference width/value, declared total and
 normalized UDH. Other header bytes are preserved, so different ports or headers do not share a group.
 The parser supports one valid 8-bit or 16-bit concatenation element alongside other length-checked IEs.
-Assign the part to the oldest open, unexpired matching group missing its ordinal; otherwise create
-another group instance. Group creation order breaks equal-time ties. The first accepted part fixes
+Assign the part to the open, unexpired matching group; otherwise create a new group instance.
+The first accepted source for each ordinal wins. Later sources report duplicate membership referencing
+that original source and cannot replace its payload. The first accepted part fixes
 the absolute deadline, and subsequent parts or timeout-configuration changes do not extend it.
 
-For **A=part1, B=part1, C=part2, D=part3**, the first group is **A+C+D** and B belongs to a separate group.
-All four submissions are independently acknowledged after admission. Completing the aggregate removes
-only A/C/D. If B's group remains incomplete, expiry releases B for independent routing. An assigned
-multi-source publication must reference one complete recorded group; mixing group instances or
-publishing an incomplete assigned aggregate is rejected. Expired assigned parts publish individually.
+For **A=part1, B=part1, C=part2, D=part3**, assemble **A+C+D** and retain B's accepted handle with the
+same group. All four submissions are acknowledged after admission. Completing the aggregate removes
+all four source records after terminal processing and required handoff. B is never routed separately.
+On expiry, each received original part publishes with its duplicate handles. Publication atomically
+includes those handles even when their ingress notifications have not been processed. Mixing group
+instances or publishing an incomplete assigned aggregate is rejected.
 
 The [schema reference](15-pending-record-schema.md) specifies all 54 accepted message fields, DLR return
 metadata, multipart membership, extension types and validation rules. It does not serialize
@@ -192,7 +194,8 @@ unexpired incomplete groups schedule only the time remaining. A restart at 12:00
 12:01:00 deadline leaves ten seconds, not another full timeout.
 
 Waiting groups retain handles/metadata, not a second payload backlog. `multipartSources(groupId)` reads
-one group's retained handles, including parts still awaiting ingress notification, at most 255.
+one group's retained handles, including duplicates and parts still awaiting ingress notification,
+bounded by pending source capacity. There are at most 255 distinct ordinals.
 Payloads are fetched for assembly or expiry. Closing recovery cancels its timers; source completion
 still belongs to the coordinator after terminal processing and required DLR handoff.
 

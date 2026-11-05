@@ -179,7 +179,9 @@ class PendingRecordCodecTest {
                     PendingMessageData.capture(pending.find(repeatedId).orElseThrow()), separate);
             var decoded = codec.decode(codec.encode(record));
             assertThat(decoded.multipart()).isEqualTo(separate);
-            assertThat(decoded.multipart().groupId()).isNotEqualTo(original.groupId());
+            assertThat(decoded.multipart().groupId()).isEqualTo(original.groupId());
+            assertThat(decoded.multipart().originalSource()).isEqualTo(firstId);
+            assertThat(decoded.multipart().duplicate()).isTrue();
             assertThat(decoded.multipart().source()).isEqualTo(repeatedId);
             assertThat(decoded.message().restore().serial).isEqualTo(repeated.serial);
 

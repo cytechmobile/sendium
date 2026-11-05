@@ -67,6 +67,7 @@ public final class PendingRecordCodec {
         }
         ObjectNode node = mapper.createObjectNode();
         node.put("sourceId", part.source().value().toString());
+        node.put("originalSourceId", part.originalSource().value().toString());
         node.put("groupId", part.groupId().toString());
         node.put("ordinal", part.ordinal());
         node.put("deadline", part.deadline().toString());
@@ -101,7 +102,8 @@ public final class PendingRecordCodec {
                 uuid(PendingRecordFields.required(node, "groupId")), identity,
                 PendingRecordFields.integer(PendingRecordFields.required(node, "ordinal"), 1, identity.total()),
                 Instant.parse(PendingRecordFields.nonNullText(PendingRecordFields.required(node, "deadline"))),
-                PendingRecordFields.integer(PendingRecordFields.required(node, "groupOrder")));
+                PendingRecordFields.integer(PendingRecordFields.required(node, "groupOrder")),
+                new SourceId(uuid(PendingRecordFields.required(node, "originalSourceId"))));
     }
 
     private static UUID uuid(JsonNode node) {

@@ -75,8 +75,9 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
             var ordered = new ArrayList<>(groups.values());
             ordered.sort(Comparator.comparingLong(group -> group.identity.groupOrder()));
             for (Group group : ordered) {
+                group.validateOriginals();
                 List<SourceId> indexed = pending.multipartSources(group.identity.groupId());
-                if (indexed.size() != group.sources.size() || !Set.copyOf(indexed).equals(Set.copyOf(group.sources.values()))) {
+                if (indexed.size() != group.members.size() || !Set.copyOf(indexed).equals(group.members.keySet())) {
                     throw inconsistent();
                 }
             }
@@ -128,10 +129,11 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
         // Establish expiry before reading membership: a later admission cannot join an already-expired group.
         final Instant now = clock.instant();
         List<SourceId> retained = pending.multipartSources(group.identity.groupId());
-        if (retained.size() > group.identity.key().total() || Set.copyOf(retained).size() != retained.size()) {
+        if (Set.copyOf(retained).size() != retained.size()) {
             throw inconsistent();
         }
         group.sources.clear();
+        group.members.clear();
         for (SourceId source : retained) {
             var membership = pending.findMultipart(source).orElseThrow(PendingMultipartRecovery::inconsistent);
             if (!source.equals(membership.source())) {
@@ -139,6 +141,7 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
             }
             group.add(membership);
         }
+        group.validateOriginals();
         if (group.sources.isEmpty()) {
             forget(group);
         } else if (group.sources.size() == group.identity.key().total()) {
@@ -146,11 +149,14 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
             for (SourceId source : group.sources.values()) {
                 parts.add(payload(source));
             }
-            publisher.accept(Set.copyOf(group.sources.values()), assemble(parts));
+            publisher.accept(Set.copyOf(group.members.keySet()), assemble(parts));
             forget(group);
         } else if (!group.identity.deadline().isAfter(now)) {
             for (SourceId source : group.sources.values()) {
-                publisher.accept(Set.of(source), payload(source));
+                Set<SourceId> owned = group.members.values().stream()
+                        .filter(member -> member.originalSource().equals(source)).map(MultipartMembership::source)
+                        .collect(Collectors.toSet());
+                publisher.accept(owned, payload(source));
             }
             forget(group);
         } else {
@@ -240,6 +246,7 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
     private static final class Group {
         private final MultipartMembership identity;
         private final Map<Integer, SourceId> sources = new TreeMap<>();
+        private final Map<SourceId, MultipartMembership> members = new HashMap<>();
         private ScheduledFuture<?> timer;
 
         private Group(MultipartMembership identity) {
@@ -251,9 +258,21 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
                     !identity.deadline().equals(member.deadline()) || identity.groupOrder() != member.groupOrder()) {
                 throw inconsistent();
             }
+            members.put(member.source(), member);
+            if (member.duplicate()) {
+                return;
+            }
             SourceId previous = sources.putIfAbsent(member.ordinal(), member.source());
             if (previous != null && !previous.equals(member.source())) {
                 throw inconsistent();
+            }
+        }
+
+        private void validateOriginals() {
+            for (MultipartMembership member : members.values()) {
+                if (!member.originalSource().equals(sources.get(member.ordinal()))) {
+                    throw inconsistent();
+                }
             }
         }
     }

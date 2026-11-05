@@ -174,18 +174,18 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
             groups.removeIf(group -> !group.deadline.isAfter(now));
             MultipartGroup chosen = null;
             for (MultipartGroup group : groups) {
-                if (!group.ordinals.get(ordinal)) {
-                    chosen = group;
-                    break;
-                }
+                chosen = group;
+                break;
             }
             if (chosen == null) {
                 chosen = new MultipartGroup(key, now.plus(timeout), multipartSequence++);
                 groups.add(chosen);
             }
-            var membership = new MultipartMembership(source, chosen.id, key, ordinal, chosen.deadline, chosen.order);
+            SourceId original = chosen.sources.getOrDefault(ordinal, source);
+            var membership = new MultipartMembership(source, chosen.id, key, ordinal, chosen.deadline, chosen.order, original);
             records.put(source, new Source<>(snapshot, membership, chosen));
-            chosen.sources.put(ordinal, source);
+            chosen.sources.putIfAbsent(ordinal, source);
+            chosen.allSources.add(source);
             retainedGroups.put(chosen.id, chosen);
             openGroups.put(key, groups);
             chosen.ordinals.set(ordinal);
@@ -231,7 +231,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         try {
             requireReady(Role.PENDING);
             MultipartGroup group = retainedGroups.get(groupId);
-            return group == null ? List.of() : List.copyOf(group.sources.values());
+            return group == null ? List.of() : List.copyOf(group.allSources);
         } finally {
             lock.unlock();
         }
@@ -239,7 +239,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
 
     @Override
     public void makeHeldReady(Set<SourceId> sources, M message) {
-        Set<SourceId> checked = Set.copyOf(sources);
+        Set<SourceId> checked = new java.util.HashSet<>(sources);
         Objects.requireNonNull(message, "message");
         if (checked.isEmpty()) {
             throw new IllegalArgumentException("Ready work must reference at least one source");
@@ -267,16 +267,24 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
                     existing = accepted.ready;
                 }
             }
-            if (assignedGroup != null && checked.size() > 1) {
-                if (checked.size() != assignedGroup.key.total()) {
-                    throw invalidPublication();
-                }
+            if (assignedGroup != null) {
                 for (SourceId source : checked) {
-                    if (records.get(source).group != assignedGroup) {
+                    if (records.get(source).group != assignedGroup || !checked.contains(records.get(source).membership.originalSource())) {
                         throw invalidPublication();
                     }
                 }
+                Set<SourceId> originals = checked.stream().map(source -> records.get(source).membership.originalSource())
+                        .collect(java.util.stream.Collectors.toSet());
+                if (originals.size() > 1 && originals.size() != assignedGroup.key.total()) {
+                    throw invalidPublication();
+                }
+                for (SourceId source : assignedGroup.allSources) {
+                    if (originals.contains(records.get(source).membership.originalSource())) {
+                        checked.add(source);
+                    }
+                }
             }
+            checked = Set.copyOf(checked);
             if (existing != null) {
                 if (!existing.sources.equals(checked)) {
                     throw invalidPublication();
@@ -366,8 +374,8 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
                 if (entry != null) {
                     closeGroup(entry.group);
                     if (entry.group != null) {
-                        entry.group.sources.remove(entry.membership.ordinal());
-                        if (entry.group.sources.isEmpty()) {
+                        entry.group.allSources.remove(source);
+                        if (entry.group.allSources.isEmpty()) {
                             retainedGroups.remove(entry.group.id);
                         }
                     }
@@ -494,6 +502,7 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         private final long order;
         private final BitSet ordinals = new BitSet();
         private final NavigableMap<Integer, SourceId> sources = new TreeMap<>();
+        private final Set<SourceId> allSources = new java.util.LinkedHashSet<>();
 
         private MultipartGroup(MultipartKey key, Instant deadline, long order) {
             this.key = key;

@@ -127,6 +127,9 @@ public class MessagePartsHandler<M extends StandardMessage> {
             recovery.accepted(membership.source());
             return;
         }
+        if (membership.duplicate()) {
+            return;
+        }
         long remaining = Math.max(0, Duration.between(Instant.now(), membership.deadline()).toMillis());
         addMessagePart(part, membership.groupId().toString(), remaining);
     }

@@ -50,7 +50,7 @@ Java byte representation (-128 through 127), preserving all eight bits.
 Version 1 is the explicit accepted-source schema implemented by #343. The earlier
 complete-source development commit was not a released durable format. The
 `multipart` key is required (null for ordinary sources). Intermediate development
-records without this key are rejected, rather than silently interpreted as a complete
+records without this key or the required membership `originalSourceId` are rejected, rather than silently interpreted as a complete
 durable schema. Saved membership does not itself implement process-restart recovery;
 shared reconstruction is described below, and a physical backend follows in #339.
 
@@ -62,9 +62,10 @@ held source and assigns its group before returning `MultipartMembership`.
 `findMultipart(source)` retrieves the immutable membership through the pending port.
 Plain `admitHeld` remains available for held sources without a multipart assignment.
 
-Each **new source ID** is independently accepted. Fill the oldest open, unexpired
-matching group missing that ordinal, or create a fresh group UUID. Creation order
-breaks equal-time ties. Its saved `groupOrder` is carried in every member record,
+Each **new source ID** is accepted and retained. Join the open, unexpired matching
+group or create a fresh group UUID. The first accepted source for an ordinal wins;
+later sources reference it through `originalSourceId` and report `duplicate() == true`.
+Their payloads never replace the original or route independently. The saved `groupOrder` is carried in every member record,
 so a later recovery does not have to guess the order of groups with equal deadlines.
 Internal retries using the same retained source ID return
 its original membership and never overwrite its accepted payload. A source admitted
@@ -87,15 +88,17 @@ completion also stop accepting new members. This does not remove retained source
 or their saved membership; source removal still requires terminal processing and
 the required DLR handoff.
 
-Example: A=part1, B=part1, C=part2, D=part3 produce group G1={A,C,D} and G2={B}.
-Completing G1 never completes B. The runtime assembler uses the saved group UUID,
-not just the reference; incomplete G2 releases B for independent routing on expiry.
-The existing non-coordinated legacy entrypoints still work; their legacy duplicate
-callback is not used to merge independently admitted sources in the coordinated path.
+Example: A=part1, B=part1, C=part2, D=part3 produce one group with four accepted handles.
+Assembly uses A+C+D; B's membership references A. Terminal completion includes A/B/C/D.
+If incomplete at expiry, A publishes with B's handle and the other received original
+ordinals publish independently. Publication includes duplicate handles atomically, even
+before their ingress notifications are processed. Existing non-coordinated legacy
+entrypoints retain their first-ordinal-wins behavior.
 
 | Membership field | Stored type / meaning |
 |---|---|
 | `sourceId` | Canonical UUID text; original part UUID, must match envelope/source serial |
+| `originalSourceId` | Canonical UUID text; first accepted source for this ordinal; equals `sourceId` for an original, differs for a duplicate |
 | `groupId` | Canonical UUID text; stable assigned group instance |
 | `ordinal` | Integer in 1–`key.total` |
 | `deadline` | ISO-8601 UTC `Instant` text, preserving nanoseconds |
@@ -115,16 +118,17 @@ reassign the source on decode. Decode never calculates a new group UUID or deadl
 `PendingMultipartRecovery` reads a quiescent pending store through bounded
 `sourcesAfter` pages. It indexes only source handles and multipart metadata,
 validating the complete scan before publishing work or declaring recovery ready.
-Group members must agree on their key, group UUID, creation order and deadline;
-different sources cannot claim the same ordinal in one group instance.
+Group members must agree on their key, group UUID, creation order and deadline.
+Each ordinal has one original source; duplicates must reference that retained original
+in the same group and ordinal. Missing or conflicting originals fail reconstruction.
 
 - A complete retained group is assembled in ordinal order using detached accepted
   payloads, retaining the original source IDs for completion and DLR handling.
-- An incomplete expired group releases its received parts independently.
+- An incomplete expired group releases its original parts independently, each owning its duplicate handles.
 - An incomplete unexpired group schedules its original deadline. Reconstructing
   at 12:00:50 with deadline 12:01:00 leaves ten seconds, regardless of downtime.
-- `multipartSources(groupId)` returns only that group's retained handles, bounded
-  by the protocol maximum of 255 parts. It includes accepted parts whose ingress
+- `multipartSources(groupId)` returns only that group's retained handles, including
+  duplicates, bounded by pending source capacity. It includes accepted parts whose ingress
   notifications have not been processed. Payloads are fetched only on assembly or
   expiry; there is no second cache containing the entire backlog's message bodies.
 - A new part notification carries a source handle. Current membership and payload

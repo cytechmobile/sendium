@@ -1133,6 +1133,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                         var membership = pendingPartSources.get(event.pMsg);
                         if (membership != null) {
                             messagePartsHandler.addAcceptedPart(event.pMsg, membership);
+                            if (membership.duplicate()) {
+                                pendingPartSources.remove(event.pMsg);
+                            }
                         }
                     }
                     // A replayed raw event may already have handed its sources to a retained part or ready event.

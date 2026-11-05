@@ -27,9 +27,10 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
     SourceId admitHeld(SourceId source, M message);
 
     /**
-     * Atomically accepts a held part with its immutable membership before acknowledgement. Every new source ID
-     * is independent: fill the oldest unexpired open matching group missing its ordinal, or create a new group.
-     * Creation order breaks ties. The first accepted part fixes the group's absolute deadline using timeout;
+     * Atomically accepts a held part with its immutable membership before acknowledgement. Join the open,
+     * unexpired matching group or create a new group. The first accepted source for an ordinal wins;
+     * later sources report duplicate membership referencing that original source, without replacing its payload.
+     * All accepted handles remain owned until terminal completion. The first part fixes the deadline using timeout;
      * later arrivals never extend it. An internal retry of a retained multipart source returns its original membership.
      * A source already admitted without multipart membership cannot be converted through this method.
      */
@@ -39,7 +40,7 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
     Optional<MultipartMembership> findMultipart(SourceId source);
 
     /**
-     * Returns retained handles assigned to one group, bounded by its declared total (at most 255).
+     * Returns retained handles assigned to one group, including duplicates, bounded by pending source capacity.
      * Includes members awaiting ingress processing, so expiry does not depend on notification order.
      * Unknown or fully completed groups return an empty list; backend failures must still propagate.
      */
@@ -65,8 +66,10 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * While all sources remain retained, repeating the exact source set preserves the first published
      * payload and cannot duplicate work, including after selection/routing. Missing, ordinarily admitted,
      * or differently grouped sources fail explicitly. The caller owns assembly/expiry policy.
-     * Assigned multipart sources may be published together only as their complete recorded group;
-     * partial/expired assigned parts are published individually, never mixed with another group or unassigned held sources.
+     * Assigned multipart ordinals may be published together only as their complete recorded group;
+     * partial/expired ordinals are published individually, never mixed with another group or unassigned held sources.
+     * Publication of original sources atomically includes every retained duplicate of those ordinals, even if
+     * its ingress notification has not been processed. A duplicate cannot be published without its original.
      */
     void makeHeldReady(Set<SourceId> sources, M message);
 

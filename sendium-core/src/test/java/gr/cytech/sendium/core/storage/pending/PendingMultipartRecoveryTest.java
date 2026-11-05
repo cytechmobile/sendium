@@ -47,17 +47,34 @@ class PendingMultipartRecoveryTest {
     @Test
     void reconstructsRecordedGroupAssignments() {
         try (var fixture = new Fixture()) {
-            SourceId a = fixture.part(1, 3, "A");
-            SourceId b = fixture.part(1, 3, "B");
+            SourceId a = fixture.part(1, 3, "A", new SourceId(new UUID(0, 20)));
+            SourceId b = fixture.part(1, 3, "B", new SourceId(new UUID(0, 10)));
             SourceId c = fixture.part(2, 3, "C");
             SourceId d = fixture.part(3, 3, "D");
             fixture.recover(2);
-            assertThat(fixture.projections.keySet()).containsExactly(Set.of(a, c, d));
-            assertThat(fixture.projections.get(Set.of(a, c, d)).body).isEqualTo("ACD");
-            assertThat(fixture.bindings).doesNotContainKey(b);
+            assertThat(fixture.projections.keySet()).containsExactly(Set.of(a, b, c, d));
+            assertThat(fixture.projections.get(Set.of(a, b, c, d)).body).isEqualTo("ACD");
+            assertThat(fixture.bindings).containsEntry(b, Set.of(a, b, c, d));
             assertThat(fixture.port.find(b)).isPresent();
             assertThat(fixture.recovery.isReady()).isTrue();
             verify(fixture.port, never()).admitPart(any(), any(), any());
+        }
+    }
+
+    @Test
+    void missingDuplicateOriginalFailsBeforePublishingAnyGroup() throws Exception {
+        try (var fixture = new Fixture()) {
+            fixture.part(1, 1, "otherwise ready");
+            fixture.part(1, 3, "original");
+            SourceId duplicate = fixture.part(1, 3, "duplicate");
+            fixture.seal();
+            var mapper = new ObjectMapper(new CBORFactory());
+            ObjectNode record = (ObjectNode) mapper.readTree(fixture.records.get(duplicate));
+            ((ObjectNode) record.get("multipart")).put("originalSourceId", UUID.randomUUID().toString());
+            fixture.records.put(duplicate, mapper.writeValueAsBytes(record));
+            assertThatThrownBy(() -> fixture.recover(1)).isInstanceOf(OutboundStorageException.class);
+            assertThat(fixture.projections).isEmpty();
+            assertThat(fixture.recovery.isReady()).isFalse();
         }
     }
 
@@ -81,11 +98,13 @@ class PendingMultipartRecoveryTest {
     void releasesExpiredReceivedSources() {
         try (var fixture = new Fixture()) {
             SourceId first = fixture.part(1, 3, "first");
+            SourceId duplicate = fixture.part(1, 3, "must not replace first");
             SourceId third = fixture.part(3, 3, "third");
             fixture.clock.now = fixture.clock.now.plusSeconds(120);
             fixture.recover(1);
-            assertThat(fixture.projections.keySet()).containsExactlyInAnyOrder(Set.of(first), Set.of(third));
-            assertThat(fixture.projections.get(Set.of(first)).binheader).isEqualTo("0500037F0301");
+            assertThat(fixture.projections.keySet()).containsExactlyInAnyOrder(Set.of(first, duplicate), Set.of(third));
+            assertThat(fixture.projections.get(Set.of(first, duplicate)).binheader).isEqualTo("0500037F0301");
+            assertThat(fixture.projections.get(Set.of(first, duplicate)).body).isEqualTo("first");
             assertThat(fixture.scheduler.active()).isEmpty();
         }
     }
@@ -174,7 +193,7 @@ class PendingMultipartRecoveryTest {
             assertThat(fixture.maximumPage).isLessThanOrEqualTo(5);
             assertThat(fixture.pages).isEqualTo(6);
             assertThat(fixture.payloadReads).isZero();
-            assertThat(fixture.scheduler.active()).hasSize(23);
+            assertThat(fixture.scheduler.active()).hasSize(1);
         }
     }
 
@@ -335,8 +354,11 @@ class PendingMultipartRecoveryTest {
         }
 
         private SourceId part(int ordinal, int total, String body) {
+            return part(ordinal, total, body, new SourceId(UUID.randomUUID()));
+        }
+
+        private SourceId part(int ordinal, int total, String body, SourceId source) {
             StandardMessage message = new StandardMessage();
-            SourceId source = new SourceId(UUID.randomUUID());
             message.serial = source.value().toString();
             message.owner_id = "account";
             message.systemId = "system";

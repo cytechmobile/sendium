@@ -18,6 +18,7 @@ import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import utils.OutboundIngressFixture;
 
 import java.sql.Timestamp;
@@ -218,8 +219,9 @@ class SmppLifecycleAdmissionTest {
         }
     }
 
-    @Test
-    void repeatedOrdinalRemainsIndependentAfterOriginalAggregateCompletes() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repeatedOrdinalKeepsFirstPayloadAndCompletesAllAcceptedSources(boolean delayDuplicateNotification) throws Exception {
         try (var lifecycle = new OutboundIngressFixture(4); var worker = new TestWorker()) {
             worker.setIngressCoordinator(lifecycle.coordinator);
             worker.enqueueIn(submission("0500037F0301", "first-", 1));
@@ -228,7 +230,10 @@ class SmppLifecycleAdmissionTest {
             SourceId repeatedSource = new SourceId(UUID.fromString(repeated.pMsg.serial));
             worker.enqueueIn(submission("0500037F0302", "second-", 3));
             worker.enqueueIn(submission("0500037F0303", "third", 4));
-            worker.processQueued();
+            var raw = worker.queued();
+            var duplicateEvents = raw.stream().filter(event -> event.pMsg == repeated.pMsg).toList();
+            worker.handleIngressMessages(delayDuplicateNotification
+                    ? raw.stream().filter(event -> event.pMsg != repeated.pMsg).toList() : raw);
             var ready = worker.getInEventQueue().remove();
             assertThat(ready.sourceIds).hasSize(3);
             assertThat(ready.sourceIds).doesNotContain(repeatedSource);
@@ -237,19 +242,46 @@ class SmppLifecycleAdmissionTest {
             worker.handleIngressMessages(List.of(ready));
             lifecycle.coordinator.selectToRouter(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            assertThat(selected.sources()).hasSize(3);
-            lifecycle.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
+            assertThat(selected.sources()).hasSize(4).contains(repeatedSource);
+            var handoff = new CompletableFuture<Void>();
+            var completion = lifecycle.coordinator.discard(selected.id(), handoff).toCompletableFuture();
+            assertThat(completion).isNotDone();
+            selected.sources().forEach(source -> assertThat(lifecycle.pending.find(source)).isPresent());
+            handoff.complete(null);
+            completion.join();
             ready.sourceIds.forEach(source -> assertThat(lifecycle.pending.find(source)).isEmpty());
-            assertThat(lifecycle.pending.find(repeatedSource)).isPresent();
-            worker.expire(repeated.pMsg, lifecycle.pending);
-            worker.processQueued();
-            assertThat(lifecycle.coordinator.selectToRouter(1)).isEqualTo(1);
-            var separate = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
-            assertThat(separate.sources()).containsExactly(repeatedSource);
-            assertThat(separate.message().body).isEqualTo("repeated");
-            lifecycle.coordinator.discard(separate.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
+            assertThat(lifecycle.pending.find(repeatedSource)).isEmpty();
+            if (delayDuplicateNotification) {
+                worker.handleIngressMessages(duplicateEvents);
+            }
+            assertThat(worker.getInEventQueue()).isEmpty();
+            assertThat(lifecycle.coordinator.selectToRouter(1)).isZero();
             assertThat(worker.responses).hasSize(4).allSatisfy(response ->
                     assertThat(response.getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK));
+        }
+    }
+
+    @Test
+    void expiredOriginalOwnsDuplicateWithoutRoutingItsPayload() throws Exception {
+        try (var lifecycle = new OutboundIngressFixture(2); var worker = new TestWorker()) {
+            worker.setIngressCoordinator(lifecycle.coordinator);
+            var original = submission("0500037F0301", "first", 1);
+            var duplicate = submission("0500037F0301", "ignored", 2);
+            worker.enqueueIn(original);
+            worker.enqueueIn(duplicate);
+            var duplicateSource = new SourceId(UUID.fromString(duplicate.pMsg.serial));
+            var raw = worker.queued();
+            worker.handleIngressMessages(raw.stream().filter(event -> event.pMsg == original.pMsg).toList());
+            worker.expire(original.pMsg, lifecycle.pending);
+            worker.processQueued();
+            assertThat(lifecycle.coordinator.selectToRouter(2)).isEqualTo(1);
+            var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            assertThat(selected.sources()).hasSize(2).contains(duplicateSource);
+            assertThat(selected.message().body).isEqualTo("first");
+            lifecycle.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
+            selected.sources().forEach(source -> assertThat(lifecycle.pending.find(source)).isEmpty());
+            worker.handleIngressMessages(raw.stream().filter(event -> event.pMsg == duplicate.pMsg).toList());
+            assertThat(worker.getInEventQueue()).isEmpty();
         }
     }
 
