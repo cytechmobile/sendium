@@ -22,7 +22,9 @@ public final class HttpAdmissionClient implements AutoCloseable {
     public enum Problem { INVALID_ACKNOWLEDGEMENT, UNEXPECTED_STATUS, AUTHENTICATION_FAILURE, TRANSPORT_FAILURE }
     public record Submission(String token, CompletableFuture<MessageLedger.Admission> completion) { }
     private final RunConfig config;
-    private final HttpIngressSettings settings;
+    private final String requestPrefix;
+    private final String callbackPrefix;
+    private final String callbackSuffix;
     private final MessageLedger ledger;
     private final HttpGatewayProtocol protocol;
     private final HttpClient client;
@@ -40,9 +42,20 @@ public final class HttpAdmissionClient implements AutoCloseable {
             throw new IllegalArgumentException("HTTP ingress requires callback settings when delivery reports are enabled");
         }
         this.config = config;
-        this.settings = settings;
         this.ledger = ledger;
         this.protocol = java.util.Objects.requireNonNull(protocol);
+        requestPrefix = settings.admissionUri().toASCIIString()
+                + "?username=" + encode(settings.username()) + "&password=" + encode(settings.password())
+                + "&from=" + encode(settings.source()) + "&to=" + encode(settings.destination()) + "&text=";
+        if (config.dlrEnabled()) {
+            // The callback is itself a query value: its token needs a second encoding pass.
+            callbackPrefix = "&dlr-url=" + encode(settings.callbackBase().toASCIIString() + "?token=");
+            callbackSuffix = encode("&messageId=" + (protocol == HttpGatewayProtocol.KANNEL ? "%F" : "%s")
+                    + "&status=%d") + (protocol == HttpGatewayProtocol.KANNEL ? "&dlr-mask=1" : "");
+        } else {
+            callbackPrefix = "";
+            callbackSuffix = "";
+        }
         client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofMillis(config.admissionTimeoutMillis())).build();
@@ -114,16 +127,12 @@ public final class HttpAdmissionClient implements AutoCloseable {
     }
 
     private URI uri(String token) {
-        String query = "username=" + encode(settings.username()) + "&password=" + encode(settings.password())
-                + "&from=" + encode(settings.source()) + "&to=" + encode(settings.destination())
-                + "&text=" + encode(token) + "&coding=0&charset=UTF-8";
+        String encodedToken = encode(token);
+        String request = requestPrefix + encodedToken + "&coding=0&charset=UTF-8";
         if (config.dlrEnabled()) {
-            String callback = settings.callbackBase().toASCIIString() + "?token=" + encode(token)
-                    + "&messageId=" + (protocol == HttpGatewayProtocol.KANNEL ? "%F" : "%s") + "&status=%d";
-            query += "&dlr-url=" + encode(callback);
-            if (protocol == HttpGatewayProtocol.KANNEL) { query += "&dlr-mask=1"; }
+            request += callbackPrefix + encode(encodedToken) + callbackSuffix;
         }
-        return URI.create(settings.admissionUri().toASCIIString() + "?" + query);
+        return URI.create(request);
     }
 
     static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
