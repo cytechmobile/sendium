@@ -14,6 +14,7 @@ public sealed interface ProviderDlrEvent {
                 source.getSourceAddr(), source.getDestAddr(), source.getForwardDlrUrl());
         copy.setDeliveryChannel(source.getDeliveryChannel());
         copy.setDlrMask(source.getDlrMask());
+        copy.setHttpCallbackFormat(source.getHttpCallbackFormat());
         copy.setReassembledParts(source.getReassembledParts());
         return copy;
     }

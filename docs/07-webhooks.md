@@ -4,7 +4,37 @@ Sendium can call external HTTP endpoints for delivery receipts and mobile-origin
 
 ## Delivery Receipt Callbacks
 
-HTTP submissions request callbacks with both `dlr-url` and `dlr-mask`. Sendium carries the callback URL and mask as body-free metadata, persists them after the upstream provider accepts or rejects submission, and forwards the first terminal receipt only if its event is selected. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
+Native JSON submissions use an optional `callbackUrl`; Kannel-compatible submissions use `dlr-url`
+and `dlr-mask`. Both require DLR persistence and its PostgreSQL datasource to be enabled.
+
+### Native JSON delivery callbacks
+
+For [POST /api/v1/messages](06-http-api.md#native-json-api), provide a plain HTTP(S) `callbackUrl`.
+No host preapproval or receipt mask is required. Sendium posts `Content-Type: application/json`:
+
+```json
+{
+  "messageId": "123e4567-e89b-12d3-a456-426614174000",
+  "status": "delivered",
+  "errorCode": null
+}
+```
+
+`messageId` matches the submission's 202 response. `status` is `delivered` or `failed`; provider
+submission rejection also produces `failed`. `errorCode` is the stored provider code, or null if
+absent. Neither API credentials nor message text are included. The URL is used literally, without
+Kannel placeholder substitution, and redirects are not followed. Intermediate provider receipts are
+not forwarded. Existing multipart handling returns the first terminal outcome, not an aggregation of
+all segments' final delivery states.
+
+A 2xx response completes the callback; other statuses, timeouts and transport failures use the
+[shared retry policy](13-dlr-persistence.md#http-callback-formats): five-second timeout, hourly retries,
+up to 10 attempts. The format and retry state survive restart. Receivers must deduplicate by
+`messageId` because delivery is at-least-once. Omitting `callbackUrl` disables native callbacks.
+
+### Kannel delivery callbacks
+
+Kannel HTTP submissions request callbacks with both `dlr-url` and `dlr-mask`. Sendium carries the callback URL and mask as body-free metadata, persists them after the upstream provider accepts or rejects submission, and forwards the first terminal receipt only if its event is selected. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
 
 Supported masks are `1` (delivered), `2` (failed), and `3` (both). `0` or an omitted mask disables receipt handling even when a callback URL is supplied, following the pinned Kannel baseline's disabled/undefined mask semantics. Negative values and unsupported bits, including `4`, `8`, and `16`, return HTTP 400. A nonzero mask requires a nonblank callback URL. SMSC submission acceptance/rejection callbacks are not supported; a submission rejection is not treated as a failed handset receipt. Failed terminal receipts include undeliverable, expired, and rejected receipt outcomes under the existing terminal status mapping.
 
@@ -57,7 +87,7 @@ Baseline: Kannel 1.4.5, pinned commit [`4048b41`](https://github.com/markjeee/ka
 | `4` | Buffered or accepted for processing; retained as a compatibility mapping and not normally emitted by final-only receipt handling. |
 | `8` | Submitted to SMSC; retained as a compatibility mapping and not normally emitted by final-only receipt handling. |
 
-DLR callbacks are sent as HTTP `GET` requests. The durable dispatcher atomically claims PostgreSQL rows on a one-second schedule in non-overlapping batches of up to 100, with each callback dispatched on its own virtual thread and at most 10 callbacks in flight per host. A running batch delays the next check. Claims prevent another Sendium replica from selecting the same callback until the configurable lease expires. Each request has a five-second timeout, and redirects are not followed; only response statuses from `200` to `299` are treated as successful. Failures on attempts 1 through 9 are scheduled one hour later. A failure on attempt 10 marks the row `FAILED`, and pending or failed rows are eligible for cleanup seven days after provider resolution. A malformed callback URI fails immediately after its claimed attempt is counted.
+Kannel DLR callbacks are sent as HTTP `GET` requests. The durable dispatcher atomically claims PostgreSQL rows on a one-second schedule in non-overlapping batches of up to 500 across both HTTP formats, with each callback dispatched on its own virtual thread and at most 10 callbacks in flight per host. A running batch delays the next check. Claims prevent another Sendium replica from selecting the same callback until the configurable lease expires. Each request has a five-second timeout, and redirects are not followed; only response statuses from `200` to `299` are treated as successful. Failures on attempts 1 through 9 are scheduled one hour later. A failure on attempt 10 marks the row `FAILED`, and pending or failed rows are eligible for cleanup seven days after provider resolution. A malformed callback URI fails immediately after its claimed attempt is counted.
 
 The retry schedule and attempt count survive a Sendium restart, but delivery is at-least-once rather than exactly-once. A crash or storage failure after the receiver accepts a callback can cause another request. Callback handlers must be idempotent and should use the gateway message ID supplied through `%I` as their deduplication key.
 

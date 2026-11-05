@@ -1,10 +1,12 @@
 package gr.cytech.sendium.core.worker;
 
+import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @RegisterForReflection
 public class MessageState implements Serializable {
@@ -19,6 +21,7 @@ public class MessageState implements Serializable {
     private String providerMessageId;
     private String forwardDlrUrl;
     private int dlrMask = 3;
+    private HttpCallbackFormat httpCallbackFormat = HttpCallbackFormat.KANNEL_GET;
     private List<String> reassembledParts;
     private MessageStatus status;
     private Integer dlrState;
@@ -91,6 +94,14 @@ public class MessageState implements Serializable {
 
     public void setDlrMask(int dlrMask) {
         this.dlrMask = dlrMask;
+    }
+
+    public HttpCallbackFormat getHttpCallbackFormat() {
+        return httpCallbackFormat;
+    }
+
+    public void setHttpCallbackFormat(HttpCallbackFormat httpCallbackFormat) {
+        this.httpCallbackFormat = Objects.requireNonNull(httpCallbackFormat, "httpCallbackFormat");
     }
 
     public MessageStatus getStatus() {

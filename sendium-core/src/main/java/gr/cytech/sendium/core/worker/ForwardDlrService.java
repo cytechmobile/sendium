@@ -1,5 +1,7 @@
 package gr.cytech.sendium.core.worker;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -27,6 +29,7 @@ import java.util.concurrent.Semaphore;
 @IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
+    private static final ObjectMapper CALLBACK_JSON = new ObjectMapper();
 
     private static final int DUE_BATCH_SIZE = 500;
     private static final int MAX_IN_FLIGHT_PER_HOST = 10;
@@ -90,7 +93,7 @@ public class ForwardDlrService {
         // Submission rejection is Kannel bit 16, not a failed handset receipt (bit 2).
         int eventType = "provider_rejected".equals(dueState.getLastDeliveryResult()) ?
                 16 : mapToKannelType(dueState.getStatus());
-        if ((dueState.getDlrMask() & eventType) == 0) {
+        if (dueState.getHttpCallbackFormat() == HttpCallbackFormat.KANNEL_GET && (dueState.getDlrMask() & eventType) == 0) {
             completeDelivery(gatewayMsgId, dueState.getDeliveryAttemptCount());
             return;
         }
@@ -134,20 +137,33 @@ public class ForwardDlrService {
         if (callbackTemplate == null || callbackTemplate.isBlank()) {
             throw new IllegalArgumentException("Missing callback URI");
         }
-        String forwardUrl = buildForwardUrl(
-                callbackTemplate, state.getGatewayMsgId(), state.getProviderMessageId(),
-                mapToKannelType(state.getStatus()));
+        boolean jsonPost = state.getHttpCallbackFormat() == HttpCallbackFormat.JSON_POST;
+        String forwardUrl = jsonPost ? callbackTemplate : buildForwardUrl(
+                callbackTemplate, state.getGatewayMsgId(), state.getProviderMessageId(), mapToKannelType(state.getStatus()));
         URI uri = URI.create(forwardUrl);
         String scheme = uri.getScheme();
         String normalizedScheme = scheme == null ? "" : scheme.toLowerCase(Locale.ROOT);
         if (uri.getHost() == null || !(normalizedScheme.equals("http") || normalizedScheme.equals("https"))) {
             throw new IllegalArgumentException("Callback URI must use HTTP or HTTPS");
         }
-        return HttpRequest.newBuilder()
+        var request = HttpRequest.newBuilder()
                 .uri(uri)
-                .timeout(REQUEST_TIMEOUT)
-                .GET()
-                .build();
+                .timeout(REQUEST_TIMEOUT);
+        if (jsonPost) {
+            String status = switch (state.getStatus()) {
+                case DELIVERED -> "delivered";
+                case FAILED -> "failed";
+                default -> throw new IllegalArgumentException("Native callback requires a terminal outcome");
+            };
+            var payload = CALLBACK_JSON.createObjectNode()
+                    .put("messageId", state.getGatewayMsgId())
+                    .put("status", status)
+                    .put("errorCode", state.getErrorCode());
+            return request.header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+                    .build();
+        }
+        return request.GET().build();
     }
 
     private void completeDelivery(String gatewayMsgId, int attempt) {

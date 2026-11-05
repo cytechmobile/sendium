@@ -87,6 +87,7 @@ class PendingRecordMappingTest {
     @Test
     void preservesNullCollectionsAndBothDlrChannels() {
         for (var metadata : List.of(DlrReturnMetadata.http("account", "sender", "recipient", "https://example.test/dlr"),
+                DlrReturnMetadata.httpJson("account", "sender", "recipient", "https://example.test/callback"),
                 DlrReturnMetadata.smpp("account", "system", "sender", "recipient"))) {
             StandardMessage message = message();
             message.dlrReturnMetadata = metadata;
