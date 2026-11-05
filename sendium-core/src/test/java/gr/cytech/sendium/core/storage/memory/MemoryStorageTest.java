@@ -115,8 +115,11 @@ class MemoryStorageTest {
     void advancingTheClockMakesDeferredWorkEligible() throws Exception {
         AtomicReference<Instant> time = new AtomicReference<>(NOW);
         Clock clock = new Clock() {
+            @Override
             public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+            @Override
             public Clock withZone(java.time.ZoneId zone) { return this; }
+            @Override
             public Instant instant() { return time.get(); }
         };
         try (var pending = new MemoryPendingMessageStore<TestMessage>(1, TestMessage::copy, msg -> msg.available);

@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SMS gateway performance results v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "provenance", "configuration", "validity", "overall", "cohortIntervals", "eventIntervals", "resources", "drain", "measurementMetadata", "diagnostics"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "provenance": {
+      "type": "object",
+      "required": ["branch", "applicationCommit", "harnessRevision", "workflowRunUrl", "runIdentity", "artifacts"],
+      "properties": {
+        "branch": { "type": "string", "minLength": 1 },
+        "applicationCommit": { "anyOf": [{ "$ref": "#/$defs/commit" }, { "type": "null" }] },
+        "harnessRevision": { "$ref": "#/$defs/commit" },
+        "workflowRunUrl": { "type": ["string", "null"] },
+        "runIdentity": { "type": "string", "minLength": 1 },
+        "artifacts": { "type": "array", "items": { "type": "object", "required": ["name", "sha256"], "properties": { "name": { "type": "string" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } } }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "required": ["workload", "application", "infrastructure"],
+      "properties": {
+        "workload": { "$ref": "run-config.schema.json" },
+        "application": {
+          "type": "object", "required": ["jvmArguments", "connections", "dlrStorage"],
+          "properties": {
+            "benchmarkTarget": { "enum": ["sendium", "kannel"] },
+            "runtime": { "enum": ["jvm", "native", "kannel"] },
+            "source": { "$ref": "#/$defs/kannelSource" },
+            "messageStore": { "enum": ["spool", "file", "disabled"] },
+            "jvmArguments": { "type": "array", "items": { "type": "string" } },
+            "nativeArguments": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^-Xm[sx][1-9][0-9]*[mg]$" } },
+            "nativeBuild": {
+              "type": "object", "additionalProperties": false,
+              "required": ["schemaVersion", "architecture", "builderImage", "compilerVersion", "buildArguments"],
+              "properties": {
+                "schemaVersion": { "const": 1 }, "architecture": { "enum": ["arm64", "x86_64"] },
+                "builderImage": { "type": "string", "pattern": "^quay\\.io/quarkus/ubi9-quarkus-mandrel-builder-image@sha256:[a-f0-9]{64}$" },
+                "compilerVersion": { "type": "string", "minLength": 1, "maxLength": 8192 },
+                "buildArguments": { "const": ["-march=compatibility"] }
+              }
+            },
+            "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled", "internal"] }
+          },
+          "allOf": [{ "if": { "required": ["runtime"], "properties": { "runtime": { "const": "native" } } },
+                      "then": { "required": ["nativeArguments"], "properties": { "jvmArguments": { "maxItems": 0 } } } }]
+        },
+        "infrastructure": { "type": "object", "required": ["preset", "region", "harness", "database"], "properties": { "preset": { "type": "string" }, "region": { "type": "string" }, "sendium": { "type": "object" }, "kannel": { "type": "object" }, "harness": { "type": "object" }, "database": { "type": "object", "properties": { "resourceMetricsRequired": { "type": "boolean" }, "accountId": { "type": "string", "pattern": "^[0-9]{12}$" } } } } }
+      }
+    },
+    "validity": { "type": "object", "required": ["status", "reasons"], "properties": { "status": { "enum": ["valid", "inconclusive", "failed"] }, "reasons": { "type": "array", "items": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1 }, "message": { "type": "string", "minLength": 1 } } } } } },
+    "overall": { "$ref": "#/$defs/measurements" },
+    "cohortIntervals": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/measurements" }, { "type": "object", "required": ["startOffsetSeconds", "endOffsetSeconds"], "properties": { "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "endOffsetSeconds": { "$ref": "#/$defs/nonnegative" } } }] } },
+    "eventIntervals": { "type": "array", "items": { "type": "object", "required": ["phase", "startOffsetSeconds", "durationSeconds", "providerResponses", "receiptsForwarded"], "properties": { "phase": { "enum": ["measurement", "drain"] }, "startOffsetSeconds": { "$ref": "#/$defs/nonnegative" }, "durationSeconds": { "type": "number", "exclusiveMinimum": 0 }, "providerArrivals": { "$ref": "#/$defs/count" }, "providerResponses": { "$ref": "#/$defs/count" }, "receiptsGenerated": { "$ref": "#/$defs/count" }, "receiptsForwarded": { "$ref": "#/$defs/count" }, "outstanding": { "$ref": "#/$defs/backlog" }, "rates": { "$ref": "#/$defs/outputRates" } } } },
+    "resources": { "type": "object", "required": ["harness", "cpuCredits"], "properties": { "sendium": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "kannel": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "harness": { "type": "array", "items": { "$ref": "#/$defs/resourceSample" } }, "cpuCredits": { "type": "array", "items": { "$ref": "#/$defs/creditState" } }, "database": { "$ref": "#/$defs/rdsEvidence" } } },
+    "drain": { "type": "object", "required": ["durationSeconds", "timeoutReached", "unfinishedAccepted", "pendingAdmission"], "properties": { "durationSeconds": { "$ref": "#/$defs/nonnegative" }, "timeoutReached": { "type": "boolean" }, "unfinishedAccepted": { "$ref": "#/$defs/count" }, "pendingAdmission": { "$ref": "#/$defs/count" } } },
+    "measurementMetadata": { "type": "object", "required": ["histogramAlgorithm", "histogramPrecision", "histogramOverflowCount", "duplicateDetectionHorizonSeconds", "limitations"], "properties": { "histogramAlgorithm": { "type": "string" }, "histogramPrecision": { "type": "object" }, "histogramOverflowCount": { "$ref": "#/$defs/count" }, "duplicateDetectionHorizonSeconds": { "$ref": "#/$defs/nonnegative" }, "inputTiming": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/inputTiming" }] }, "generatorPhases": { "type": "array", "items": { "type": "object", "properties": { "pacingMode": { "type": "string" }, "delayedByAtLeastOnePeriod": { "$ref": "#/$defs/count" }, "submissionLateness": { "$ref": "#/$defs/distribution" } } } }, "limitations": { "type": "array", "items": { "type": "string" } } } },
+    "diagnostics": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [{
+    "if": { "properties": { "configuration": { "properties": { "application": {
+      "required": ["benchmarkTarget"], "properties": { "benchmarkTarget": { "const": "kannel" } }
+    } } } } },
+    "then": {
+      "properties": {
+        "provenance": { "properties": { "applicationCommit": { "type": "null" } } },
+        "configuration": { "properties": {
+          "workload": { "properties": { "ingressMode": { "const": "http" } } },
+          "application": {
+            "required": ["runtime", "source", "messageStore"],
+            "properties": { "runtime": { "const": "kannel" }, "dlrStorage": { "enum": ["internal", "postgresql"] },
+              "jvmArguments": { "maxItems": 0 }, "nativeArguments": false, "nativeBuild": false }
+          },
+          "infrastructure": { "required": ["kannel"], "properties": { "sendium": false } }
+        }, "allOf": [{
+          "if": { "properties": { "application": { "properties": { "dlrStorage": { "const": "postgresql" } } } } },
+          "then": { "properties": { "infrastructure": { "properties": { "database": {
+            "required": ["provisioned", "engine", "sslMode"],
+            "properties": { "provisioned": { "type": ["boolean", "null"] }, "engine": { "const": "postgresql" }, "sslMode": { "const": "verify-full" } }
+          } } } } }
+        }] },
+        "resources": { "required": ["kannel"], "properties": { "sendium": false } }
+      },
+      "allOf": [{
+        "if": { "properties": { "measurementMetadata": { "required": ["observationAvailable"], "properties": { "observationAvailable": { "const": false } } } } },
+        "then": { "properties": { "validity": { "properties": { "status": { "const": "failed" } } } } },
+        "else": { "if": { "properties": { "configuration": { "properties": { "application": { "properties": { "dlrStorage": { "const": "postgresql" } } } } } } },
+                  "then": { "properties": { "configuration": { "properties": { "infrastructure": { "properties": { "database": { "properties": { "provisioned": { "const": true } } } } } } } } } }
+      }]
+    },
+    "else": {
+      "properties": {
+        "provenance": { "properties": { "applicationCommit": { "$ref": "#/$defs/commit" } } },
+        "configuration": { "properties": {
+          "application": { "properties": { "runtime": { "enum": ["jvm", "native"] },
+            "dlrStorage": { "enum": ["postgresql", "disabled"] } } },
+          "infrastructure": { "required": ["sendium"], "properties": { "kannel": false } }
+        } },
+        "resources": { "required": ["sendium"], "properties": { "kannel": false } }
+      }
+    }
+  }],
+  "$defs": {
+    "kannelSource": {
+      "type": "object", "required": ["version", "archiveSha256", "patchArchiveSha256", "patches"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+        "archiveSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "patchArchiveSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "patches": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "pattern": "\\S" } }
+      }
+    },
+    "rdsEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "namespace", "runIdentity", "collectionStartedUtc", "database", "phases", "metrics", "collectionIssues"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "namespace": { "const": "AWS/RDS" },
+        "runIdentity": { "type": "string", "pattern": "^gh-[0-9]+-[0-9]+$" },
+        "collectionStartedUtc": { "type": "string", "format": "date-time" },
+        "database": {
+          "type": "object", "additionalProperties": false,
+          "required": ["identifier", "instanceClass", "partition", "region", "accountId", "repository", "runIdentity", "verified", "arn"],
+          "properties": {
+            "identifier": { "type": "string", "maxLength": 63, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+            "instanceClass": { "type": "string", "pattern": "^db\\.[a-z][a-z0-9]*\\.[a-z0-9]+$" },
+            "partition": { "enum": ["aws", "aws-cn", "aws-us-gov"] }, "region": { "type": "string", "minLength": 3, "maxLength": 32 },
+            "accountId": { "type": "string", "pattern": "^[0-9]{12}$" }, "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+            "runIdentity": { "type": "string", "pattern": "^gh-[0-9]+-[0-9]+$" }, "verified": { "type": "boolean" },
+            "arn": { "type": ["string", "null"] }
+          }
+        },
+        "phases": {
+          "type": "object", "additionalProperties": false, "required": ["warmup", "measurement", "drain"],
+          "properties": { "warmup": { "$ref": "#/$defs/rdsPhase" }, "measurement": { "$ref": "#/$defs/rdsPhase" }, "drain": { "$ref": "#/$defs/rdsPhase" } }
+        },
+        "metrics": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/rdsMetric" } },
+        "collectionIssues": { "$ref": "#/$defs/rdsIssues" }
+      }
+    },
+    "rdsPhase": { "type": "object", "additionalProperties": false, "required": ["start", "end"], "properties": { "start": { "type": "string", "format": "date-time" }, "end": { "type": "string", "format": "date-time" } } },
+    "rdsIssues": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$" } },
+    "rdsNumber": { "type": ["number", "null"], "minimum": 0, "maximum": 1e100 },
+    "rdsCoverage": {
+      "type": "object", "required": ["expectedBuckets", "completeBuckets", "missingBucketStarts"],
+      "properties": {
+        "expectedBuckets": { "type": "integer", "minimum": 0, "maximum": 1440 }, "completeBuckets": { "type": "integer", "minimum": 0, "maximum": 1440 },
+        "missingBucketStarts": { "type": "array", "maxItems": 1440, "items": { "type": "string", "format": "date-time" } }
+      }
+    },
+    "rdsPhaseSummary": {
+      "allOf": [{ "$ref": "#/$defs/rdsCoverage" }, { "type": "object", "required": ["containedBuckets", "boundaryBuckets", "statisticsBasis", "average", "minimum", "maximum", "sum"],
+        "properties": {
+          "containedBuckets": { "type": "integer", "minimum": 0, "maximum": 1440 }, "boundaryBuckets": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "statisticsBasis": { "const": "complete buckets fully contained in phase; averages weighted by CloudWatch SampleCount" },
+          "average": { "$ref": "#/$defs/rdsNumber" }, "minimum": { "$ref": "#/$defs/rdsNumber" }, "maximum": { "$ref": "#/$defs/rdsNumber" },
+          "sum": { "type": ["number", "null"], "minimum": 0, "maximum": 1e104 }
+        }
+      }]
+    },
+    "rdsMetric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "unit", "periodSeconds", "statistics", "applicable", "queryStart", "queryEnd", "datapoints", "attempts", "attemptIssues", "collectionIssues", "coverage", "summary"],
+      "properties": {
+        "name": { "enum": ["CPUUtilization", "FreeableMemory", "SwapUsage", "DatabaseConnections", "ReadIOPS", "WriteIOPS", "ReadThroughput", "WriteThroughput", "ReadLatency", "WriteLatency", "DiskQueueDepth", "FreeStorageSpace", "CPUCreditBalance", "CPUCreditUsage", "CPUSurplusCreditBalance", "CPUSurplusCreditsCharged"] },
+        "unit": { "enum": ["Percent", "Bytes", "Count", "Count/Second", "Bytes/Second", "Seconds"] }, "periodSeconds": { "enum": [60, 300] },
+        "statistics": { "enum": [["Average", "Minimum", "Maximum", "SampleCount"], ["Sum"]] }, "applicable": { "type": ["boolean", "null"] },
+        "queryStart": { "type": "string", "format": "date-time" }, "queryEnd": { "type": "string", "format": "date-time" },
+        "datapoints": { "type": "array", "maxItems": 1440, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["timestamp", "bucketEnd", "phases", "crossesPhaseBoundary", "average", "minimum", "maximum", "sampleCount", "sum"],
+          "properties": {
+            "timestamp": { "type": "string", "format": "date-time" }, "bucketEnd": { "type": "string", "format": "date-time" },
+            "phases": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["warmup", "measurement", "drain"] } },
+            "crossesPhaseBoundary": { "type": "boolean" }, "average": { "$ref": "#/$defs/rdsNumber" }, "minimum": { "$ref": "#/$defs/rdsNumber" },
+            "maximum": { "$ref": "#/$defs/rdsNumber" }, "sampleCount": { "$ref": "#/$defs/rdsNumber" }, "sum": { "$ref": "#/$defs/rdsNumber" }
+          }
+        } },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "attemptIssues": { "type": "array", "maxItems": 3, "items": { "type": "object", "additionalProperties": false, "required": ["attempt", "issues"], "properties": { "attempt": { "type": "integer", "minimum": 1, "maximum": 3 }, "issues": { "$ref": "#/$defs/rdsIssues" } } } },
+        "collectionIssues": { "$ref": "#/$defs/rdsIssues" },
+        "coverage": { "allOf": [{ "$ref": "#/$defs/rdsCoverage" }, { "type": "object", "required": ["phases"], "properties": { "phases": { "type": "object", "additionalProperties": false, "required": ["warmup", "measurement", "drain"], "properties": { "warmup": { "$ref": "#/$defs/rdsCoverage" }, "measurement": { "$ref": "#/$defs/rdsCoverage" }, "drain": { "$ref": "#/$defs/rdsCoverage" } } } } }] },
+        "summary": { "type": "object", "additionalProperties": false, "required": ["warmup", "measurement", "drain"], "properties": { "warmup": { "$ref": "#/$defs/rdsPhaseSummary" }, "measurement": { "$ref": "#/$defs/rdsPhaseSummary" }, "drain": { "$ref": "#/$defs/rdsPhaseSummary" } } }
+      }
+    },
+    "inputTiming": {
+      "type": "object",
+      "required": ["dispatchBoundary", "dispatchesDuringMeasurement", "dispatchesDuringDrain", "submissionToDispatch", "seconds"],
+      "properties": {
+        "dispatchBoundary": { "type": "string", "minLength": 1 },
+        "dispatchesDuringMeasurement": { "$ref": "#/$defs/count" },
+        "dispatchesDuringDrain": { "$ref": "#/$defs/count" },
+        "submissionToDispatch": { "$ref": "#/$defs/distribution" },
+        "seconds": { "type": "array", "items": { "type": "object", "required": ["startOffsetSeconds", "submissions", "dispatchStarts"], "properties": {
+          "startOffsetSeconds": { "$ref": "#/$defs/count" }, "submissions": { "$ref": "#/$defs/count" }, "dispatchStarts": { "$ref": "#/$defs/count" }
+        } } }
+      }
+    },
+    "creditSample": { "type": "object", "required": ["timestamp"], "properties": { "timestamp": { "type": "string", "format": "date-time" }, "balanceAverage": { "$ref": "#/$defs/nullableNonnegative" }, "usageSum": { "$ref": "#/$defs/nullableNonnegative" }, "surplusBalanceAverage": { "$ref": "#/$defs/nullableNonnegative" }, "surplusChargedSum": { "$ref": "#/$defs/nullableNonnegative" } } },
+    "creditState": { "type": "object", "required": ["instanceId", "mode", "samples"], "properties": { "source": { "enum": ["sendium", "kannel", "harness"] }, "instanceId": { "type": "string" }, "instanceType": { "type": "string" }, "burstable": { "type": ["boolean", "null"] }, "mode": { "enum": ["standard", "unlimited", "not-applicable", "unknown"] }, "periodSeconds": { "type": "integer", "minimum": 1 }, "windowStart": { "type": "string", "format": "date-time" }, "windowEnd": { "type": "string", "format": "date-time" }, "samples": { "type": "array", "items": { "$ref": "#/$defs/creditSample" } }, "collectionIssues": { "type": "array", "items": { "type": "string" } } } },
+    "backlog": { "type": "object", "required": ["pendingAdmission", "acceptedAwaitingProvider", "acceptedAwaitingReceipt"], "additionalProperties": { "$ref": "#/$defs/count" } },
+    "outputRates": { "type": "object", "required": ["providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond"], "additionalProperties": { "$ref": "#/$defs/nonnegative" } },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "count": { "type": "integer", "minimum": 0 },
+    "nonnegative": { "type": "number", "minimum": 0 },
+    "nullableNonnegative": { "type": ["number", "null"], "minimum": 0 },
+    "distribution": { "type": "object", "required": ["count", "p50Millis", "p95Millis", "p99Millis", "minMillis", "maxMillis"], "properties": { "count": { "$ref": "#/$defs/count" }, "p50Millis": { "$ref": "#/$defs/nullableNonnegative" }, "p95Millis": { "$ref": "#/$defs/nullableNonnegative" }, "p99Millis": { "$ref": "#/$defs/nullableNonnegative" }, "minMillis": { "$ref": "#/$defs/nullableNonnegative" }, "maxMillis": { "$ref": "#/$defs/nullableNonnegative" } } },
+    "measurements": {
+      "type": "object",
+      "required": ["durationSeconds", "counts", "rates", "latencies"],
+      "properties": {
+        "durationSeconds": { "$ref": "#/$defs/nonnegative" },
+        "counts": { "type": "object", "required": ["scheduled", "attempted", "missed", "accepted", "rejected", "failed", "timedOut", "pendingAdmission", "providerArrivals", "providerResponses", "acceptedProviderCompleted", "acceptedAwaitingProvider", "receiptsGenerated", "receiptsForwarded", "acceptedReceiptForwarded", "acceptedAwaitingReceipt", "duplicateProviderRequests", "duplicateReceipts", "providerObservedWithoutAcceptance", "peakOutstanding", "peakTracked"], "additionalProperties": { "$ref": "#/$defs/count" } },
+        "rates": { "type": "object", "required": ["requestedInputPerSecond", "attemptedInputPerSecond", "providerArrivalsPerSecond", "providerResponsesPerSecond", "receiptsForwardedPerSecond"], "additionalProperties": { "$ref": "#/$defs/nullableNonnegative" } },
+        "latencies": { "type": "object", "required": ["acknowledgement", "submissionToProvider", "providerResponseCompletion", "receiptForwarding", "simulatorReceiptDelay"], "additionalProperties": { "$ref": "#/$defs/distribution" } }
+      }
+    },
+    "processSample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "pid", "processStartTicks", "cpuPercent", "rssBytes"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "processStartTicks": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "cpuPercent": { "$ref": "#/$defs/nullableNonnegative" },
+        "rssBytes": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
+      }
+    },
+    "resourceSample": {
+      "type": "object", "required": ["timestamp", "cpuPercent", "rssBytes", "hostMemoryUsedBytes"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "intervalStartTimestamp": { "type": ["string", "null"], "format": "date-time" },
+        "intervalSeconds": { "$ref": "#/$defs/nullableNonnegative" },
+        "cpuPercent": { "$ref": "#/$defs/nullableNonnegative" },
+        "hostCpuPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "rssBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "hostMemoryUsedBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "hostMemoryTotalBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "cpuCount": { "type": ["integer", "null"], "minimum": 1 },
+        "pid": { "type": ["integer", "null"], "minimum": 1 },
+        "processStartTicks": { "type": ["integer", "null"], "minimum": 0 },
+        "processes": { "type": ["array", "null"], "minItems": 2, "maxItems": 16, "items": { "$ref": "#/$defs/processSample" } }
+      },
+      "allOf": [{
+        "if": { "required": ["processes"], "properties": { "processes": { "type": "array" } } },
+        "then": { "properties": { "pid": { "type": "null" }, "processStartTicks": { "type": "null" } } }
+      }]
+    }
+  }
+}

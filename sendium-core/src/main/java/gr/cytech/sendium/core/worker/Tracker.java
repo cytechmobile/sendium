@@ -28,7 +28,18 @@ public interface Tracker<M extends StandardMessage> {
      */
     void createAndEnqueueDLR(int mqid, String providerMessageId, String hashedProviderMessageId,
                              String from, String to, String body, int state, String errorCode,
-                             HashMap<String, String> tlvs);
+                              HashMap<String, String> tlvs);
+
+    default boolean isDlrProcessingAsynchronous() {
+        return false;
+    }
+
+    default CompletionStage<Void> createAndEnqueueDlrAsync(int mqid, String providerMessageId,
+            String hashedProviderMessageId, String from, String to, String body, int state,
+            String errorCode, HashMap<String, String> tlvs) {
+        createAndEnqueueDLR(mqid, providerMessageId, hashedProviderMessageId, from, to, body, state, errorCode, tlvs);
+        return CompletableFuture.completedFuture(null);
+    }
 
     default void createAndEnqueueSubmissionFailure(M message, String providerMessageId,
                                                     String hashedProviderMessageId, String body,

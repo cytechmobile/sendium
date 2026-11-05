@@ -1,0 +1,650 @@
+name: Performance Tests
+run-name: Performance · ${{ inputs.benchmark_target }} · ${{ github.ref_name }} · ${{ inputs.ingress_mode }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_target:
+        description: Gateway to benchmark (Kannel supports HTTP ingress only)
+        type: choice
+        options: [sendium, kannel]
+        default: sendium
+        required: true
+      application_runtime:
+        description: Sendium runtime (leave jvm for Kannel; harness always JVM)
+        type: choice
+        options: [jvm, native]
+        default: jvm
+        required: true
+      ingress_mode:
+        description: Ingress protocol
+        type: choice
+        options: [http, smpp]
+        default: http
+        required: true
+      sendium_instance_type:
+        description: Gateway EC2 instance type (Sendium or Kannel)
+        type: string
+        default: t4g.small
+        required: true
+      harness_instance_type:
+        description: Harness EC2 instance type
+        type: string
+        default: t4g.small
+        required: true
+      offered_rate:
+        description: Offered messages per second
+        type: number
+        default: 30
+        required: true
+      worker_tps:
+        description: Outgoing worker TPS cap (0 means unlimited)
+        type: number
+        default: 0
+        required: true
+      warmup_seconds:
+        description: Warm-up seconds (0–600)
+        type: number
+        default: 120
+        required: true
+      measurement_seconds:
+        description: Measurement seconds (1–3600)
+        type: number
+        default: 600
+        required: true
+      drain_seconds:
+        description: Maximum drain seconds (0–600)
+        type: number
+        default: 120
+        required: true
+      dlr_enabled:
+        description: Request and verify delivery reports
+        type: boolean
+        default: true
+        required: true
+      provider_response_delay_ms:
+        description: Simulated provider response delay in milliseconds (0–10000)
+        type: number
+        default: 5
+        required: true
+      provider_dlr_delay_ms:
+        description: Simulated provider receipt delay in milliseconds (0–60000)
+        type: number
+        default: 1000
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sendium-performance-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate dispatch and capture controller revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      controller_revision: ${{ steps.request.outputs.controller_revision }}
+      run_identity: ${{ steps.request.outputs.run_identity }}
+      application_revision: ${{ steps.request.outputs.application_revision }}
+    steps:
+      - name: Snapshot maintained controller source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install input validation dependencies
+        run: python -m pip install -r control/performance/workflow/requirements-dev.txt
+      - name: Check preparation contracts
+        run: python -m unittest discover -s control/performance/workflow -p 'test_*.py'
+      - name: Normalize inputs and pin revisions
+        id: request
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/prepare.py normalize --output "$RUNNER_TEMP/request.json"
+      - name: Preserve normalized request
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request.json
+          if-no-files-found: error
+          retention-days: 30
+
+  archive:
+    name: Archive permanent performance evidence
+    needs: [validate, publish]
+    if: always() && needs.validate.result == 'success' && needs.publish.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: sendium-performance-recovery
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+      AWS_ARCHIVE_ROLE_ARN: ${{ vars.AWS_ARCHIVE_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/workflow/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-request
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-source
+      - name: Package original published evidence without AWS credentials
+        run: |
+          python control/performance/workflow/archive_package.py \
+            --request "$RUNNER_TEMP/archive-request/request.json" \
+            --source "$RUNNER_TEMP/archive-source" --output "$RUNNER_TEMP/archive-package"
+      - name: Assume restricted archive role
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ARCHIVE_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-archive-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 1800
+          unset-current-credentials: true
+      - name: Upload and verify permanent evidence
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/archive_upload.py \
+              --request "$RUNNER_TEMP/archive-request/request.json" \
+              --package "$RUNNER_TEMP/archive-package" --output "$RUNNER_TEMP/archive-outcome.json"
+      - name: Publish archive outcome
+        if: always()
+        shell: python
+        run: |
+          import html, json, os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "archive-outcome.json"
+          if not path.exists():
+              path.write_text(json.dumps({"schemaVersion": 1, "status": "failed", "exitCode": 1,
+                                          "issues": ["ARCHIVE_JOB_INCOMPLETE"]}) + "\n", encoding="utf-8")
+          outcome = json.loads(path.read_text(encoding="utf-8"))
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Permanent results archive\n\nStatus: **" + html.escape(outcome["status"]) + "**\n\n")
+              if outcome.get("location"):
+                  summary.write("Manifest: `" + html.escape(outcome["location"]) + "`\n")
+              for issue in outcome.get("issues", []):
+                  summary.write("- " + html.escape(issue) + "\n")
+      - name: Preserve archive outcome
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-archive-outcome-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-outcome.json
+          if-no-files-found: error
+          retention-days: 30
+
+  aws-execution:
+    name: Provision and execute private AWS benchmark
+    needs: [validate, build-ready]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: sendium-performance
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ORCHESTRATOR_ROLE_ARN: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+    steps:
+      - name: Checkout exact maintained controller
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install trusted controller dependencies
+        run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-build-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-inputs
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-application-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/application-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-application-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/application-arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-harness-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/harness-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-harness-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/harness-arm64
+      - name: Check protected environment configuration
+        run: |
+          : "${AWS_REGION:?Set AWS_REGION in sendium-performance}"
+          : "${AWS_ORCHESTRATOR_ROLE_ARN:?Set AWS_ORCHESTRATOR_ROLE_ARN in sendium-performance}"
+          : "${AWS_BOOTSTRAP_STACK:?Set AWS_BOOTSTRAP_STACK in sendium-performance}"
+      - name: Assume orchestration role using OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 10800
+          unset-current-credentials: true
+      - name: Resolve, stage, create and execute through SSM
+        id: execute
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/run_aws.py \
+              --request "$RUNNER_TEMP/request/request.json" \
+              --build-inputs "$RUNNER_TEMP/build-inputs/build-inputs.json" \
+              --bundles "$RUNNER_TEMP/bundles" --output "$RUNNER_TEMP/aws-performance"
+      - name: Preserve available controller outcomes and retrieved evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/aws-performance/controller-outcome.json
+            ${{ runner.temp }}/aws-performance/cleanup-plan.json
+            ${{ runner.temp }}/aws-performance/staged.json
+            ${{ runner.temp }}/aws-performance/resolution.json
+            ${{ runner.temp }}/aws-performance/stack-creation.json
+            ${{ runner.temp }}/aws-performance/stack-events.json
+            ${{ runner.temp }}/aws-performance/execution/deployment-outcome.json
+            ${{ runner.temp }}/aws-performance/execution/retrieved/**
+            ${{ runner.temp }}/aws-performance/retrieved/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  application:
+    name: Build selected application (${{ matrix.architecture }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout exact dispatch commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.application_revision }}
+          path: application
+          persist-credentials: false
+      - name: Checkout pinned preparation code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v6
+        id: java
+        with:
+          java-version: '25'
+          distribution: temurin
+      - name: Install preparation dependencies
+        run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - name: Build packaged application without AWS credentials
+        env:
+          BUILD_ARCHITECTURE: ${{ matrix.architecture }}
+          BUILD_JAVA_VERSION: ${{ steps.java.outputs.version }}
+        run: |
+          python control/performance/workflow/build_selected_application.py \
+            --request "$RUNNER_TEMP/request/request.json" --checkout application \
+            --architecture "$BUILD_ARCHITECTURE" --java-version "$BUILD_JAVA_VERSION"
+      - name: Package complete application and record its identity
+        env:
+          BUILD_ARCHITECTURE: ${{ matrix.architecture }}
+          BUILD_JAVA_VERSION: ${{ steps.java.outputs.version }}
+        run: |
+          python control/performance/workflow/prepare.py bundle \
+            --request "$RUNNER_TEMP/request/request.json" --component application \
+            --architecture "$BUILD_ARCHITECTURE" --checkout application \
+            --output "$RUNNER_TEMP/application-$BUILD_ARCHITECTURE"
+      - name: Preserve application build
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-application-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/application-${{ matrix.architecture }}/application.tar.gz
+            ${{ runner.temp }}/application-${{ matrix.architecture }}/build-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  harness:
+    name: Build maintained harness (${{ matrix.architecture }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout pinned harness and controller
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v6
+        id: java
+        with:
+          java-version: '25'
+          distribution: temurin
+      - name: Install preparation dependencies
+        run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - name: Verify and package standalone harness without AWS credentials
+        working-directory: control
+        run: bash ./mvnw -B -ntp -Pperformance -pl performance/harness verify
+      - name: Record harness identity
+        env:
+          BUILD_ARCHITECTURE: ${{ matrix.architecture }}
+          BUILD_JAVA_VERSION: ${{ steps.java.outputs.version }}
+        run: |
+          python control/performance/workflow/prepare.py bundle \
+            --request "$RUNNER_TEMP/request/request.json" --component harness \
+            --architecture "$BUILD_ARCHITECTURE" --checkout control \
+            --output "$RUNNER_TEMP/harness-$BUILD_ARCHITECTURE"
+      - name: Preserve harness build
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-harness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/harness-${{ matrix.architecture }}/harness.jar
+            ${{ runner.temp }}/harness-${{ matrix.architecture }}/build-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  build-ready:
+    name: Verify build inputs independently
+    needs: [validate, application, harness]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install manifest validation dependencies
+        run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-application-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/application-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-application-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/application-arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-harness-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/harness-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-harness-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundles/harness-arm64
+      - name: Recheck run, source, architecture, size and checksum
+        run: |
+          python control/performance/workflow/prepare.py verify \
+            --request "$RUNNER_TEMP/request/request.json" --directory "$RUNNER_TEMP/bundles" \
+            --output "$RUNNER_TEMP/build-inputs.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: performance-build-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-inputs.json
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnostics:
+    name: Recover evidence and collect read-only AWS diagnostics
+    needs: [validate, aws-execution]
+    if: always() && needs.validate.result == 'success' && needs.aws-execution.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: sendium-performance-recovery
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+      AWS_DIAGNOSTICS_ROLE_ARN: ${{ vars.AWS_DIAGNOSTICS_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DIAGNOSTICS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-diag-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Recover public evidence and collect EC2 credit and RDS metrics
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/recover.py diagnostics \
+              --request "$RUNNER_TEMP/request/request.json" --output "$RUNNER_TEMP/diagnostics"
+      - name: Preserve available diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/diagnostics/diagnostics-outcome.json
+            ${{ runner.temp }}/diagnostics/cpu-credits.json
+            ${{ runner.temp }}/diagnostics/rds-metrics.json
+            ${{ runner.temp }}/diagnostics/retrieved/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  cleanup:
+    name: Delete owned stack and temporary run artifacts
+    needs: [validate, aws-execution, diagnostics]
+    if: always() && needs.validate.result == 'success' && needs.aws-execution.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: sendium-performance-recovery
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
+      AWS_CLEANUP_ROLE_ARN: ${{ vars.AWS_CLEANUP_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_CLEANUP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: sendium-clean-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Reconstruct identity and perform bounded idempotent cleanup
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/recover.py cleanup \
+              --request "$RUNNER_TEMP/request/request.json" --output "$RUNNER_TEMP/cleanup"
+      - name: Preserve cleanup outcome
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cleanup/cleanup-outcome.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  publish:
+    name: Finalize and publish results without AWS credentials
+    needs: [validate, application, harness, build-ready, aws-execution, diagnostics, cleanup]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.controller_revision }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r control/performance/contracts/requirements-dev.txt
+      - uses: actions/setup-java@v6
+        continue-on-error: true
+        with:
+          java-version: '25'
+          distribution: temurin
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/request
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-build-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-inputs
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/controller
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/diagnostics
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cleanup
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: performance-harness-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publish-builds/harness-x86_64
+      - name: Validate accounting, finalize resources and publish failure-aware summaries
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+          WORKFLOW_OUTCOMES_JSON: ${{ toJSON(needs) }}
+        run: |
+          CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
+            python control/performance/workflow/publish.py \
+              --request "$RUNNER_TEMP/request/request.json" --controller "$RUNNER_TEMP/controller" \
+              --diagnostic "$RUNNER_TEMP/diagnostics" --cleanup "$RUNNER_TEMP/cleanup" \
+              --builds "$RUNNER_TEMP/publish-builds" --build-inputs "$RUNNER_TEMP/build-inputs/build-inputs.json" \
+              --output "$RUNNER_TEMP/published"
+      - name: Preserve final results and diagnostic bundle even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/published/results.json
+            ${{ runner.temp }}/published/summary.md
+            ${{ runner.temp }}/published/workflow-outcome.json
+            ${{ runner.temp }}/published/evidence/**
+            ${{ runner.temp }}/published/diagnostics/**
+          if-no-files-found: error
+          retention-days: 30

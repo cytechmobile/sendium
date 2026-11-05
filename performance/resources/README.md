@@ -1,0 +1,323 @@
+# Performance resource evidence
+
+These standard-library Python helpers collect evidence without giving the load
+JVM AWS credentials. `sample_process.py` runs on each private Linux EC2 instance;
+`collect_cpu_credits.py` runs in protected workflow orchestration after measurement.
+The harness CLI wires local orchestration; Task 4.5 deploys/controls remote agents
+through Systems Manager. No public monitoring endpoint is required.
+
+## Linux process and host sampler
+
+Run once for Sendium's JVM PID on its host and once for the harness JVM PID on its
+host. Start before warm-up and retain a final sample after measurement so CPU
+intervals cover the entire observation window. For example:
+
+```sh
+python3 performance/resources/sample_process.py \
+  --pid "$SENDIUM_PID" \
+  --duration-seconds 960 \
+  --interval-seconds 1 \
+  --max-samples 4096 \
+  --output sendium-resources.jsonl
+```
+
+The output parent must exist and the file must be new. `--output -` streams JSONL
+to stdout. The explicit sample budget includes baseline and final samples;
+settings exceeding it fail rather than collecting an unbounded history. Defaults
+are one-second sampling and 4096 samples per source. Run directories own generated
+files; do not commit them.
+SIGTERM requests a graceful stop after the next complete interval, allowing the
+runner to retain a final CPU observation rather than truncate its window.
+
+| Field | Meaning |
+|-------|---------|
+| `cpuPercent` | Process user+system CPU delta divided by monotonic elapsed time. 100% is one logical core; a multithreaded JVM can exceed 100%. |
+| `hostCpuPercent` | Busy `/proc/stat` ticks divided by aggregate host ticks. Guest ticks are not counted twice; idle includes I/O wait. 100% is total host capacity. |
+| `rssBytes` | Resident process pages times system page size; process RSS, not Java heap size. |
+| `hostMemoryUsedBytes` | `MemTotal - MemAvailable`, including other processes. |
+| `hostMemoryTotalBytes`, `cpuCount` | Host capacity context. |
+| `pid`, `processStartTicks` | Target identity; PID reuse aborts sampling. |
+| `timestamp`, `intervalStartTimestamp` | UTC boundaries for report attribution. Adjacent intervals share the exact serialized boundary. |
+| `intervalSeconds` | Actual monotonic interval used for CPU calculation. |
+
+Baseline CPU is null, not fabricated zero utilization. Both instances must have
+synchronized UTC clocks, with clock configuration recorded in the infrastructure
+preset. Workload latency still uses the harness's single monotonic clock. Sampler
+overhead is included in host utilization and is not subtracted; record sampling
+settings when deploying agents.
+
+CPU summaries weight each sample by overlap with the measurement/minute window.
+Missing spans are not filled with zero. Memory peaks use snapshots inside the
+half-open window. Raw samples remain available in `results.json`.
+
+### Named process groups (Kannel bearerbox and smsbox)
+
+The same agent can sample a fixed, explicitly named group on one Linux host:
+
+```sh
+python3 performance/resources/sample_process.py \
+  --process "bearerbox:$BEARERBOX_PID" \
+  --process "smsbox:$SMSBOX_PID" \
+  --duration-seconds 960 \
+  --interval-seconds 1 \
+  --max-samples 4096 \
+  --output kannel-resources.jsonl
+```
+
+`--process NAME:PID` is repeatable and mutually exclusive with the existing
+`--pid` option. Groups require 2–16 unique names and PIDs. Names use lowercase
+letters, digits, underscores and hyphens, start with a letter, and are at most
+32 characters. Membership is explicit and fixed; the agent does not discover
+children or replace restarted members by executable name.
+
+| Group field | Meaning |
+|---|---|
+| `processes` | Per-member `name`, `pid`, `processStartTicks`, `cpuPercent`, and `rssBytes`. |
+| `cpuPercent` | Sum of member CPU percentages over the same monotonic interval; 100% is one logical core. |
+| `rssBytes` | Sum of member RSS snapshots. Shared pages may be counted more than once; this is not unique physical memory. |
+| `pid`, `processStartTicks` | Null at group level; each member carries its own identity. |
+| Host fields | One `/proc/stat` and `/proc/meminfo` observation per group sample, not a sum across members. |
+
+Baseline CPU remains null for both the group and every member. Missing/dead
+members, PID/start-time changes, or regressing member CPU counters abort collection
+with nonzero status; no member silently disappears and no missing contribution
+becomes zero. Existing `--pid` samples retain their original JSON shape.
+
+The importer verifies group size, unique names/PIDs, matching CPU/RSS sums, and
+consistent baseline nulls. Validation checks every member's identity across the
+sample history. Kannel requires exactly `bearerbox` and `smsbox`; single-process
+Kannel evidence is inconclusive, and changed/mismatched group identity fails
+resource validity. An optional `infrastructure.kannel.processes` array can declare
+expected `name`, `pid`, and `processStartTicks` values for comparison with samples.
+Use the same PID namespace as the agent. Group metadata replaces the single
+`processId` field; declaring both a single-process identity and group evidence is
+an identity mismatch.
+
+Stop the sampler and wait for its final complete interval **before** stopping
+either member. The local Kannel supervisor does this automatically, starts the
+agent before publishing gateway readiness, and retains `kannel-resources.jsonl`
+beside the smoke diagnostics. The sample budget applies to complete group records,
+with a maximum of 16 members in each record. Raw contributions are retained in
+JSON reports and the Markdown summary describes aggregation explicitly.
+
+Container `/proc` host CPU/memory describe the Docker Linux host or VM, which can
+include other containers. They are distinct from the gateway container's 2 CPU /
+2 GiB limits and do not model EC2 CPU credits. The smoke run is correctness and
+collection evidence; the full benchmark observation window is integrated separately.
+
+## Read-only AWS CPU-credit collector
+
+Run under the protected GitHub environment's OIDC-authenticated read-only
+diagnostics role, not the application/harness instance role:
+
+```sh
+python3 performance/resources/collect_cpu_credits.py \
+  --region "$AWS_REGION" \
+  --sendium-instance-id "$SENDIUM_INSTANCE_ID" \
+  --harness-instance-id "$HARNESS_INSTANCE_ID" \
+  --start-time "$MEASUREMENT_START_UTC" \
+  --end-time "$MEASUREMENT_END_UTC" \
+  --output cpu-credits.json
+```
+
+Requires AWS CLI v2 and these read-only permissions, to be included in bootstrap
+CloudFormation:
+
+- `ec2:DescribeInstances`
+- `ec2:DescribeInstanceTypes`
+- `ec2:DescribeInstanceCreditSpecifications`
+- `cloudwatch:GetMetricStatistics`
+
+AWS instance-type metadata establishes burstability rather than a guessed type
+prefix. Record Standard/Unlimited mode as returned when diagnostics run;
+non-burstable instances are `not-applicable`. IDs/types must match effective run
+configuration. The report also checks a preset's explicit `creditMode` if present.
+
+CloudWatch credit metrics use 300-second periods; query boundaries round outward.
+Record balance/surplus balance averages and usage/surplus charged sums without
+replacing absent data with zero. Data may lag; at least one balance observation
+overlapping measurement is required for a burstable instance. This is observed
+credit state, not proof of continuous coverage or long-term sustainability. The
+explicit API budget is 1440 points per metric. Partial metrics survive later API
+failures and collection issues remain visible.
+
+The versioned envelope contains query windows and per-instance source, identity,
+burstability, mode, samples, and collection issues. Errors are sanitized; AWS
+stderr/credentials are not copied into it. Global collection/output failures
+return nonzero; per-instance issues are preserved for classification.
+
+## Read-only standard RDS collector
+
+`collect_rds_metrics.py` collects standard `AWS/RDS` instance metrics. It is a
+collector used automatically by the AWS workflow diagnostics job before cleanup.
+New AWS reports require RDS evidence. Diagnostics derive the database identity and
+phase windows from the verified report and trusted bootstrap identity, collect with
+bounded retries, and retain `rds-metrics.json` even if EC2 credit collection fails.
+Publication imports that file offline into JSON/Markdown and preserves the raw file
+in the final evidence artifact. Missing or partial required evidence is inconclusive,
+never zero utilization. JVM and native application runs use the same collection path.
+
+```sh
+python3 performance/resources/collect_rds_metrics.py \
+  --context rds-context.json --output rds-metrics.json
+```
+
+The public context identifies the database and the observation's contiguous,
+half-open UTC phase windows. The example below includes partial minute buckets:
+
+```json
+{
+  "database": {
+    "identifier": "sendium-perf-run-gh-12345-1",
+    "instanceClass": "db.t4g.small",
+    "partition": "aws",
+    "region": "eu-west-1",
+    "accountId": "123456789012",
+    "repository": "cytechmobile/sendium",
+    "runIdentity": "gh-12345-1"
+  },
+  "phases": {
+    "warmup": {"start": "2026-10-23T12:00:10Z", "end": "2026-10-23T12:01:10Z"},
+    "measurement": {"start": "2026-10-23T12:01:10Z", "end": "2026-10-23T12:03:20Z"},
+    "drain": {"start": "2026-10-23T12:03:20Z", "end": "2026-10-23T12:03:50Z"}
+  }
+}
+```
+
+Before any metric request, the collector verifies the database identifier, exact
+ARN/account/region, instance class, PostgreSQL engine and run/repository ownership
+tags. Identity mismatch or unavailable identity produces explicit evidence with
+`database.verified: false` and no metric queries. It never reads database secrets
+or connects to PostgreSQL. It requires `rds:DescribeDBInstances` and
+`rds:ListTagsForResource`, scoped to the bootstrap's run-database ARN prefix and
+region, plus the existing `cloudwatch:GetMetricStatistics` permission. Existing
+bootstrap installations need the updated diagnostics policy before live use.
+
+| Metrics | Unit | Period | Statistics |
+|---|---|---:|---|
+| CPU utilization | Percent | 60 s | Average, minimum, maximum, sample count |
+| Freeable memory, swap, free storage | Bytes | 60 s | Same |
+| Database connections, disk queue depth | Count | 60 s | Same |
+| Read/write IOPS | Count/Second | 60 s | Same |
+| Read/write throughput | Bytes/Second | 60 s | Same |
+| Read/write storage I/O latency | Seconds | 60 s | Same |
+| CPU credit balance, surplus credit balance | Count | 300 s | Same |
+| CPU credit usage, surplus credits charged | Count | 300 s | Sum |
+
+Credits apply to supported burstable RDS classes. Non-burstable classes explicitly
+mark these series not applicable; T2 does not require surplus metrics. An unknown
+T-family leaves credit applicability unknown instead of assuming it is absent.
+
+The schema-v1 evidence records identity, collection start, exact phase boundaries,
+per-series query boundaries, units/statistics, sorted timestamped datapoints,
+attempt history and coverage. Each datapoint timestamp starts a whole CloudWatch
+bucket of `periodSeconds`; query boundaries round outward. Phase coverage counts
+overlapping buckets, so a bucket crossing phases can appear in more than one
+phase's coverage. These are not interpolated one-second samples or exact
+phase-only observations. Storage I/O latency is not SQL-query latency, and
+freeable memory is not database heap usage.
+
+Collection allows at most three attempts per applicable metric, retries only
+incomplete/problematic series, and waits at most 30 seconds between attempts.
+A 180-second deadline stops new metric requests; the CLI bounds each in-flight
+AWS request to ten seconds. Each metric has a 1,440-bucket budget. Publication
+lag can still leave missing data. Good samples survive later failures, while
+missing/invalid samples and interrupted/deadline-limited collection remain explicit.
+Recovered attempt errors are retained separately from current collection issues.
+No missing value becomes zero. No raw AWS error text is published. Partial metric
+evidence returns zero from the CLI for later resource-validity classification;
+identity or context/output failure returns nonzero.
+
+## RDS report import, summaries, and coverage
+
+The offline `finalize-report` command accepts the collector file through the
+optional `rdsMetrics` field in `resource-inputs.json`, alongside existing process
+samples and EC2 credits:
+
+```json
+{
+  "schemaVersion": 1,
+  "sendiumSamples": "sendium-resources.jsonl",
+  "harnessSamples": "harness-resources.jsonl",
+  "cpuCredits": "cpu-credits.json",
+  "rdsMetrics": "rds-metrics.json",
+  "sampleBudget": 8192
+}
+```
+
+Paths are relative to the input document. `rdsMetrics` points to the standalone
+collector output, not the enriched subsection from a previously published report.
+Import is offline and has an 8-MiB/16-series/1,440-points-per-series budget. It
+rejects malformed values, wrong units/periods/statistics, duplicate timestamps,
+scalar coercion and trailing JSON. Good process/credit sources survive an invalid
+database source. Supplied coverage counts are recomputed from samples.
+
+Results add `resources.database`, including the collector identity and raw values,
+whole-bucket ends, overlapping phases, boundary flags, per-phase coverage and
+per-phase statistical summaries. The primary and fallback Markdown renderers show
+the same database section: measurement averages/minima/maxima or sums, bucket
+coverage, and a collapsible warm-up/measurement/drain timeline. Markdown displays
+bytes as MiB, bytes/second as MiB/s and seconds as milliseconds; JSON retains AWS
+units. At most 240 timeline rows are shown in Markdown, with a notice pointing to
+the complete JSON when truncated.
+
+**Phase-only statistics use complete buckets fully contained in that phase.**
+Gauge averages use CloudWatch `SampleCount` weights, extrema use the returned
+`Minimum`/`Maximum`, and credit usage/charges use `Sum`. Crossing buckets remain in
+the timeline and overlap-based coverage, but are not prorated into phase-only
+statistics. For example, a two-minute measurement may have complete five-minute
+credit coverage while its phase-only credit sum is `null`/`n/a`, because no whole
+credit bucket fits inside it. An observed zero remains zero.
+
+The public report context opts into required RDS evidence with
+`configuration.infrastructure.database.resourceMetricsRequired: true`. Missing,
+unverified or incomplete required evidence is **inconclusive**. A report-source
+database/run/region/class mismatch or a measurement-window mismatch is **failed**,
+so measurements are never silently attributed to another run. Timestamp envelopes
+may expand outward by at most two microseconds to bridge Python microsecond and
+Java nanosecond precision. An optional context `database.accountId` is also checked.
+Legacy/local reports without the requirement flag remain compatible. No utilization
+threshold is a performance pass/fail gate, and resource finalization preserves
+workload counts, rates, latency distributions, event/cohort intervals and drain data.
+
+The result schema and independent Python semantic validator check attribution,
+coverage, bucket selection, statistical calculations and classification separately
+from the JVM report implementation. The Actions summary includes the database
+section, while `results.json` retains all metric series and their full timeline.
+
+## Process/EC2 import, summary, and validity
+
+`ResourceEvidence.load` strictly validates shape, values, and byte/sample bounds.
+`loadAvailable` retains good sources when another artifact is missing/invalid and
+records sanitized issues. Construct the UTC resource window from measurement
+start UTC plus observed monotonic duration. Supply expected PIDs through
+`Context.infrastructure.<source>.processId`. `ResultReport.build` accepts evidence,
+that window, and typed lifecycle/adapter observations. CPU/memory summaries appear
+overall and per minute in JSON/Markdown. Its overload without evidence remains
+inconclusive.
+
+| Status | Examples | Execution exit code |
+|--------|----------|--------------------:|
+| `valid` | Requested targets supplied and required evidence/correctness checks complete. High utilization, expected overload rejection, or unfinished accepted work alone is not failure. | 0 |
+| `inconclusive` | Harness scheduling/capacity limits, resource gaps, missing credit state, partial measurement, ambiguous transport/correlation coverage, or histogram overflow. | 0 |
+| `failed` | Setup/protocol/authentication failure, accounting violation, excess targets, negative backlog, or mismatched process/instance/window metadata. Failure takes precedence. | 1 |
+
+Pass diagnostics from `RunValidity.httpAdmission`, `smppAdmission`, `provider`, and
+`httpReceipts`, plus explicit setup/lifecycle reasons. Expected 503/429 and SMPP
+throttled/queue-full responses remain ordinary rejections. There are no CPU,
+memory, throughput, latency, rejection-percentage, or unfinished-work performance
+thresholds. A valid observation is not a finding of sustainable sending capacity.
+
+## Verification
+
+```sh
+python -m unittest discover -s performance/resources -p 'test_*.py'
+./mvnw -Pperformance -pl performance/harness verify
+```
+
+Python tests cover `/proc` parsing, timing/denominators, budgets/PID reuse, AWS
+metadata/modes, coarse metric windows, missing values, and partial failures.
+Java tests cover bounded/partial import, weighted intervals, coverage, identities,
+status precedence, diagnostics, and report serialization. The agent was also
+exercised against a live busy process in Linux Docker. AWS API behavior is mocked
+here; real-account collection remains part of Task 6.1's AWS lifecycle validation.

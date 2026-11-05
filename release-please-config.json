@@ -9,6 +9,10 @@
         {
           "type": "generic",
           "path": "pom.xml"
+        },
+        {
+          "type": "generic",
+          "path": "performance/harness/pom.xml"
         }
       ]
     }

@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.1](https://github.com/cytechmobile/sendium/compare/v0.6.0...v0.6.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* batch provider DLR persistence off SMPP event loops ([86aea4a](https://github.com/cytechmobile/sendium/commit/86aea4a2d63a2a23a4568ca8ddcfa7bb5394ff66))
+* **dlr:** raise HTTP receipt dispatch batch to 500 ([fcc0a37](https://github.com/cytechmobile/sendium/commit/fcc0a37db368eee3b746c722ed7a244b0d1f2936))
+
+
+### Documentation
+
+* prefer simple and proportionate agent solutions ([f76c3e5](https://github.com/cytechmobile/sendium/commit/f76c3e54e7b0d9cf966cc91915d4e6f2e9e06be0))
+
+## [0.6.0](https://github.com/cytechmobile/sendium/compare/v0.5.1...v0.6.0) (2026-10-23)
+
+### Features
+
+* **performance:** add reproducible local and AWS benchmarking for HTTP and SMPP, with automated deployment, reporting, and cleanup.
+
+### Bug Fixes
+
+* **dlr:** retain provider correlations for seven days ([7bb60b6](https://github.com/cytechmobile/sendium/commit/7bb60b658cbb93f0f25f4ab440aacd696f917d6a)).
+
 ## [0.5.1](https://github.com/cytechmobile/sendium/compare/v0.5.0...v0.5.1) (2026-09-16)
 
 

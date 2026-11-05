@@ -10,6 +10,47 @@ The working lifecycle comes from [#338](https://github.com/cytechmobile/sendium/
 contracts, multipart admission and the [versioned CBOR representation](15-pending-record-schema.md) refined by
 [#343](https://github.com/cytechmobile/sendium/issues/343), under [#337](https://github.com/cytechmobile/sendium/issues/337).
 
+## Flow Overview
+
+The coordinator governs ownership and transitions across the stages below. Numbers show shipped
+defaults. Store capacities and per-cycle take limits are separate bounds.
+
+```mermaid
+flowchart TB
+    ingress["HTTP / SMPP"]
+    cycle["Cycle<br/>100 ms idle backoff"] -.-> selected
+    ingress --> pending["Pending<br/>10,000 sources max"]
+    pending -. "Admitted" .-> ack["Client ACK"]
+    pending -->|"100/cycle max"| selected["Selected<br/>1,000 unassigned items max"]
+    selected -->|"100/cycle max"| routing["Routing"]
+    routing --> routed["Routed<br/>10,000 selections max"]
+    routed -->|"100/worker/cycle max"| dispatch["Dispatch<br/>1 preparation slot/worker"]
+    dispatch --> provider["Provider"]
+    provider -. "Retry" .-> dispatch
+    provider --> handoff["Handoff"]
+    handoff --> cleanup["Cleanup"]
+```
+
+Only Pending, Selected and Routed are outbound stores. Dispatch, handoff and cleanup are processing
+phases. Arrows show progression, not deletion of earlier records. Pending capacity includes held
+multipart parts and in-flight sources; later-stage progress does not free a Pending slot. Full Pending
+capacity rejects new admissions with HTTP 503 or SMPP `STATUS_THROTTLED` while existing work continues.
+An aggregate retains every original source ID and occupies one Selected slot.
+
+Selected capacity includes queued and taken unassigned items. Recording a destination frees its routing
+slot but retains bookkeeping until cleanup. Routed capacity covers all destinations and unfinished
+provider attempts, retries, handoffs and cleanup. Taking work does not remove its ownership record.
+
+Dispatch preparation concurrency is `threadCount` (default 1); the shared worker TPS cap defaults to
+0 (unlimited). Async responses release preparation slots while their sources still occupy Pending.
+Required handoff includes persistence commit and required DLR enqueue, rather than final handset delivery.
+Cleanup completes routed work, releases pending sources, removes selected bookkeeping and forgets the
+routed record. Partial cleanup retries do not resend provider requests or repeat successful handoffs.
+
+One standalone processing thread drives selection, routing and provider takes. Their separate 100-item
+limits share `sendium.message.selection-batch-size`. Cycles continue immediately after productive routing
+or dispatch, backing off 100 ms when idle, paused or unsuccessful.
+
 ## Components
 
 `sendium-core` supplies reusable contracts and implementations. `sendium-app` constructs and runs the

@@ -1,0 +1,29 @@
+{
+  "runIdentity": "local-test-1",
+  "preset": "local-test",
+  "sendiumHost": "127.0.0.1",
+  "harnessHost": "127.0.0.1",
+  "httpPort": 18080,
+  "smppPort": 27777,
+  "providerPort": 27779,
+  "callbackPort": 18081,
+  "ingressWindow": 1000,
+  "outgoingWindow": 1000,
+  "providerWindow": 1000,
+  "providerMaxPending": 10000,
+  "connectTimeoutMillis": 5000,
+  "outgoingRequestTimeoutMillis": 30000,
+  "providerIoTimeoutMillis": 10000,
+  "outgoingWorkerThreads": 1,
+  "callbackThreads": 4,
+  "callbackQueueCapacity": 100,
+  "database": {
+    "jdbcUrl": "jdbc:postgresql://127.0.0.1:5432/sendium_benchmark",
+    "username": "benchmark_test_role",
+    "password": "test-only-database-password",
+    "poolMinSize": 0,
+    "poolMaxSize": 10,
+    "acquisitionTimeoutMillis": 5000,
+    "claimDurationSeconds": 300
+  }
+}

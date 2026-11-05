@@ -1,0 +1,2 @@
+-r ../contracts/requirements-dev.txt
+PyYAML==6.0.3

@@ -4,13 +4,22 @@
 
     <groupId>gr.cytech</groupId>
     <artifactId>sendium</artifactId>
-    <version>0.5.2-SNAPSHOT</version>
+    <version>0.6.1</version>
     <packaging>pom</packaging>
 
     <modules>
         <module>sendium-core</module>
         <module>sendium-app</module>
     </modules>
+
+    <profiles>
+        <profile>
+            <id>performance</id>
+            <modules>
+                <module>performance/harness</module>
+            </modules>
+        </profile>
+    </profiles>
 
     <distributionManagement>
         <repository>
@@ -27,12 +36,12 @@
 
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-        <quarkus.platform.version>3.40.1</quarkus.platform.version>
+        <quarkus.platform.version>3.40.1.1</quarkus.platform.version>
 
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
-        <checkstyle-tools.version>14.3.0</checkstyle-tools.version>
-        <surefire-plugin.version>3.6.0</surefire-plugin.version>
-        <jacoco-plugin.version>0.8.15</jacoco-plugin.version>
+        <checkstyle-tools.version>14.4.0</checkstyle-tools.version>
+        <surefire-plugin.version>3.6.1</surefire-plugin.version>
+        <jacoco-plugin.version>0.8.16</jacoco-plugin.version>
 
         <skipTests>false</skipTests>
         <skipUT>${skipTests}</skipUT>
@@ -57,7 +66,7 @@
                 <groupId>gr.cytech</groupId>
                 <artifactId>sendium-core</artifactId>
                 <!-- release-please bumps this via the generic extra-files updater; the maven release-type does NOT rewrite dependencyManagement versions -->
-                <version>0.5.2-SNAPSHOT</version> <!-- x-release-please-version -->
+                <version>0.6.1</version> <!-- x-release-please-version -->
             </dependency>
 
             <dependency>
