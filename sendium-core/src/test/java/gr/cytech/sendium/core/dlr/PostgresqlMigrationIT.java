@@ -48,7 +48,7 @@ class PostgresqlMigrationIT {
     @Test
     void migrationCreatesDlrMessageSchemaAndPartialIndexes() throws SQLException {
         assertThat(initialMigration.success).isTrue();
-        assertThat(initialMigration.migrationsExecuted).isEqualTo(2);
+        assertThat(initialMigration.migrationsExecuted).isOne();
 
         try (Connection connection = connection()) {
             assertThat(loadNames(connection,

@@ -8,7 +8,7 @@ HTTP submissions request callbacks with both `dlr-url` and `dlr-mask`. Sendium c
 
 Supported masks are `1` (delivered), `2` (failed), and `3` (both). `0` or an omitted mask disables receipt handling even when a callback URL is supplied, following the pinned Kannel baseline's disabled/undefined mask semantics. Negative values and unsupported bits, including `4`, `8`, and `16`, return HTTP 400. A nonzero mask requires a nonblank callback URL. SMSC submission acceptance/rejection callbacks are not supported; a submission rejection is not treated as a failed handset receipt. Failed terminal receipts include undeliverable, expired, and rejected receipt outcomes under the existing terminal status mapping.
 
-**Breaking correction:** a callback URL alone no longer requests receipts. Add `dlr-mask=1`, `2`, or `3` explicitly. The persisted mask survives restart. Existing DLR rows receive mask `3` during the additive V2 migration. Unselected outcomes are completed without an HTTP request or callback retry; the dispatcher may claim such a row for cleanup, so a claim count is not a count of HTTP requests. SMPP receipt selection is unchanged.
+**HTTP contract correction:** a callback URL alone no longer requests receipts. Add `dlr-mask=1`, `2`, or `3` explicitly. The persisted mask survives restart. The initial V1 schema includes the mask column with default `3` for internal callers that omit it; HTTP admission always supplies the explicitly requested mask. Unselected outcomes are completed without an HTTP request or callback retry; the dispatcher may claim such a row for cleanup, so a claim count is not a count of HTTP requests. SMPP receipt selection is unchanged.
 
 Example HTTP submission:
 

@@ -9,6 +9,7 @@ CREATE TABLE sendium_dlr.dlr_message (
     provider_name TEXT,
     provider_message_id TEXT,
     forward_dlr_url TEXT,
+    dlr_mask INTEGER NOT NULL DEFAULT 3 CHECK (dlr_mask BETWEEN 0 AND 3),
     reassembled_parts TEXT[],
     provider_status TEXT NOT NULL,
     dlr_state INTEGER,
