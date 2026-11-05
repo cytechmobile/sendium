@@ -255,6 +255,7 @@ public final class PendingMessageData {
         result.put("sourceAddress", metadata.sourceAddress());
         result.put("destinationAddress", metadata.destinationAddress());
         result.put("forwardDlrUrl", metadata.forwardDlrUrl());
+        result.put("dlrMask", metadata.dlrMask());
         return result;
     }
 
@@ -273,7 +274,8 @@ public final class PendingMessageData {
                     PendingRecordFields.text(PendingRecordFields.required(node, "systemId")),
                     PendingRecordFields.text(PendingRecordFields.required(node, "sourceAddress")),
                     PendingRecordFields.text(PendingRecordFields.required(node, "destinationAddress")),
-                    PendingRecordFields.text(PendingRecordFields.required(node, "forwardDlrUrl")));
+                    PendingRecordFields.text(PendingRecordFields.required(node, "forwardDlrUrl")),
+                    PendingRecordFields.integer(PendingRecordFields.required(node, "dlrMask"), 0, 3));
         } catch (IllegalArgumentException failure) {
             throw PendingRecordFields.corrupt();
         }

@@ -243,8 +243,9 @@ only the pending stage reruns selection/routing, as defined by the epic.
 
 `channel` is required non-null enum text (`HTTP` or `SMPP`). `accountId`, `systemId`,
 `sourceAddress`, `destinationAddress` and `forwardDlrUrl` are required keys with
-nullable text values. They preserve the corresponding `DlrReturnMetadata` record
-components verbatim. Request flags in the message's normal protocol fields/attrs
+nullable text values. `dlrMask` is a required integer from `0` through `3`, preserving
+the requested terminal HTTP receipt events across recovery. These fields preserve
+the corresponding `DlrReturnMetadata` record components verbatim. Request flags in the message's normal protocol fields/attrs
 are preserved by the message mapping; no DLR backend is serialized here.
 
 ## Extension vocabulary
