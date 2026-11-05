@@ -52,6 +52,12 @@ public class NativeApiAuthenticationFilter implements ContainerRequestFilter {
                     .build());
             return;
         }
+        if (credential.accountId() == null || credential.accountId().isBlank()) {
+            request.abortWith(Response.status(Response.Status.FORBIDDEN).type(MediaType.APPLICATION_JSON_TYPE)
+                    .entity(new NativeApiError("ACCOUNT_NOT_CONFIGURED", "An accountId must be configured for this credential"))
+                    .build());
+            return;
+        }
         var principal = new NativeApiPrincipal(credential.accountId(), credential.product());
         boolean secure = request.getSecurityContext().isSecure();
         request.setSecurityContext(new SecurityContext() {

@@ -97,6 +97,17 @@ class NativeApiAuthenticationFilterTest {
         assertUnauthorized("Bearer alias");
     }
 
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" "})
+    void rejectsCredentialsWithoutAnAccount(String account) {
+        when(credentials.getValidCredentials()).thenReturn(Map.of("key-one",
+                new Credential(CredentialType.HTTP, account, null, null, null, "key-one", null)));
+        var request = request("Bearer key-one");
+        filter.filter(request);
+        assertError(request, 403, "ACCOUNT_NOT_CONFIGURED");
+    }
+
     @Test
     void rejectsAnUnapprovedAddressEvenWhenForwardedHeadersClaimAnApprovedAddress() {
         when(credentials.getValidCredentials()).thenReturn(Map.of("key-one", credential(Set.of("198.51.100.1"))));
