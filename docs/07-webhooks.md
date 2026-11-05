@@ -4,7 +4,11 @@ Sendium can call external HTTP endpoints for delivery receipts and mobile-origin
 
 ## Delivery Receipt Callbacks
 
-HTTP submissions can include a `dlr-url` query parameter. Sendium carries the callback URL as body-free metadata on the in-memory message, persists it only after the upstream provider accepts or rejects the submission, and calls it for the first terminal provider outcome. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
+HTTP submissions request callbacks with both `dlr-url` and `dlr-mask`. Sendium carries the callback URL and mask as body-free metadata, persists them after the upstream provider accepts or rejects submission, and forwards the first terminal receipt only if its event is selected. Intermediate `ACCEPTD` and `ENROUTE` receipts are acknowledged to the provider but are not forwarded.
+
+Supported masks are `1` (delivered), `2` (failed), and `3` (both). `0` or an omitted mask disables receipt handling even when a callback URL is supplied, following the pinned Kannel baseline's disabled/undefined mask semantics. Negative values and unsupported bits, including `4`, `8`, and `16`, return HTTP 400. A nonzero mask requires a nonblank callback URL. SMSC submission acceptance/rejection callbacks are not supported; a submission rejection is not treated as a failed handset receipt. Failed terminal receipts include undeliverable, expired, and rejected receipt outcomes under the existing terminal status mapping.
+
+**Breaking correction:** a callback URL alone no longer requests receipts. Add `dlr-mask=1`, `2`, or `3` explicitly. The persisted mask survives restart. Existing DLR rows receive mask `3` during the additive V2 migration. Unselected outcomes are completed without an HTTP request or callback retry; the dispatcher may claim such a row for cleanup, so a claim count is not a count of HTTP requests. SMPP receipt selection is unchanged.
 
 Example HTTP submission:
 
@@ -15,6 +19,7 @@ curl -G http://localhost:8080/sendsms \
   --data-urlencode "from=Sendium" \
   --data-urlencode "to=306912345678" \
   --data-urlencode "text=Hello from Sendium" \
+  --data-urlencode "dlr-mask=3" \
   --data-urlencode "dlr-url=https://example.com/dlr?msgid=%I&provider=%F&status=%d"
 ```
 
@@ -38,7 +43,7 @@ Baseline: Kannel 1.4.5, pinned commit [`4048b41`](https://github.com/markjeee/ka
 | :--- | :--- |
 | `%I`, `%F`, `%d`, single-pass replacement, `%%`, unknown-token preservation | Supported subset; IDs are carried from persisted delivery state. |
 | Other Kannel message-data placeholders, including `%s` | Not implemented. |
-| `dlr-mask` event selection | Not implemented yet; terminal-only receipt handling remains in effect. |
+| `dlr-mask` event selection | Supported subset: `0`, `1`, `2`, `3`; omitted means disabled. Intermediate and SMSC submission event bits are rejected. |
 | Submission response | Intentional difference: HTTP 202 with gateway UUID, not Kannel's textual acknowledgement dialect. |
 | Endpoint and authentication errors | `/sendsms`, HTTP 401 for invalid credentials; CGI alias and Kannel error dialect are not implemented. |
 | Multipart callback identity semantics and full Kannel placeholder coverage | Not established by this compatibility subset. |

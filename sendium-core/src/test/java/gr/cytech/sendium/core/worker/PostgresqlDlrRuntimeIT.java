@@ -71,7 +71,7 @@ class PostgresqlDlrRuntimeIT {
         assertThat(managedStorage.backend()).isEqualTo("postgresql");
         assertThat(dataSource.getHandle().getBean().isActive()).isTrue();
         assertThat(flyway.getHandle().getBean().isActive()).isTrue();
-        assertThat(flyway.get().info().current().getVersion().getVersion()).isEqualTo("1");
+        assertThat(flyway.get().info().current().getVersion().getVersion()).isEqualTo("2");
         assertThat(flywayHistoryCount()).isOne();
 
         MessageState state = new MessageState(UUID.randomUUID().toString(), "account", "system",
@@ -134,6 +134,7 @@ class PostgresqlDlrRuntimeIT {
                         .queryParam("from", "Sender")
                         .queryParam("to", "306910000000")
                         .queryParam("text", "database outage http")
+                        .queryParam("dlr-mask", 3)
                         .queryParam("dlr-url", "https://example.test/dlr?id=%I&status=%d")
                         .when().get("/sendsms")
                         .then()
@@ -195,7 +196,7 @@ class PostgresqlDlrRuntimeIT {
              ResultSet resultSet = statement.executeQuery("""
                      SELECT COUNT(*)
                      FROM sendium_dlr.flyway_schema_history
-                     WHERE success AND version = '1'
+                     WHERE success AND version = '2'
                      """)) {
             resultSet.next();
             return resultSet.getInt(1);
@@ -230,6 +231,7 @@ class PostgresqlDlrRuntimeIT {
                 .queryParam("from", "Sender")
                 .queryParam("to", "306910000002")
                 .queryParam("text", "database recovered http")
+                .queryParam("dlr-mask", 3)
                 .queryParam("dlr-url", "https://example.test/dlr?id=%I&status=%d")
                 .when().get("/sendsms")
                 .then()

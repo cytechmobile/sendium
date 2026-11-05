@@ -18,6 +18,7 @@ public class MessageState implements Serializable {
     private String providerName;
     private String providerMessageId;
     private String forwardDlrUrl;
+    private int dlrMask = 3;
     private List<String> reassembledParts;
     private MessageStatus status;
     private Integer dlrState;
@@ -82,6 +83,14 @@ public class MessageState implements Serializable {
 
     public String getForwardDlrUrl() {
         return forwardDlrUrl;
+    }
+
+    public int getDlrMask() {
+        return dlrMask;
+    }
+
+    public void setDlrMask(int dlrMask) {
+        this.dlrMask = dlrMask;
     }
 
     public MessageStatus getStatus() {

@@ -110,11 +110,25 @@ public class KannelResource {
             @Parameter(description = "Billing information") @QueryParam("binfo") String binfo,
             @Parameter(description = "Message priority (e.g., 0, 1, 2, 3)") @QueryParam("priority") Integer priority,
             @Parameter(description = "Username for authentication (alternative to 'username') ") @QueryParam("user") String user,
-            @Parameter(description = "Password for authentication (alternative to 'password') ") @QueryParam("pass") String pass) {
+            @Parameter(description = "Password for authentication (alternative to 'password') ") @QueryParam("pass") String pass,
+            @Parameter(description = "DLR events: 0 or omitted disables receipts, 1 delivered, 2 failed, 3 both. Other bits are unsupported.")
+            @QueryParam("dlr-mask") String dlrMask) {
 
         String usr = Strings.isNullOrEmpty(user) ? username : user;
         String passwrd = Strings.isNullOrEmpty(pass) ? password : pass;
         validateKannelAuth(usr, passwrd);
+        int requestedMask;
+        try {
+            requestedMask = dlrMask == null ? 0 : Integer.parseInt(dlrMask);
+        } catch (NumberFormatException e) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("Invalid 'dlr-mask'; expected 0, 1, 2, or 3").build();
+        }
+        if (requestedMask < 0 || requestedMask > 3) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported 'dlr-mask'; supported values: 0, 1, 2, 3").build();
+        }
+        if (requestedMask != 0 && (dlrUrl == null || dlrUrl.isBlank())) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("Missing 'dlr-url' for requested DLR events").build();
+        }
         if (to == null || to.isEmpty()) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity("Missing 'to' parameter")
@@ -211,11 +225,11 @@ public class KannelResource {
             if (binfo != null && !binfo.isEmpty()) {
                 msg.field4 = binfo;
             }
-            msg.acked = dlrUrl != null && !dlrUrl.isBlank();
+            msg.acked = requestedMask != 0;
             UUID gatewayMessageId = UUID.randomUUID();
             msg.serial = gatewayMessageId.toString();
             if (msg.acked) {
-                msg.dlrReturnMetadata = DlrReturnMetadata.http(usr, msg.from, msg.to, dlrUrl);
+                msg.dlrReturnMetadata = DlrReturnMetadata.http(usr, msg.from, msg.to, dlrUrl, requestedMask);
             }
             if (outboundCoordinators.isUnsatisfied()) {
                 queueProvider.getRouterQueue().enqueue(msg);

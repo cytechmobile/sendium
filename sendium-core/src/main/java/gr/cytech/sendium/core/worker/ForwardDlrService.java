@@ -87,6 +87,13 @@ public class ForwardDlrService {
 
     private void dispatch(MessageState dueState, Map<String, Semaphore> hostLimits) {
         String gatewayMsgId = dueState.getGatewayMsgId();
+        // Submission rejection is Kannel bit 16, not a failed handset receipt (bit 2).
+        int eventType = "provider_rejected".equals(dueState.getLastDeliveryResult()) ?
+                16 : mapToKannelType(dueState.getStatus());
+        if ((dueState.getDlrMask() & eventType) == 0) {
+            completeDelivery(gatewayMsgId, dueState.getDeliveryAttemptCount());
+            return;
+        }
         HttpRequest request;
         try {
             request = buildRequest(dueState);

@@ -38,7 +38,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
             gateway_message_id, account_id, system_id, source_address, destination_address,
             provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
             dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
-            last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at
+            last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask
             """;
 
     private static final String RECORD_PROVIDER_ACCEPTED_SQL = """
@@ -47,8 +47,8 @@ public class PostgresqlDlrStorage implements DlrStorage {
                     (gateway_message_id, account_id, system_id, source_address, destination_address,
                      provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
                      dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
-                     last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (gateway_message_id) DO UPDATE SET
                     account_id = EXCLUDED.account_id,
                     system_id = EXCLUDED.system_id,
@@ -57,6 +57,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
                     provider_name = EXCLUDED.provider_name,
                     provider_message_id = EXCLUDED.provider_message_id,
                     forward_dlr_url = EXCLUDED.forward_dlr_url,
+                    dlr_mask = EXCLUDED.dlr_mask,
                     reassembled_parts = EXCLUDED.reassembled_parts,
                     provider_status = EXCLUDED.provider_status,
                     updated_at = EXCLUDED.updated_at
@@ -86,8 +87,8 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 (gateway_message_id, account_id, system_id, source_address, destination_address,
                  provider_name, provider_message_id, forward_dlr_url, reassembled_parts, provider_status,
                  dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
-                 last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, dlr_mask)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (gateway_message_id) DO UPDATE SET
                 account_id = EXCLUDED.account_id,
                 system_id = EXCLUDED.system_id,
@@ -96,6 +97,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 provider_name = EXCLUDED.provider_name,
                 provider_message_id = EXCLUDED.provider_message_id,
                 forward_dlr_url = EXCLUDED.forward_dlr_url,
+                dlr_mask = EXCLUDED.dlr_mask,
                 reassembled_parts = EXCLUDED.reassembled_parts,
                 provider_status = EXCLUDED.provider_status,
                 dlr_state = EXCLUDED.dlr_state,
@@ -386,7 +388,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
         state.setDeliveryAttemptCount(0);
         state.setLastAttemptAt(null);
         state.setNextAttemptAt(state.getDeliveryChannel() == MessageState.DeliveryChannel.HTTP ? now : null);
-        state.setLastDeliveryResult(null);
+        state.setLastDeliveryResult("provider_rejected");
         state.setResolvedAt(now);
         state.setTimestamp(now);
         validateState(state);
@@ -558,10 +560,10 @@ public class PostgresqlDlrStorage implements DlrStorage {
                                      String provider, String providerId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(RECORD_PROVIDER_ACCEPTED_SQL)) {
             setStateParameters(connection, statement, messageId, state);
-            statement.setString(21, provider);
-            statement.setString(22, providerId);
-            statement.setString(23, provider);
-            statement.setString(24, providerId);
+            statement.setString(22, provider);
+            statement.setString(23, providerId);
+            statement.setString(24, provider);
+            statement.setString(25, providerId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() && rows.getBoolean(1);
             }
@@ -837,6 +839,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
         statement.setString(18, state.getLastDeliveryResult());
         setTimestamp(statement, 19, state.getResolvedAt());
         statement.setObject(20, toOffsetDateTime(state.getTimestamp()));
+        statement.setInt(21, state.getDlrMask());
     }
 
     private MessageState readState(ResultSet resultSet) throws SQLException {
@@ -847,6 +850,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
                 resultSet.getString("source_address"),
                 resultSet.getString("destination_address"),
                 resultSet.getString("forward_dlr_url"));
+        state.setDlrMask(resultSet.getInt("dlr_mask"));
         state.setProviderName(resultSet.getString("provider_name"));
         state.setProviderMessageId(resultSet.getString("provider_message_id"));
         state.setReassembledParts(readStringArray(resultSet, "reassembled_parts"));

@@ -156,9 +156,48 @@ class ForwardDlrServiceTest {
     }
 
     @Test
+    void unrequestedTerminalEventsCompleteWithoutSendingOrRetrying() {
+        for (int mask : new int[]{0, 2}) {
+            MessageState due = dueState("https://example.test/dlr?id=%I");
+            due.setDlrMask(mask);
+            dueAttempt(due, 1);
+            when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
+            service.dispatchDueDeliveries();
+        }
+        verify(dlrService, times(2)).completeDelivery(GATEWAY_ID, 1);
+        verifyNoInteractions(httpClient);
+    }
+
+    @Test
+    void submissionRejectionIsNotMistakenForFailedDeliveryReceipt() {
+        MessageState due = dueState("https://example.test/dlr?id=%I");
+        due.setStatus(MessageState.MessageStatus.FAILED);
+        due.setDlrMask(3);
+        due.setLastDeliveryResult("provider_rejected");
+        dueAttempt(due, 1);
+        when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
+        service.dispatchDueDeliveries();
+        verify(dlrService).completeDelivery(GATEWAY_ID, 1);
+        verifyNoInteractions(httpClient);
+    }
+
+    @Test
+    void deliveredOnlyMaskDoesNotForwardFailedReceipt() {
+        MessageState due = dueState("https://example.test/dlr?id=%I");
+        due.setStatus(MessageState.MessageStatus.FAILED);
+        due.setDlrMask(1);
+        dueAttempt(due, 1);
+        when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
+        service.dispatchDueDeliveries();
+        verify(dlrService).completeDelivery(GATEWAY_ID, 1);
+        verifyNoInteractions(httpClient);
+    }
+
+    @Test
     void failedTerminalReceiptUsesProviderIdentityAndFailureType() throws Exception {
         MessageState due = dueState("https://example.test/dlr?id=%I&provider=%F&type=%d");
         due.setStatus(MessageState.MessageStatus.FAILED);
+        due.setDlrMask(2);
         due.setProviderMessageId("provider&failed");
         dueAttempt(due, 1);
         respondWith(200);

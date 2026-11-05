@@ -55,7 +55,7 @@ class MessageLifecycleHttpTest {
     @Test
     void httpUsesTheExplicitCoordinatorBeanAndReturnsBackpressureAtCapacity() throws Exception {
         URI requestUri = URI.create(endpoint + "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello" +
-                "&dlr-url=https%3A%2F%2Fcallback.test%2Fdlr");
+                "&dlr-mask=3&dlr-url=https%3A%2F%2Fcallback.test%2Fdlr");
         try (HttpClient client = HttpClient.newHttpClient()) {
             var request = HttpRequest.newBuilder(requestUri).timeout(Duration.ofSeconds(5)).GET().build();
             var accepted = client.send(request, HttpResponse.BodyHandlers.ofString());

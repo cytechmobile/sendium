@@ -12,6 +12,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import javax.sql.DataSource;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -30,6 +33,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class PostgresqlDlrStorageIT {
     private static final String MIGRATION_LOCATION = "classpath:db/sendium-dlr/postgresql";
@@ -78,6 +86,7 @@ class PostgresqlDlrStorageIT {
         MessageState state = state(
                 MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
         state.setReassembledParts(List.of("part-1", "part-2"));
+        state.setDlrMask(1);
 
         storage.recordProviderAccepted(state, PROVIDER, "provider-message-1");
 
@@ -87,8 +96,51 @@ class PostgresqlDlrStorageIT {
             assertThat(actual.getProviderMessageId()).isEqualTo("provider-message-1");
             assertThat(actual.getDeliveryStatus()).isEqualTo(MessageState.DeliveryStatus.WAITING_PROVIDER);
             assertThat(actual.getReassembledParts()).containsExactly("part-1", "part-2");
+            assertThat(actual.getDlrMask()).isEqualTo(1);
         });
         assertThat(countCorrelations(state.getGatewayMsgId())).isOne();
+    }
+
+    @Test
+    void persistedMasksSelectOnlyRequestedTerminalCallbacks() throws Exception {
+        for (int mask : new int[]{1, 2, 3}) {
+            for (MessageState.MessageStatus outcome : List.of(MessageState.MessageStatus.DELIVERED,
+                    MessageState.MessageStatus.FAILED)) {
+                MessageState message = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr?id=%I&type=%d");
+                message.setDlrMask(mask);
+                String providerId = UUID.randomUUID().toString();
+                storage.recordProviderAccepted(message, PROVIDER, providerId);
+                storage.resolveDlr(PROVIDER, providerId, outcome,
+                        outcome == MessageState.MessageStatus.DELIVERED
+                                ? StandardMessage.DLR_STAT_DELIVRD : StandardMessage.DLR_STAT_FAILED, "0");
+                var dlrService = new DlrService();
+                dlrService.storage = new PostgresqlDlrStorage(dataSource);
+                var client = mock(HttpClient.class);
+                var response = mock(HttpResponse.class);
+                int event = outcome == MessageState.MessageStatus.DELIVERED ? 1 : 2;
+                if ((mask & event) != 0) {
+                    when(response.statusCode()).thenReturn(204);
+                    when(client.send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<Void>>any()))
+                            .thenReturn(response);
+                }
+                new ForwardDlrService(dlrService, client).dispatchDueDeliveries();
+                verify(client, times((mask & event) != 0 ? 1 : 0))
+                        .send(any(HttpRequest.class), org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<Void>>any());
+                assertThat(storage.getState(message.getGatewayMsgId())).isEmpty();
+                assertThat(countCorrelations(message.getGatewayMsgId())).isZero();
+            }
+        }
+    }
+
+    @Test
+    void maskSurvivesBatchedAcceptanceTerminalResolutionAndStorageRecreation() {
+        MessageState message = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
+        message.setDlrMask(2);
+        storage.applyProviderBatch(List.of(acceptedEvent(message, "mask-provider-id")));
+        storage = new PostgresqlDlrStorage(dataSource);
+        resolve("mask-provider-id");
+        assertThat(storage.claimDueHttpDeliveries(10)).singleElement()
+                .satisfies(actual -> assertThat(actual.getDlrMask()).isEqualTo(2));
     }
 
     @Test

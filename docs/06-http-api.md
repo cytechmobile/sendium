@@ -40,6 +40,7 @@ All parameters must be passed in the query string.
 | `charset` | Character set of the `text` parameter (e.g., `UTF-8`, `ISO-8859-1`). If omitted, it defaults to `UTF-8` (or `UTF-16BE` if coding is `2`). |
 | `udh` | User Data Header in hex format (used for concatenated messages or special encoding). Automatically sets coding to 8-bit if provided without a `coding` parameter. |
 | `dlr-url` | Delivery report webhook URL. Supports `%d` (Kannel-style DLR status), `%I` (gateway message ID), and `%F` (provider/SMSC message ID). Must be URL-encoded. See [Webhooks](07-webhooks.md) for template rules and compatibility limits. |
+| `dlr-mask` | Requested terminal receipt events: `1` delivered, `2` failed, `3` both. `0` or omitted disables receipts even with `dlr-url`. Other values are rejected with HTTP 400. A nonzero mask requires a nonblank `dlr-url`. |
 | `mclass` | Message class: `0` (Flash), `1` (ME specific), `2` (SIM specific), `3` (TE specific). |
 | `priority` | Message priority level (e.g., `0`, `1`, `2`, `3`). Defaults to normal priority. |
 | `validity` | Validity period in minutes. |
