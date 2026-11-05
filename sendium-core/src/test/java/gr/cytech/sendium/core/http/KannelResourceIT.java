@@ -248,6 +248,7 @@ class KannelResourceIT {
                 .queryParam("rpi", 1)
                 .queryParam("binfo", "billing-info")
                 .queryParam("priority", 3)
+                .queryParam("dlr-mask", 3)
                 .queryParam("dlr-url", "http://callback.test/dlr?id=%I&status=%d")
                 .when()
                 .get("/sendsms")

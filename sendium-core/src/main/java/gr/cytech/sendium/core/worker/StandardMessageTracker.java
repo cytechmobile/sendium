@@ -200,6 +200,7 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         }
         MessageState state = new MessageState(message.serial, metadata.accountId(), metadata.systemId(),
                 metadata.sourceAddress(), metadata.destinationAddress(), metadata.forwardDlrUrl());
+        state.setDlrMask(metadata.dlrMask());
         state.setDeliveryChannel(MessageState.DeliveryChannel.valueOf(metadata.channel().name()));
         state.setReassembledParts(message.reassembledParts);
         return Optional.of(state);

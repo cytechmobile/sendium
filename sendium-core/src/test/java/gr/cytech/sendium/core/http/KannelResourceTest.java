@@ -106,9 +106,54 @@ class KannelResourceTest {
     }
 
     private Response submit(String dlrUrl) {
+        return submit(dlrUrl, dlrUrl == null ? null : 3);
+    }
+
+    private Response submit(String dlrUrl, Integer mask) {
+        return submitWithMask(dlrUrl, mask == null ? null : mask.toString());
+    }
+
+    private Response submitWithMask(String dlrUrl, String mask) {
         return resource.receiveSms(
                 USERNAME, PASSWORD, "Sender", "306910000000", "Hello", null, null, null,
-                null, null, null, null, dlrUrl, null, null, null, null, null, null, null, null);
+                null, null, null, null, dlrUrl, null, null, null, null, null, null, null, null,
+                mask);
+    }
+
+    @Test
+    void omittedAndZeroMaskDisableReceiptsEvenWithCallbackUrl() throws InterruptedException {
+        var messageCaptor = ArgumentCaptor.forClass(StandardMessage.class);
+        for (Integer mask : new Integer[]{null, 0}) {
+            assertThat(submit("https://callback.test/dlr", mask).getStatus()).isEqualTo(202);
+        }
+        verify(routerQueue, org.mockito.Mockito.times(2)).enqueue(messageCaptor.capture());
+        assertThat(messageCaptor.getAllValues()).allSatisfy(message -> {
+            assertThat(message.acked).isFalse();
+            assertThat(message.dlrReturnMetadata).isNull();
+        });
+    }
+
+    @Test
+    void rejectsUnsupportedMasksAndMissingCallbackBeforeAdmission() {
+        for (int mask : new int[]{-1, 4, 8, 16, 31}) {
+            assertThat(submit("https://callback.test/dlr", mask).getStatus()).isEqualTo(400);
+        }
+        assertThat(submit(null, 1).getStatus()).isEqualTo(400);
+        for (String mask : new String[]{"", "abc", "1.5", "2147483648"}) {
+            assertThat(submitWithMask("https://callback.test/dlr", mask).getStatus()).isEqualTo(400);
+        }
+        verifyNoInteractions(routerQueue);
+    }
+
+    @Test
+    void supportedMasksRemainInAdmissionMetadata() throws InterruptedException {
+        var messageCaptor = ArgumentCaptor.forClass(StandardMessage.class);
+        for (int mask : new int[]{1, 2, 3}) {
+            assertThat(submit("https://callback.test/dlr", mask).getStatus()).isEqualTo(202);
+        }
+        verify(routerQueue, org.mockito.Mockito.times(3)).enqueue(messageCaptor.capture());
+        assertThat(messageCaptor.getAllValues()).extracting(message -> message.dlrReturnMetadata.dlrMask())
+                .containsExactly(1, 2, 3);
     }
 
     @Test

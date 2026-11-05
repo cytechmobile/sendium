@@ -13,6 +13,7 @@ public sealed interface ProviderDlrEvent {
         MessageState copy = new MessageState(source.getGatewayMsgId(), source.getAccountId(), source.getSystemId(),
                 source.getSourceAddr(), source.getDestAddr(), source.getForwardDlrUrl());
         copy.setDeliveryChannel(source.getDeliveryChannel());
+        copy.setDlrMask(source.getDlrMask());
         copy.setReassembledParts(source.getReassembledParts());
         return copy;
     }

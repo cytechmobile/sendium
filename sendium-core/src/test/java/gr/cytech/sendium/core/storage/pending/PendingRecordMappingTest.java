@@ -74,6 +74,17 @@ class PendingRecordMappingTest {
     }
 
     @Test
+    void preservesExplicitReceiptMasksThroughCborRecovery() {
+        for (int mask : new int[]{0, 1, 2, 3}) {
+            StandardMessage message = message();
+            message.dlrReturnMetadata = DlrReturnMetadata.http("account", "sender", "recipient",
+                    "https://example.test/dlr", mask);
+            StandardMessage restored = codec.decode(codec.encode(source(message))).message().restore();
+            assertThat(restored.dlrReturnMetadata).isEqualTo(message.dlrReturnMetadata);
+        }
+    }
+
+    @Test
     void preservesNullCollectionsAndBothDlrChannels() {
         for (var metadata : List.of(DlrReturnMetadata.http("account", "sender", "recipient", "https://example.test/dlr"),
                 DlrReturnMetadata.smpp("account", "system", "sender", "recipient"))) {

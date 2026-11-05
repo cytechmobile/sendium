@@ -53,7 +53,7 @@ class HttpAdaptersTest {
                     assertEquals("UTF-8", query.get("charset"));
                     String token = query.get("text");
                     providerEvents(ledger, token, true);
-                    String callbackUrl = query.get("dlr-url").replace("%s", gatewayId).replace("%d", "1");
+                    String callbackUrl = query.get("dlr-url").replace("%I", gatewayId).replace("%d", "1");
                     assertEquals(204, get(URI.create(callbackUrl)));
                     assertEquals(1, ledger.snapshot().pendingAdmission());
                     respond(exchange, 202, gatewayId);

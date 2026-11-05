@@ -116,9 +116,9 @@ public class NativeE2eSmoke {
                                                                  CallbackServer callbackServer,
                                                                  int expectedSubmitCount) throws Exception {
         upstream.setAutomaticDelivery(false);
-        String dlrUrl = "http://host.docker.internal:" + callbackServer.port() + "/dlr?status=%d&id=%s";
+        String dlrUrl = "http://host.docker.internal:" + callbackServer.port() + "/dlr?status=%d&id=%I";
         String query = "username=http-user"
-                + "&password=http-pass"
+                + "&password=http-pass&dlr-mask=3"
                 + "&from=http-sender"
                 + "&to=306900000002"
                 + "&text=" + URLEncoder.encode("container restart http e2e", StandardCharsets.UTF_8)

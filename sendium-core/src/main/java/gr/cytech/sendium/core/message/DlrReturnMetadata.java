@@ -8,11 +8,23 @@ public record DlrReturnMetadata(
         String systemId,
         String sourceAddress,
         String destinationAddress,
-        String forwardDlrUrl
+        String forwardDlrUrl,
+        int dlrMask
 ) implements Serializable {
     public enum DeliveryChannel {
         HTTP,
         SMPP
+    }
+
+    public DlrReturnMetadata(DeliveryChannel channel, String accountId, String systemId,
+                             String sourceAddress, String destinationAddress, String forwardDlrUrl) {
+        this(channel, accountId, systemId, sourceAddress, destinationAddress, forwardDlrUrl, 3);
+    }
+
+    public static DlrReturnMetadata http(String accountId, String sourceAddress,
+                                         String destinationAddress, String forwardDlrUrl, int dlrMask) {
+        return new DlrReturnMetadata(DeliveryChannel.HTTP, accountId, accountId,
+                sourceAddress, destinationAddress, forwardDlrUrl, dlrMask);
     }
 
     public static DlrReturnMetadata http(String accountId, String sourceAddress,
