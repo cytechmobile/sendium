@@ -48,7 +48,7 @@ class PostgresqlMigrationIT {
     @Test
     void migrationCreatesDlrMessageSchemaAndPartialIndexes() throws SQLException {
         assertThat(initialMigration.success).isTrue();
-        assertThat(initialMigration.migrationsExecuted).isOne();
+        assertThat(initialMigration.migrationsExecuted).isEqualTo(2);
 
         try (Connection connection = connection()) {
             assertThat(loadNames(connection,
@@ -73,8 +73,39 @@ class PostgresqlMigrationIT {
             assertThat(loadColumnNames(connection, "dlr_message"))
                     .contains("dlr_state", "error_code", "delivery_channel", "delivery_status",
                             "delivery_attempt_count", "last_attempt_at", "next_attempt_at",
-                            "claimed_until", "last_delivery_result", "resolved_at")
+                            "claimed_until", "last_delivery_result", "resolved_at", "dlr_mask")
                     .doesNotContain("generation_id");
+        }
+    }
+
+    @Test
+    void receiptMaskDefaultsToBothTerminalEventsAndRejectsUnsupportedBits() throws SQLException {
+        UUID gatewayId = UUID.randomUUID();
+        try (Connection connection = connection()) {
+            insertMessage(connection, gatewayId);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT dlr_mask FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?")) {
+                statement.setObject(1, gatewayId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getInt(1)).isEqualTo(3);
+                }
+            }
+            for (int mask : new int[]{-1, 4, 8, 16}) {
+                assertThatThrownBy(() -> {
+                    try (PreparedStatement statement = connection.prepareStatement(
+                            "UPDATE sendium_dlr.dlr_message SET dlr_mask = ? WHERE gateway_message_id = ?")) {
+                        statement.setInt(1, mask);
+                        statement.setObject(2, gatewayId);
+                        statement.executeUpdate();
+                    }
+                }).isInstanceOf(SQLException.class);
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM sendium_dlr.dlr_message WHERE gateway_message_id = ?")) {
+                statement.setObject(1, gatewayId);
+                statement.executeUpdate();
+            }
         }
     }
 
