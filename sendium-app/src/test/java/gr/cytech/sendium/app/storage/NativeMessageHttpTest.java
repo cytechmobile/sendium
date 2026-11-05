@@ -6,6 +6,7 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.core.http.NativeApiAuthenticated;
 import gr.cytech.sendium.core.http.NativeApiAuthenticationFilter;
 import gr.cytech.sendium.core.http.NativeApiError;
+import gr.cytech.sendium.core.http.NativeApiExceptionMapper;
 import gr.cytech.sendium.core.http.NativeApiPrincipal;
 import gr.cytech.sendium.core.http.NativeMessageRequest;
 import gr.cytech.sendium.core.http.NativeMessageResource;
@@ -46,15 +47,19 @@ import static org.mockito.Mockito.when;
 class NativeMessageHttpTest {
     private static final String VALID = "{\"from\":\"Sendium\",\"to\":\"+306900000000\",\"text\":\"Hello + 10%\"}";
     @RegisterExtension
-    static final QuarkusExtensionTest APP = new QuarkusExtensionTest()
-            .withApplicationRoot(archive -> archive.addClasses(NativeMessageResource.class,
+    static final QuarkusExtensionTest APP = application();
+
+    static QuarkusExtensionTest application() {
+        return new QuarkusExtensionTest()
+            .withApplicationRoot(archive -> archive.addClasses(NativeMessageHttpTest.class, NativeMessageResource.class,
                     NativeMessageResource.Accepted.class, NativeMessageRequest.class, NativeApiAuthenticationFilter.class,
-                    NativeApiAuthenticated.class, NativeApiError.class, NativeApiPrincipal.class,
+                    NativeApiAuthenticated.class, NativeApiError.class, NativeApiExceptionMapper.class, NativeApiPrincipal.class,
                     StandaloneMessageSnapshot.class, Beans.class))
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
             .overrideConfigKey("sendium.dlr.persistence.enabled", "false")
             .overrideConfigKey("quarkus.http.test-port", "0");
+    }
 
     @TestHTTPResource("/api/v1/messages") URI endpoint;
     @Inject OutboundCoordinator<StandardMessage> coordinator;
@@ -198,6 +203,51 @@ class NativeMessageHttpTest {
         assertThat(message.body()).doesNotContain("x".repeat(100));
         assertError(submit(VALID.replace("Hello + 10%", "x".repeat(32768))), 413, "PAYLOAD_TOO_LARGE");
         assertThat(coordinator.selectToRouter(1)).isZero();
+    }
+
+    @Test
+    void publishesJsonSchemasBearerSecurityAndTheCallbackContract() throws Exception {
+        try (var client = HttpClient.newHttpClient()) {
+            var response = client.send(HttpRequest.newBuilder(endpoint.resolve("/q/openapi?format=json")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode()).isEqualTo(200);
+            var openapi = mapper.readTree(response.body());
+            var operation = openapi.path("paths").path("/api/v1/messages").path("post");
+            assertThat(operation.path("operationId").asText()).isEqualTo("submitNativeMessage");
+            assertThat(operation.path("requestBody").path("content").path("application/json").path("schema").path("$ref").asText())
+                    .isEqualTo("#/components/schemas/NativeMessageRequest");
+            assertThat(operation.path("security").get(0).has("NativeApiKey")).isTrue();
+            assertThat(openapi.path("components").path("securitySchemes").path("NativeApiKey").path("scheme").asText())
+                    .isEqualTo("bearer");
+            var schema = openapi.path("components").path("schemas").path("NativeMessageRequest");
+            assertThat(schema.path("required").toString()).contains("from", "to", "text");
+            assertThat(schema.path("additionalProperties").asBoolean(true)).isFalse();
+            assertThat(schema.path("properties").path("encoding").path("default").asText()).isEqualTo("gsm");
+            assertThat(schema.path("properties").path("priority").path("default").asInt()).isEqualTo(2);
+            assertThat(schema.path("properties").path("priority").path("maximum").asInt()).isEqualTo(3);
+            var callback = operation.path("callbacks").path("deliveryReceipt").path("{$request.body#/callbackUrl}").path("post");
+            assertThat(callback.path("requestBody").path("content").has("application/json")).isTrue();
+            assertThat(callback.path("requestBody").path("content").path("application/json").path("schema")
+                    .path("properties").path("status").path("enum").toString()).contains("delivered", "failed");
+        }
+    }
+
+    @Test
+    void returnsJsonForUnsupportedMethodsMediaTypesAndResponseFormats() throws Exception {
+        try (var client = HttpClient.newHttpClient()) {
+            var method = client.send(HttpRequest.newBuilder(endpoint).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertError(method, 405, "METHOD_NOT_ALLOWED");
+            assertThat(method.headers().firstValue("Allow").orElseThrow()).contains("POST");
+            var media = client.send(HttpRequest.newBuilder(endpoint).header("Content-Type", "text/plain")
+                    .header("Authorization", "Bearer native-key").POST(HttpRequest.BodyPublishers.ofString(VALID)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertError(media, 415, "UNSUPPORTED_MEDIA_TYPE");
+            var accept = client.send(HttpRequest.newBuilder(endpoint).header("Content-Type", "application/json")
+                    .header("Accept", "text/plain").header("Authorization", "Bearer native-key")
+                    .POST(HttpRequest.BodyPublishers.ofString(VALID)).build(), HttpResponse.BodyHandlers.ofString());
+            assertError(accept, 406, "NOT_ACCEPTABLE");
+            assertThat(coordinator.selectToRouter(1)).isZero();
+        }
     }
 
     private void useCredential(String account, Set<String> ips) {

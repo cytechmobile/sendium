@@ -30,7 +30,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 
 | Concept | Description |
 | :--- | :--- |
-| HTTP API | Kannel-compatible `GET /sendsms` endpoint for outbound message submission. |
+| HTTP API | Native JSON `POST /api/v1/messages` for new integrations; Kannel-compatible `GET /sendsms` for migration. |
 | SMPP Server | Accepts SMPP binds from downstream clients and applications. |
 | SMPP Client | Connects to upstream SMSCs, carriers, or SMPP providers. |
 | Routing Engine | Evaluates `routingTable.conf` rules and sends messages to workers or routing chains. |
@@ -57,7 +57,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [03. Authentication and Security](03-auth-security.md) | Credential file format, validation rules, IP allowlisting, and reload behavior. |
 | [04. SMPP Configuration](04-smpp-configuration.md) | SMPP server, SMPP client, worker, retry, TLS, logging, and MO settings. |
 | [05. Routing Engine](05-routing-engine.md) | Routing table syntax, operators, message attributes, and routing examples. |
-| [06. HTTP API](06-http-api.md) | Kannel-compatible HTTP submission endpoint, parameters, and response codes. |
+| [06. HTTP API](06-http-api.md) | Native JSON submission, Bearer credentials, deployment guidance, and Kannel compatibility. |
 | [07. Webhooks](07-webhooks.md) | DLR callback URLs and MO forwarding behavior. |
 | [08. Monitoring And Observability](08-monitoring-observability.md) | Prometheus metrics endpoint, Prometheus scrape configuration, Grafana setup, and troubleshooting. |
 | [09. Configuration Reference](09-configuration-reference.md) | Application paths, Docker image tags, environment variables, logging, and OpenAPI endpoints. |
@@ -76,6 +76,7 @@ When Sendium is running, the HTTP API can be inspected through:
 | Endpoint | Description |
 | :--- | :--- |
 | `/sendsms` | Kannel-compatible SMS submission endpoint. |
+| `/api/v1/messages` | Native JSON SMS submission endpoint; POST with a Bearer API key. |
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI specification. |
 | `/q/metrics` | Prometheus-compatible Micrometer metrics endpoint. |

@@ -3,12 +3,24 @@ package gr.cytech.sendium.core.http;
 import com.cloudhopper.commons.charset.CharsetUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import gr.cytech.sendium.core.message.StandardMessage;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
 
 import java.net.URI;
 import java.util.Set;
 
 /** Validated native fields, without Kannel query decoding or caller-supplied ownership/routing. */
-public record NativeMessageRequest(String from, String to, String text, String encoding, int priority, String callbackUrl) {
+@Schema(name = "NativeMessageRequest", requiredProperties = {"from", "to", "text"}, additionalProperties = Schema.False.class)
+public record NativeMessageRequest(
+        @Schema(description = "Caller-selected sender; no sender allowlist", minLength = 1, maxLength = 21,
+                pattern = "^(?=.*[^ ])[ -~]+$") String from,
+        @Schema(description = "Recipient digits with optional leading +", pattern = "^\\+?[0-9]{1,20}$") String to,
+        @Schema(description = "Message text, at most 4096 UTF-16 code units; must match encoding", minLength = 1, maxLength = 4096) String text,
+        @Schema(description = "SMS encoding, independent of JSON UTF-8; UCS2 excludes emoji/surrogate characters",
+                enumeration = {"gsm", "ucs2"}, defaultValue = "gsm") String encoding,
+        @Schema(description = "Existing low/normal/high priority; no delivery-time guarantee",
+                minimum = "1", maximum = "3", defaultValue = "2") int priority,
+        @Schema(description = "Optional absolute HTTP(S) JSON POST receipt URL; no user info, fragment or host preapproval",
+                format = "uri", maxLength = 2048) String callbackUrl) {
     private static final Set<String> FIELDS = Set.of("from", "to", "text", "encoding", "priority", "callbackUrl");
 
     public static NativeMessageRequest parse(JsonNode json) {
