@@ -77,6 +77,28 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
     }
 
     @Override
+    public CompletionStage<Void> handoffProviderAccepted(String hashedProviderMessageId, StandardMessage message,
+                                                         String providerMessageId) {
+        if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
+            return CompletableFuture.completedStage(null);
+        }
+        Optional<MessageState> state = toMessageState(message);
+        if (state.isEmpty()) {
+            return CompletableFuture.completedStage(null);
+        }
+        String gatewayMessageId = message.serial;
+        String providerName = outWorker.getDlrProviderName();
+        return outWorker.getWorkerResources().getDlrService()
+                .recordProviderAcceptedAsync(state.get(), providerName, providerMessageId)
+                .thenAccept(ignored -> {
+                    if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_PROVIDER_LINKED)) {
+                        logger.info("message.provider.linked providerMessageId={} gatewayMsgId={}",
+                                MessageTrace.value(providerMessageId), gatewayMessageId);
+                    }
+                });
+    }
+
+    @Override
     public String getHashedMessageID(String messageId) {
         //note in case of smppclient this method is overridden
         if (messageId == null || messageId.isEmpty()) {
@@ -139,26 +161,36 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
     public void createAndEnqueueSubmissionFailure(StandardMessage message, String providerMessageId,
                                                    String hashedProviderMessageId, String body,
                                                    int state, String errorCode,
-                                                   HashMap<String, String> tlvs) {
+                                                    HashMap<String, String> tlvs) {
+        String gatewayMessageId = message.serial;
+        recordSubmissionFailure(message, providerMessageId, body, state, errorCode, false)
+                .whenComplete((ignored, failure) -> {
+                    if (failure != null) {
+                        logger.error("Failed to persist provider rejection gatewayMsgId={}", gatewayMessageId, failure);
+                    }
+                });
+    }
+
+    @Override
+    public CompletionStage<Void> handoffSubmissionFailure(StandardMessage message,
+            String providerMessageId, String hashedProviderMessageId, String body, int state, String errorCode) {
+        return recordSubmissionFailure(message, providerMessageId, body, state, errorCode, true);
+    }
+
+    private CompletionStage<Void> recordSubmissionFailure(StandardMessage message, String providerMessageId, String body,
+                                                          int state, String errorCode, boolean strict) {
         if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
-            return;
+            return CompletableFuture.completedStage(null);
         }
         Optional<MessageState> returnState = toMessageState(message);
         if (returnState.isEmpty()) {
-            return;
+            return CompletableFuture.completedStage(null);
         }
         String providerName = outWorker.getDlrProviderName();
-        String gatewayMessageId = message.serial;
-        outWorker.getWorkerResources().getDlrService()
+        return outWorker.getWorkerResources().getDlrService()
                 .recordProviderRejectedAsync(returnState.get(), providerName, providerMessageId, state, errorCode)
-                .whenComplete((rejected, failure) -> {
-                    if (failure != null) {
-                        logger.error("Failed to persist provider rejection gatewayMsgId={}", gatewayMessageId, failure);
-                    } else {
-                        rejected.filter(result -> result.getDeliveryChannel() == MessageState.DeliveryChannel.SMPP)
-                                .ifPresent(result -> enqueueDlr(result, providerMessageId, body, state, errorCode));
-                    }
-                });
+                .thenAccept(rejected -> rejected.filter(result -> result.getDeliveryChannel() == MessageState.DeliveryChannel.SMPP)
+                        .ifPresent(result -> enqueueDlr(result, providerMessageId, body, state, errorCode, strict)));
     }
 
     private Optional<MessageState> toMessageState(StandardMessage message) {
@@ -174,7 +206,12 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
     }
 
     private void enqueueDlr(MessageState state, String providerMessageId, String body,
-                            int dlrState, String errorCode) {
+                             int dlrState, String errorCode) {
+        enqueueDlr(state, providerMessageId, body, dlrState, errorCode, false);
+    }
+
+    private void enqueueDlr(MessageState state, String providerMessageId, String body,
+                             int dlrState, String errorCode, boolean strict) {
         StandardMessage dlrMsg = new StandardMessage();
         dlrMsg.serial = state.getGatewayMsgId();
         dlrMsg.from = state.getDestAddr();
@@ -190,6 +227,10 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         try {
             outWorker.enqueueToRouter(dlrMsg);
         } catch (InterruptedException ie) {
+            if (strict) {
+                Thread.currentThread().interrupt();
+                throw new DlrStorageException("Submission failure DLR handoff interrupted", ie);
+            }
             outWorker.handleException(ie);
         }
         if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_DLR)) {

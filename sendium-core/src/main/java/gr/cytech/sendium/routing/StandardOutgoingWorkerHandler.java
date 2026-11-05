@@ -7,6 +7,7 @@ import gr.cytech.sendium.conf.PropertyChangeListener;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
 import gr.cytech.sendium.core.smpp.server.StandardSmppServerMessageStore;
@@ -56,6 +57,8 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
     @Inject
     @Any
     Instance<AbstractOutWorker<StandardMessage>> availableWorkers;
+    @Inject
+    Instance<OutboundCoordinator<StandardMessage>> outboundCoordinators;
     @Inject
     SendiumConfigurationHandler configurationHandler;
     @Inject
@@ -206,6 +209,9 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             worker.init(workerResourceProvider, new StandardMessageTracker(worker));
             if (SmppServerWorker.TYPE_SMPP_SERVER.equals(worker.getType())) {
                 var smppServer = (SmppServerWorker<StandardMessage>) worker;
+                if (!outboundCoordinators.isUnsatisfied()) {
+                    smppServer.setIngressCoordinator(outboundCoordinators.get());
+                }
                 smppServer.setMessageStore(new StandardSmppServerMessageStore(smppServer));
             }
         } catch (Exception e) {
@@ -237,7 +243,7 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             List<String> stopWorkers = new ArrayList<>(outSmsWorkers.size());
             for (AbstractOutWorker worker : outSmsWorkers.values()) {
                 stopWorkers.add(worker.getFullName());
-                stopFutures.add(ex.submit(() -> stopWorker(worker)));
+                stopFutures.add(ex.submit(() -> stopWorker(worker, false)));
             }
 
             for (int i = 0; i < stopFutures.size(); i++) {
@@ -268,6 +274,10 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
     }
 
     private void stopWorker(AbstractOutWorker worker) {
+        stopWorker(worker, true);
+    }
+
+    private void stopWorker(AbstractOutWorker worker, boolean runtimeRemoval) {
         final long start = System.currentTimeMillis();
         logger.debug("stopping worker {} in thread {}", worker.getFullName(), Thread.currentThread().getName());
         notifyBeforeWorkerStop(worker);
@@ -278,7 +288,9 @@ public class StandardOutgoingWorkerHandler implements PropertyChangeListener, Ou
             logger.warn("exception stopping worker: {}", worker.getFullName(), e);
         }
         outSmsWorkers.remove(worker.getInstanceName());
-        worker.dequeueAllToRouter();
+        if (runtimeRemoval) {
+            worker.dequeueAllToRouter();
+        }
         logger.debug("stopping worker {} in thread {} took: {}ms",
                 worker.getFullName(), Thread.currentThread().getName(), System.currentTimeMillis() - start);
     }

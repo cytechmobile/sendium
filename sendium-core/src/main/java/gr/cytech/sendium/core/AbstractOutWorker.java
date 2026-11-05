@@ -34,6 +34,8 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.DelayQueue;
@@ -43,6 +45,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 
 public abstract class AbstractOutWorker<M extends StandardMessage> implements HealthCheckReporter {
 
@@ -205,6 +208,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
     private double transactionsPerSecond;
     private RateLimiter rateLimiter;
     private FailDelayPolicy failDelayPolicy;
+    private final ThreadLocal<RetryScheduling<M>> coordinatedRetryScheduling = new ThreadLocal<>();
 
     protected AbstractOutWorker() {
         // for fast initialization
@@ -530,6 +534,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
     }
 
     public void enqueue(M pMsg) throws InterruptedException {
+        if (scheduleCoordinatedRetry(pMsg, false, 0)) {
+            return;
+        }
         if (isFilter()) {
             logger.debug("Filters do not have queues");
             return;
@@ -696,6 +703,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
      * @param msg The message to enqueue to the router
      */
     public final void enqueueToRouter(M msg) throws InterruptedException {
+        if (scheduleCoordinatedRetry(msg, true, 0)) {
+            return;
+        }
         routerQueue.enqueue(msg);
         if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ENQUEUED)) {
             logger.info("message.enqueued destination=router {}", MessageTrace.identifiers(msg));
@@ -715,6 +725,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
     }
 
     public final void enqueueDelayed(M msg, long delay) {
+        if (scheduleCoordinatedRetry(msg, false, delay)) {
+            return;
+        }
         if (isFilter()) {
             throw new UnsupportedOperationException("Filters do not have queues");
         }
@@ -1134,6 +1147,62 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         }
     }
 
+    /** Applies the production failure policy while replacing its runtime queue scheduling boundary. */
+    protected CompletionStage<Void> coordinateFailure(M message, boolean workerRetry,
+                                                       BiFunction<M, Boolean, CompletionStage<Void>> retry) {
+        return captureRetryScheduling(() -> onMessageFailed(message, workerRetry), retry);
+    }
+
+    /** Preserves the worker loop's before-processing filter rejection policy. */
+    protected CompletionStage<Void> coordinatePreparationFailure(M message, boolean enqueueInstead,
+                                                                  BiFunction<M, Boolean, CompletionStage<Void>> retry) {
+        return captureRetryScheduling(() -> handleMessageFailInWorker("coordinated", message, enqueueInstead), retry);
+    }
+
+    private CompletionStage<Void> captureRetryScheduling(Runnable failurePolicy,
+                                                          BiFunction<M, Boolean, CompletionStage<Void>> retry) {
+        if (coordinatedRetryScheduling.get() != null) {
+            throw new IllegalStateException("Nested failure policy capture is not supported");
+        }
+        var scheduling = new RetryScheduling<M>(retry);
+        coordinatedRetryScheduling.set(scheduling);
+        try {
+            failurePolicy.run();
+        } finally {
+            coordinatedRetryScheduling.remove();
+        }
+        scheduling.dispatches.forEach(Runnable::run);
+        return CompletableFuture.allOf(scheduling.operations.toArray(CompletableFuture[]::new));
+    }
+
+    private boolean scheduleCoordinatedRetry(M message, boolean router, long delay) {
+        RetryScheduling<M> scheduling = coordinatedRetryScheduling.get();
+        if (scheduling == null) {
+            return false;
+        }
+        var result = new CompletableFuture<Void>();
+        scheduling.operations.add(result);
+        Runnable submit = () -> {
+            try {
+                scheduling.retry.apply(message, router).whenComplete((ignored, failure) -> {
+                    if (failure == null) {
+                        result.complete(null);
+                    } else {
+                        result.completeExceptionally(failure);
+                    }
+                });
+            } catch (RuntimeException failure) {
+                result.completeExceptionally(failure);
+            }
+        };
+        if (delay > 0) {
+            scheduling.dispatches.add(() -> CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS).execute(submit));
+        } else {
+            scheduling.dispatches.add(submit);
+        }
+        return true;
+    }
+
     public void onMessageSuccess(M msg) throws IOException {
         try {
             failedMsgCounter.remove(msg.msgId);
@@ -1153,7 +1222,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                 if (enqueueInstead) {
                     if (routerQueue == null) {
                         logger.warn("Worker {} does not have a reference to router", getFullName());
-                        msgQ.enqueue(m);
+                        enqueueFallback(m);
                     } else {
                         enqueueToRouter(m);
                     }
@@ -1164,9 +1233,20 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                     doFailDelayWorkerEndRetryPolicyAction(m);
                 }
             } catch (InterruptedException ie) {
+                RetryScheduling<M> scheduling = coordinatedRetryScheduling.get();
+                if (scheduling != null) {
+                    scheduling.operations.add(CompletableFuture.failedFuture(ie));
+                    Thread.currentThread().interrupt();
+                }
                 handleException(ie);
             }
             failedMsgCounter.remove(m.msgId);
+        }
+    }
+
+    private void enqueueFallback(M message) throws InterruptedException {
+        if (!scheduleCoordinatedRetry(message, false, 0)) {
+            msgQ.enqueue(message);
         }
     }
 
@@ -1230,7 +1310,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                     //Default action is to enqueue to router, otherwise it will be just dropped
                     if (routerQueue == null) {
                         logger.warn("Worker {} does not have a reference to router", getFullName());
-                        msgQ.enqueue(m);
+                        enqueueFallback(m);
                     } else {
                         enqueueToRouter(m);
                     }
@@ -1246,7 +1326,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
             case RE_ENQUEUE_ROUTER:
                 if (routerQueue == null) {
                     logger.warn("Worker {} does not have a reference to router", getFullName());
-                    msgQ.enqueue(m);
+                    enqueueFallback(m);
                 } else {
                     enqueueToRouter(m);
                 }
@@ -1329,6 +1409,16 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         return true;
     }
 
+    private static final class RetryScheduling<M extends StandardMessage> {
+        private final BiFunction<M, Boolean, CompletionStage<Void>> retry;
+        private final java.util.ArrayList<CompletableFuture<Void>> operations = new java.util.ArrayList<>();
+        private final java.util.ArrayList<Runnable> dispatches = new java.util.ArrayList<>();
+
+        private RetryScheduling(BiFunction<M, Boolean, CompletionStage<Void>> retry) {
+            this.retry = retry;
+        }
+    }
+
     public enum FilterLifecyclePhase {
         DURING_ROUTING, BEFORE_PROCESSING, AFTER_SUCCESS, AFTER_FAILURE, BEFORE_INSERT;
     }
@@ -1388,7 +1478,6 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                         sleeper.sleep(configurationProvider.getLongPrpt(_pauseSleepMs), TimeUnit.MILLISECONDS);
                         continue;
                     }
-                    applyRateLimit();
                     if (msg == null) {
                         // wait up to 200ms for the next Message
                         msg = msgQ.dequeue(200);
@@ -1396,6 +1485,9 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                     // if no Message returned retry
                     if (msg == null) {
                         continue;
+                    }
+                    if (keepOnRunning) {
+                        applyRateLimit();
                     }
                     if (!keepOnRunning) {
                         logger.info("enqueued message msg:{} back to queue since worker stopping, and keepOnRunning:{}", msg.msgId, keepOnRunning);

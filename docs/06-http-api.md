@@ -57,11 +57,11 @@ The API returns standard HTTP status codes along with a plain-text response body
 
 | HTTP Status | Meaning | Description |
 | :--- | :--- | :--- |
-| **`202 Accepted`** | **Success** | The message was validated and inserted into Sendium's router queue. The response body contains the unique UUID (serial) of the message. |
-| **`400 Bad Request`** | **Error** | Missing a required parameter (`to`, `from`, or `text`). The response body details which parameter is missing. |
+| **`202 Accepted`** | **Success** | Admission succeeded through the configured path. The response body contains the unique gateway UUID (serial) of the message. |
+| **`400 Bad Request`** | **Error** | Missing a required parameter (`to`, `from`, or `text`), or the selected lifecycle cannot support the submission. |
 | **`401 Unauthorized`** | **Error** | Invalid or missing credentials. |
 | **`500 Server Error`** | **Error** | An internal error occurred while parsing or processing the message payload. |
-| **`503 Unavailable`** | **Error** | Internal queue admission was interrupted. The message was not queued; the client should retry later. |
+| **`503 Unavailable`** | **Error** | Admission is unavailable, at capacity, has an ownership conflict, or was interrupted. The client should retry later. |
 
 ---
 
@@ -90,7 +90,9 @@ For a manual installation, replace the environment variables with the HTTP `syst
 123e4567-e89b-12d3-a456-426614174000
 ```
 
-`202 Accepted` means Sendium validated the message and inserted it into the in-memory router queue. It does not write an outbound message or DLR row to PostgreSQL, and it does not prove that a viable route exists, that an upstream SMSC accepted the message, or that a handset received it. Durable DLR state is created only after an upstream provider outcome. Local-only Quick Start installations have no outbound route. Check routing configuration, the SMPP client connection, message lifecycle logs, submit response, and delivery receipt for those later stages.
+In the standalone runtime, `202 Accepted` means admission into the memory-backed pending store. The source remains retained through routing, provider processing, and required DLR handoffs. Capacity rejection returns `503`; a failing coordinator is never replaced by legacy queue admission. Embedded callers without a coordinator retain the legacy in-memory queue path. The memory profile is non-durable across restart. See [Outbound Message Storage](14-outbound-storage.md).
+
+Neither memory admission path writes an outbound message or DLR row to PostgreSQL. Acceptance does not prove that a viable route exists, that an upstream SMSC accepted the message, or that a handset received it. Durable DLR state is created only after an upstream provider outcome. Local-only Quick Start installations have no outbound route. Check routing configuration, the SMPP client connection, message lifecycle logs, submit response, and delivery receipt for those later stages.
 
 ## Related Documentation
 

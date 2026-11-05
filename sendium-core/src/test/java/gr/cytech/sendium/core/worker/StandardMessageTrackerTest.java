@@ -3,6 +3,8 @@ package gr.cytech.sendium.core.worker;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.external.WorkerResourceProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,12 +14,16 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import utils.OutboundIngressFixture;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -69,6 +75,45 @@ class StandardMessageTrackerTest {
         assertEquals("systemId", captor.getValue().getSystemId());
         assertEquals(MessageState.DeliveryChannel.SMPP, captor.getValue().getDeliveryChannel());
         assertEquals(List.of("part-1", "part-2"), captor.getValue().getReassembledParts());
+    }
+
+    @Test
+    void coordinatedAcceptanceRetainsSourceUntilProviderBatchCommits() throws Exception {
+        var commit = new CompletableFuture<Optional<MessageState>>();
+        when(dlrService.recordProviderAcceptedAsync(any(), eq("provider-1"), eq("provider-message"))).thenReturn(commit);
+        try (var fixture = new OutboundIngressFixture(1)) {
+            var message = new StandardMessage();
+            message.serial = UUID.randomUUID().toString();
+            message.dlrReturnMetadata = DlrReturnMetadata.http("account", "from", "to", "https://example.test/dlr");
+            var source = new SourceId(UUID.randomUUID());
+            fixture.coordinator.accept(source, message);
+            fixture.coordinator.selectToRouter(1);
+            var selected = fixture.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            fixture.coordinator.recordToRouted(selected, new Destination<>("provider-1", selected.message()));
+            var work = fixture.coordinator.takeFromRouted("provider-1", Duration.ZERO).orElseThrow();
+
+            var completion = fixture.coordinator.complete(work.id(),
+                    tracker.handoffProviderAccepted("hash", work.message(), "provider-message")).toCompletableFuture();
+            assertFalse(completion.isDone());
+            assertTrue(fixture.pending.find(source).isPresent());
+            commit.complete(Optional.empty());
+            completion.join();
+            assertTrue(fixture.pending.find(source).isEmpty());
+            verify(dlrService, never()).recordProviderAccepted(any(), any(), any());
+        }
+    }
+
+    @Test
+    void coordinatedProviderHandoffReportsBatchPersistenceFailure() {
+        var message = new StandardMessage();
+        message.serial = "gw-123";
+        message.dlrReturnMetadata = DlrReturnMetadata.smpp("account", "system", "from", "to");
+        var failure = new DlrStorageException("batch persistence failed");
+        when(dlrService.recordProviderAcceptedAsync(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(failure));
+
+        var completion = tracker.handoffProviderAccepted("hash", message, "provider-message").toCompletableFuture();
+
+        assertSame(failure, assertThrows(CompletionException.class, completion::join).getCause());
     }
 
     @Test
@@ -151,6 +196,47 @@ class StandardMessageTrackerTest {
         assertEquals("gw-123", captor.getValue().serial);
         assertEquals("5", captor.getValue().body);
         assertEquals("22", captor.getValue().errcode);
+    }
+
+    @Test
+    void coordinatedSubmissionFailureDoesNotTreatInterruptedDlrHandoffAsSuccess() throws InterruptedException {
+        var message = new StandardMessage();
+        message.serial = "gw-123";
+        message.dlrReturnMetadata = DlrReturnMetadata.smpp("account", "system", "from", "to");
+        var rejected = new MessageState("gw-123", "account", "system", "from", "to", null);
+        rejected.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        when(dlrService.recordProviderRejectedAsync(any(), any(), any(), anyInt(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Optional.of(rejected)));
+        doThrow(new InterruptedException("interrupted")).when(outWorker).enqueueToRouter(any());
+        try {
+            var completion = tracker.handoffSubmissionFailure(
+                    message, "provider", "hash", "5", StandardMessage.DLR_STAT_FAILED, "22").toCompletableFuture();
+            assertInstanceOf(DlrStorageException.class, assertThrows(CompletionException.class, completion::join).getCause());
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void coordinatedSubmissionFailureWaitsForBatchCommitAndRoutesOnce() throws InterruptedException {
+        var message = new StandardMessage();
+        message.serial = "gw-123";
+        message.dlrReturnMetadata = DlrReturnMetadata.smpp("account", "system", "from", "to");
+        var commit = new CompletableFuture<Optional<MessageState>>();
+        when(dlrService.recordProviderRejectedAsync(any(), any(), any(), anyInt(), any())).thenReturn(commit);
+        var completion = tracker.handoffSubmissionFailure(
+                message, "provider", "hash", "5", StandardMessage.DLR_STAT_FAILED, "22").toCompletableFuture();
+        assertFalse(completion.isDone());
+        verify(outWorker, never()).enqueueToRouter(any());
+
+        var rejected = new MessageState("gw-123", "account", "system", "from", "to", null);
+        rejected.setDeliveryChannel(MessageState.DeliveryChannel.SMPP);
+        commit.complete(Optional.of(rejected));
+
+        completion.join();
+        verify(outWorker).enqueueToRouter(any());
+        verify(dlrService, never()).recordProviderRejected(any(), any(), any(), anyInt(), any());
     }
 
     @Test
