@@ -15,6 +15,7 @@ These instructions apply to all work in this repository.
 ## Application Logging
 
 - Use `operation|status|field:value` for new or modified application log messages, for example `dlrCallback|retry|gatewayMsgId:{}|attempt:{}|reason:{}`. Apply the convention incrementally; do not bulk-convert unrelated logs.
+- Use the same format for new or modified application exception messages that can surface in logs. Preserve typed failure reasons and appropriate causes; this does not require wrapping third-party exception text or adding a log event at every throw site. Apply the same correlation, sanitization and sensitive-data rules to exception fields.
 - Use stable operation names that describe application behavior rather than Java method names. Use consistent field names across related events.
 - Let the logger level express severity; use the status for the outcome, such as `accepted`, `success`, `retry`, or `error`.
 - Include available message correlation identifiers in message-processing logs. Preserve their meaning and field names across events; do not invent identifiers when unavailable.
