@@ -7,13 +7,18 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
+import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMessageData;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
+import gr.cytech.sendium.util.MessageUtil;
 
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -38,18 +43,25 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
 public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage>, PendingSelectionSource<StandardMessage> {
     private final PendingSpool spool;
     private final int capacity;
+    private final Clock clock;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private State state = State.NEW;
     private long retained;
     private Object selectorOwner;
+    private long lastGroupOrder = -1;
 
     public FilePendingMessageStore(Path root, int capacity) {
+        this(root, capacity, Clock.systemUTC());
+    }
+
+    public FilePendingMessageStore(Path root, int capacity, Clock clock) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("pendingConfiguration|error|reason:nonPositiveCapacity");
         }
         this.spool = new PendingSpool(root);
         this.capacity = capacity;
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
@@ -72,7 +84,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         try {
             spool.open();
             retained = spool.recoveredSources();
-            // Do not claim successful recovery of source types not implemented by this increment.
+            // Validate cross-record membership before exposing recovered sources to ingress/selection.
             SourceId cursor = null;
             while (true) {
                 List<SourceId> page = spool.sourcesAfter(cursor, 128);
@@ -80,8 +92,10 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                     break;
                 }
                 for (SourceId source : page) {
-                    if (spool.find(source).orElseThrow().multipart() != null) {
-                        throw unsupported("pendingRecovery|error|reason:multipartRecoveryUnavailable");
+                    MultipartMembership membership = spool.find(source).orElseThrow().multipart();
+                    if (membership != null) {
+                        validateMembership(membership);
+                        lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
                     }
                 }
                 cursor = page.getLast();
@@ -123,10 +137,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         if (spool.find(source).isPresent()) {
             return source;
         }
-        if (retained >= capacity) {
-            throw new OutboundStorageException(PENDING, CAPACITY_EXCEEDED,
-                    "pendingAdmission|error|sourceId:" + source.value() + "|reason:capacityExceeded");
-        }
+        checkCapacity(source);
         PendingSourceRecord record;
         try {
             record = new PendingSourceRecord(source, disposition, PendingMessageData.capture(message));
@@ -169,10 +180,133 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public MultipartMembership admitPart(SourceId source, StandardMessage message, Duration timeout) {
-        return withLock(() -> {
-            requireReady();
-            throw unsupported("pendingAdmission|error|reason:multipartAdmissionUnavailable");
-        });
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(message, "message");
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("pendingMultipartAdmission|error|reason:nonPositiveTimeout");
+        }
+        return withLock(() -> admitMultipart(source, message, timeout));
+    }
+
+    private MultipartMembership admitMultipart(SourceId source, StandardMessage message, Duration timeout) {
+        requireReady();
+        Optional<PendingSourceRecord> existing = spool.find(source);
+        if (existing.isPresent()) {
+            MultipartMembership membership = existing.orElseThrow().multipart();
+            if (membership == null) {
+                throw new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                        "pendingMultipartAdmission|error|sourceId:" + source.value() + "|reason:sourceHasNoMembership");
+            }
+            return membership;
+        }
+        checkCapacity(source);
+        PendingMessageData data = PendingMessageData.capture(message);
+        StandardMessage accepted = data.restore();
+        MultipartKey key;
+        int ordinal;
+        try {
+            if (!source.value().toString().equalsIgnoreCase(accepted.serial)) {
+                throw new IllegalArgumentException();
+            }
+            key = MultipartKey.from(accepted);
+            ordinal = MessageUtil.concatenation(accepted).orElseThrow().ordinal();
+        } catch (IllegalArgumentException failure) {
+            throw unsupported("pendingMultipartAdmission|error|sourceId:" + source.value() + "|reason:invalidIdentity");
+        }
+        Instant now = clock.instant();
+        MultipartMembership group = openGroup(key, now);
+        MultipartMembership membership;
+        if (group == null) {
+            if (lastGroupOrder == Long.MAX_VALUE) {
+                throw unsupported("pendingMultipartAdmission|error|reason:groupOrderExhausted");
+            }
+            Instant deadline;
+            try {
+                deadline = now.plus(timeout);
+            } catch (DateTimeException | ArithmeticException failure) {
+                throw unsupported("pendingMultipartAdmission|error|reason:invalidDeadline");
+            }
+            membership = new MultipartMembership(source, UUID.randomUUID(), key, ordinal, deadline, lastGroupOrder + 1);
+        } else {
+            SourceId original = spool.groupOriginal(group.groupId(), ordinal);
+            if (original != null) {
+                MultipartMembership owner = retainedMembership(original);
+                if (!sameGroup(group, owner) || owner.duplicate() || owner.ordinal() != ordinal) {
+                    throw invalidMembership(original);
+                }
+            }
+            membership = new MultipartMembership(source, group.groupId(), key, ordinal, group.deadline(), group.groupOrder(),
+                    original == null ? source : original);
+        }
+        spool.publish(new PendingSourceRecord(source, PendingSourceRecord.Disposition.HELD, data, membership));
+        retained++;
+        lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
+        if (spool.groupOriginalCount(membership.groupId()) == key.total()) {
+            spool.closeGroup(membership);
+        }
+        return membership;
+    }
+
+    private void checkCapacity(SourceId source) {
+        if (retained >= capacity) {
+            throw new OutboundStorageException(PENDING, CAPACITY_EXCEEDED,
+                    "pendingAdmission|error|sourceId:" + source.value() + "|reason:capacityExceeded");
+        }
+    }
+
+    private MultipartMembership openGroup(MultipartKey key, Instant now) {
+        String cursor = null;
+        while (true) {
+            List<String> page = spool.matchingGroupsAfter(key, cursor, 1);
+            if (page.isEmpty()) {
+                return null;
+            }
+            cursor = page.getFirst();
+            MultipartMembership candidate = groupIdentity(MultipartPendingIndex.groupId(cursor));
+            if (!candidate.key().equals(key)) {
+                continue; // A matching-key hash is only a lookup hint, never identity.
+            }
+            if (!candidate.deadline().isAfter(now) || spool.groupOriginalCount(candidate.groupId()) == key.total()) {
+                spool.closeGroup(candidate);
+                continue;
+            }
+            return candidate;
+        }
+    }
+
+    private MultipartMembership groupIdentity(UUID groupId) {
+        List<SourceId> sources = spool.groupSourcesAfter(groupId, null, 1);
+        if (sources.isEmpty()) {
+            state = State.FAILED;
+            throw new OutboundStorageException(PENDING, UNAVAILABLE,
+                    "pendingMultipartRecovery|error|groupId:" + groupId + "|reason:missingGroupMembers");
+        }
+        return retainedMembership(sources.getFirst());
+    }
+
+    private MultipartMembership retainedMembership(SourceId source) {
+        return spool.find(source).map(PendingSourceRecord::multipart).orElseThrow(() -> invalidMembership(source));
+    }
+
+    private void validateMembership(MultipartMembership member) {
+        MultipartMembership identity = groupIdentity(member.groupId());
+        MultipartMembership original = retainedMembership(member.originalSource());
+        if (!sameGroup(identity, member) || !sameGroup(original, member) || original.duplicate() ||
+                original.ordinal() != member.ordinal()) {
+            throw invalidMembership(member.source());
+        }
+    }
+
+    private static boolean sameGroup(MultipartMembership left, MultipartMembership right) {
+        return left.groupId().equals(right.groupId()) && left.key().equals(right.key()) &&
+                left.deadline().equals(right.deadline()) && left.groupOrder() == right.groupOrder();
+    }
+
+    private OutboundStorageException invalidMembership(SourceId source) {
+        state = State.FAILED;
+        return new OutboundStorageException(PENDING, UNAVAILABLE,
+                "pendingMultipartRecovery|error|sourceId:" + source.value() + "|reason:invalidMembership");
     }
 
     @Override
@@ -188,7 +322,16 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         return withLock(() -> {
             requireReady();
             Objects.requireNonNull(groupId, "groupId");
-            return List.of();
+            var sources = new ArrayList<SourceId>();
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = spool.groupSourcesAfter(groupId, cursor, 128);
+                if (page.isEmpty()) {
+                    return List.copyOf(sources);
+                }
+                sources.addAll(page);
+                cursor = page.getLast();
+            }
         });
     }
 

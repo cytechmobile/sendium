@@ -17,16 +17,21 @@ final class FolderPendingIndex {
     private final Path root;
     private final DirectoryReferenceIndex sources;
     private final DirectoryReferenceIndex priorities;
+    private final MultipartPendingIndex multipart;
 
     FolderPendingIndex(Path root) throws IOException {
         this.root = root;
         sources = new DirectoryReferenceIndex(root.resolve("sources"), 32, LEAF_LIMIT);
         priorities = new DirectoryReferenceIndex(root.resolve("priorities"), 8, LEAF_LIMIT);
         Files.createDirectories(root.resolve("ready"));
+        multipart = new MultipartPendingIndex(root.resolve("multipart"));
     }
 
     void add(PendingSourceRecord record) throws IOException {
         sources.add(sourceKey(record.source()));
+        if (record.multipart() != null) {
+            multipart.add(record.multipart());
+        }
         if (record.disposition() == PendingSourceRecord.Disposition.READY) {
             int priority = record.message().restore().priority;
             readyIndex(priority).add(sourceKey(record.source()));
@@ -91,9 +96,13 @@ final class FolderPendingIndex {
                 id.getLeastSignificantBits() ^ Long.MIN_VALUE);
     }
 
-    private static SourceId source(String key) {
+    static SourceId source(String key) {
         return new SourceId(new UUID(Long.parseUnsignedLong(key.substring(0, 16), 16) ^ Long.MIN_VALUE,
                 Long.parseUnsignedLong(key.substring(16), 16) ^ Long.MIN_VALUE));
+    }
+
+    MultipartPendingIndex multipart() {
+        return multipart;
     }
 
     private static String priorityKey(int priority) {
