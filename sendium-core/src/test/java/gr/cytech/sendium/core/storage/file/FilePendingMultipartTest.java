@@ -321,12 +321,13 @@ class FilePendingMultipartTest {
     }
 
     @Test
-    void multipartCompletionRemainsExplicitlyBlockedUntilGroupedCleanupExists() {
+    void multipartCompletionRemovesTerminalSourcesAndFreesCapacity() {
         try (var store = store(NOW, 1)) {
             store.open();
             var member = accept(store, part("0500037F0301"));
-            assertThatThrownBy(() -> store.complete(Set.of(member.source()))).hasMessageContaining("reason:multipartCompletionUnavailable");
-            assertThat(store.findMultipart(member.source())).contains(member);
+            store.complete(Set.of(member.source()));
+            assertThat(store.findMultipart(member.source())).isEmpty();
+            assertThat(accept(store, part("0500037F0301")).groupId()).isNotEqualTo(member.groupId());
             assertThat(store.status().state()).isEqualTo(OutboundStage.State.READY);
         }
     }

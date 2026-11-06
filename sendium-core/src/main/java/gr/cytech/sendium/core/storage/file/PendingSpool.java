@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.storage.file;
 
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.file.PendingTerminalCodec.Intent;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
@@ -17,9 +18,11 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
@@ -42,6 +45,7 @@ public final class PendingSpool implements AutoCloseable {
     private long recoveredSources;
     private FolderPendingIndex index;
     private HeldPendingPublications publications;
+    private PendingTerminalJournal terminal;
 
     public PendingSpool(Path root) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
@@ -175,32 +179,63 @@ public final class PendingSpool implements AutoCloseable {
         }
     }
 
-    /** Ordinary sources only; multipart terminal-intent reconciliation is added separately. */
-    synchronized boolean remove(SourceId source) {
+    synchronized boolean isGroupClosed(UUID group) {
         requireReady();
-        Optional<PendingSourceRecord> existing = find(source);
-        if (existing.isEmpty()) {
-            return false;
-        }
-        PendingSourceRecord record = existing.orElseThrow();
-        if (publicationId(source).isPresent()) {
-            throw new OutboundStorageException(PENDING, UNSUPPORTED,
-                    "pendingCompletion|error|sourceId:" + source.value() + "|reason:boundCompletionUnavailable");
-        }
-        if (record.multipart() != null) {
-            throw new OutboundStorageException(PENDING, UNSUPPORTED,
-                    "pendingCompletion|error|sourceId:" + source.value() + "|reason:multipartCompletionUnavailable");
-        }
         try {
-            Files.delete(sourcePath(source));
-            index.remove(record);
-            return true;
+            return terminal.isClosed(group);
         } catch (IOException | RuntimeException failure) {
             ready = false;
-            if (failure instanceof OutboundStorageException storage) {
-                throw storage;
+            throw unavailable("pendingMultipartLookup|error|groupId:" + group + "|reason:closureReadFailed", failure);
+        }
+    }
+
+    /** Caller validates complete execution/ordinal ownership under the shared pending/router lock. */
+    synchronized long completeSources(Set<SourceId> sources) {
+        requireReady();
+        var retained = new HashSet<SourceId>();
+        var groups = new HashSet<UUID>();
+        for (SourceId source : sources) {
+            Optional<PendingSourceRecord> record = find(source);
+            if (record.isPresent()) {
+                retained.add(source);
+                if (record.orElseThrow().multipart() != null) {
+                    groups.add(record.orElseThrow().multipart().groupId());
+                }
             }
-            throw unavailable("pendingCompletion|error|sourceId:" + source.value() + "|reason:sourceRemovalFailed", failure);
+        }
+        if (retained.isEmpty()) {
+            return 0;
+        }
+        Intent intent = new Intent(UUID.randomUUID(), sources, groups);
+        try {
+            terminal.publish(intent);
+            for (UUID group : groups) {
+                terminal.closeGroup(group);
+            }
+            var publicationsRemoved = new HashSet<UUID>();
+            for (SourceId source : retained) {
+                Optional<Publication> binding = findPublication(source);
+                if (binding.isPresent() && publicationsRemoved.add(binding.orElseThrow().id())) {
+                    Publication publication = binding.orElseThrow();
+                    index.removeReady(publication.representative(), publication.message().restore().priority);
+                    publications.remove(publication);
+                }
+            }
+            for (SourceId source : retained) {
+                PendingSourceRecord record = read(sourcePath(source), source);
+                Files.delete(sourcePath(source));
+                index.remove(record);
+            }
+            for (UUID group : groups) {
+                if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
+                    terminal.forgetGroup(group);
+                }
+            }
+            terminal.finish(intent.id());
+            return retained.size();
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            throw unavailable("pendingCompletion|error|intentId:" + intent.id() + "|reason:sourceRemovalFailed", failure);
         }
     }
 
@@ -264,7 +299,7 @@ public final class PendingSpool implements AutoCloseable {
                 if (temporary(name)) {
                     deleteTemporary(entry);
                 } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("sources") &&
-                        !name.equals("derived")) {
+                        !name.equals("derived") && !name.equals("terminal") && !name.equals("closed-groups")) {
                     throw unavailable("pendingRecovery|error|reason:unexpectedSpoolEntry", null);
                 }
             }
@@ -272,7 +307,9 @@ public final class PendingSpool implements AutoCloseable {
         Path format = root.resolve("format");
         if (!Files.exists(format, LinkOption.NOFOLLOW_LINKS)) {
             // A crash before initial format publication cannot have admitted source files.
-            if (Files.exists(root.resolve("sources"), LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.exists(root.resolve("sources"), LinkOption.NOFOLLOW_LINKS) ||
+                    Files.exists(root.resolve("terminal"), LinkOption.NOFOLLOW_LINKS) ||
+                    Files.exists(root.resolve("closed-groups"), LinkOption.NOFOLLOW_LINKS)) {
                 throw unavailable("pendingRecovery|error|reason:missingFormatMarker", null);
             }
             publishBytes(format, FORMAT.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -288,6 +325,27 @@ public final class PendingSpool implements AutoCloseable {
         Path probe = root.resolve(".tmp-" + UUID.randomUUID());
         publishBytes(probe, new byte[0]);
         Files.delete(probe);
+        terminal = new PendingTerminalJournal(root);
+        terminal.validate();
+        // Validate committed intent/source envelopes first; replay precedes cross-record group checks.
+        terminal.forEachIntent(this::validateIntentSources);
+        // Directory enumeration is weakly consistent while entries are removed: confirm it is empty.
+        while (terminal.hasIntents()) {
+            terminal.forEachIntent(intent -> {
+                validateIntentSources(intent);
+                for (UUID group : intent.closedGroups()) {
+                    terminal.closeGroup(group);
+                }
+                for (SourceId source : intent.sources()) {
+                    Path path = sourcePath(source);
+                    if (!Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+                        requireFile(path);
+                        Files.delete(path);
+                    }
+                }
+                terminal.finish(intent.id());
+            });
+        }
         FolderPendingIndex.discard(root.resolve("derived"));
         index = new FolderPendingIndex(root.resolve("derived"));
         publications = new HeldPendingPublications(root.resolve("derived/publications"));
@@ -309,12 +367,33 @@ public final class PendingSpool implements AutoCloseable {
                             throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:misplacedSource", null);
                         }
                         try {
-                            index.add(read(path, source));
+                            PendingSourceRecord record = read(path, source);
+                            index.add(record);
+                            if (record.multipart() != null && terminal.isClosed(record.multipart().groupId())) {
+                                index.multipart().closeGroup(record.multipart());
+                            }
                         } catch (IOException failure) {
                             throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:indexRebuildFailed", failure);
                         }
                         recoveredSources++;
                     }
+                }
+            }
+        }
+        terminal.forEachClosedGroup(group -> {
+            if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
+                terminal.forgetGroup(group);
+            }
+        });
+    }
+
+    private void validateIntentSources(Intent intent) {
+        for (SourceId source : intent.sources()) {
+            Path path = sourcePath(source);
+            if (!Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+                PendingSourceRecord record = read(path, source);
+                if (record.multipart() != null && !intent.closedGroups().contains(record.multipart().groupId())) {
+                    throw unavailable("pendingTerminalRecovery|error|intentId:" + intent.id() + "|reason:missingGroupClosure", null);
                 }
             }
         }
@@ -348,7 +427,7 @@ public final class PendingSpool implements AutoCloseable {
         return new SourceId(UUID.fromString(name.substring(0, 36)));
     }
 
-    private static boolean publishBytes(Path target, byte[] bytes) throws IOException {
+    static boolean publishBytes(Path target, byte[] bytes) throws IOException {
         Path temporary = Files.createTempFile(target.getParent(), ".tmp-", ".part");
         Throwable publicationFailure = null;
         try {
@@ -377,7 +456,7 @@ public final class PendingSpool implements AutoCloseable {
         }
     }
 
-    private static boolean temporary(String name) {
+    static boolean temporary(String name) {
         return name.matches("\\.tmp-[a-zA-Z0-9-]+(?:\\.part)?");
     }
 
