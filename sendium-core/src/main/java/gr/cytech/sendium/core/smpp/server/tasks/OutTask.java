@@ -67,7 +67,7 @@ public class OutTask<M extends StandardMessage> implements Runnable {
         if (!success) {
             if (dlrReference != null) {
                 if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_FAILED)) {
-                    logger.warn("message.deliver.failed worker={} {}", worker.getFullName(),
+                    logger.warn("deliverToClient|error|worker:{}|{}", MessageTrace.value(worker.getFullName()),
                             MessageTrace.identifiers(durableDlr));
                 }
                 dlrReference.batch().fail("send_failed");
@@ -76,7 +76,7 @@ public class OutTask<M extends StandardMessage> implements Runnable {
             }
         } else if (!pdu.isResponse() && (msg != null || durableDlr != null)) {
             if (MessageTrace.shouldLog(worker.getConfigurationProvider(), MessageTrace.EVENT_DELIVER_SENT)) {
-                logger.info("message.deliver.sent worker={} deliverMsgId={} {}", worker.getFullName(),
+                logger.info("deliverToClient|sent|worker:{}|deliverMsgId:{}|{}", MessageTrace.value(worker.getFullName()),
                         MessageTrace.value(deliverMsgId), MessageTrace.identifiers(msg != null ? msg : durableDlr));
             }
         }

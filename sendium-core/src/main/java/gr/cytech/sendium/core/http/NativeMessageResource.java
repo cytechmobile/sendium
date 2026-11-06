@@ -146,7 +146,7 @@ public class NativeMessageResource {
                 case INVALID_TRANSITION -> error(500, "INTERNAL_ERROR", "Unable to admit message");
             };
         } catch (RuntimeException failure) {
-            logger.error("Native message admission failed failureType={}", failure.getClass().getName());
+            logger.error("submitMessage|error|ingress:native|failureType:{}", failure.getClass().getName());
             return error(500, "INTERNAL_ERROR", "Unable to admit message");
         }
         return Response.accepted(new Accepted(message.serial, "accepted")).build();

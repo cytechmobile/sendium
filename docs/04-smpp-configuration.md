@@ -86,7 +86,7 @@ without a coordinator binding retain local ingress-queue admission before succes
 
 SMPP PDU and byte diagnostics are disabled by default because bind PDUs can include passwords and submit/deliver PDUs can include phone numbers and message bodies. Enable these settings only temporarily in controlled troubleshooting sessions, and treat the resulting logs as sensitive data.
 
-Safe lifecycle trace logs are controlled by global `message.trace.mode`. The default `necessary` mode logs only `message.accepted`, `message.submitted`, `message.dlr`, and `message.deliver.sent`; set it to `off` to disable message-flow logs or `all` to include route/enqueue/response/retry detail.
+Safe lifecycle trace logs use `operation|status|field:value` and are controlled by global `message.trace.mode`. The default `necessary` mode logs only `submitMessage|accepted`, `submitToProvider|submitted`, `receiveDlr|processed`, and `deliverToClient|sent`; set it to `off` to disable message-flow logs or `all` to include route/enqueue/response/retry detail.
 
 | Property | Default Value | Description |
 | :--- | :--- | :--- |

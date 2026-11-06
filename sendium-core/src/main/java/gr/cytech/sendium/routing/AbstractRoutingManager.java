@@ -162,7 +162,7 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
                 msg = null; //Avoid further handling in finally block;
             } else {
                 if (MessageTrace.shouldLog(getConfigString(MessageTrace.TRACE_MODE), MessageTrace.EVENT_ROUTING_MISS)) {
-                    logger.warn("message.routing.miss action=requeue {}", MessageTrace.identifiers(msg));
+                    logger.warn("routeMessage|miss|action:requeue|{}", MessageTrace.identifiers(msg));
                 }
                 TimeUtils.sleep(100, TimeUnit.MILLISECONDS);
             }
@@ -172,7 +172,8 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
             switch (fe.getStatusCode()) {
                 case DROP:
                     if (MessageTrace.shouldLog(getConfigString(MessageTrace.TRACE_MODE), MessageTrace.EVENT_DROPPED)) {
-                        logger.info("message.dropped filter={} reason={} {}", fe.getFilter().getFullName(), fe.getMessage(),
+                        logger.info("filterMessage|dropped|filter:{}|reason:{}|{}",
+                                MessageTrace.value(fe.getFilter().getFullName()), MessageTrace.value(fe.getMessage()),
                                 MessageTrace.identifiers(msg));
                     }
                     msg = null;
@@ -217,7 +218,7 @@ public abstract class AbstractRoutingManager<M extends StandardMessage> implemen
                 }
                 // Suppressing unchecked cast since we know workers take StandardMessage
                 if (MessageTrace.shouldLog(getConfigString(MessageTrace.TRACE_MODE), MessageTrace.EVENT_ROUTED)) {
-                    logger.info("message.routed target={} {}", target.getFullName(), MessageTrace.identifiers(msg));
+                    logger.info("routeMessage|success|target:{}|{}", MessageTrace.value(target.getFullName()), MessageTrace.identifiers(msg));
                 }
                 ((AbstractOutWorker<M>) target).enqueue(msg);
             }

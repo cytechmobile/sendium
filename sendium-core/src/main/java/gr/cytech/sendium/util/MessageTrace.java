@@ -31,37 +31,37 @@ public final class MessageTrace {
 
     public static String identifiers(StandardMessage msg) {
         if (msg == null) {
-            return "serial=- msgId=- extrid=-";
+            return "serial:-|msgId:-|extrid:-";
         }
 
         String serial = value(msg.serial);
-        return "serial=" + serial +
-                " msgId=" + msg.msgId +
-                " extrid=" + value(msg.extrid) +
-                " type=" + value(StandardMessage.getType(msg.type)) +
-                " typeId=" + msg.type +
-                " priority=" + msg.priority +
-                " acked=" + msg.acked +
-                " dcs=" + msg.dcs +
-                " mclass=" + msg.mclass +
-                " ttl=" + msg.ttl +
-                " ddt=" + msg.ddt +
-                " state=" + msg.state +
-                " errcode=" + value(msg.errcode) +
-                " rtxCnt=" + msg.rtxCnt +
-                " accountId=" + value(msg.owner_id) +
-                " systemId=" + value(msg.systemId) +
-                " messageCenter=" + value(msg.message_center) +
-                " ingateway=" + value(msg.ingateway) +
-                " outgateway=" + value(msg.outgateway) +
-                " nextTarget=" + value(msg.nextTarget) +
-                " onetwork=" + msg.onetwork +
-                " cnetwork=" + msg.cnetwork +
-                " smsCnt=" + msg.smsCnt +
-                " submitParts=" + msg.smsSubmitCnt +
-                " reassembledParts=" + size(msg.reassembledParts) +
-                " hasUdh=" + hasValue(msg.binheader) +
-                " tlvCount=" + size(msg.tlvs);
+        return "serial:" + serial +
+                "|msgId:" + msg.msgId +
+                "|extrid:" + value(msg.extrid) +
+                "|type:" + value(StandardMessage.getType(msg.type)) +
+                "|typeId:" + msg.type +
+                "|priority:" + msg.priority +
+                "|acked:" + msg.acked +
+                "|dcs:" + msg.dcs +
+                "|mclass:" + msg.mclass +
+                "|ttl:" + msg.ttl +
+                "|ddt:" + msg.ddt +
+                "|state:" + msg.state +
+                "|errcode:" + value(msg.errcode) +
+                "|rtxCnt:" + msg.rtxCnt +
+                "|accountId:" + value(msg.owner_id) +
+                "|systemId:" + value(msg.systemId) +
+                "|messageCenter:" + value(msg.message_center) +
+                "|ingateway:" + value(msg.ingateway) +
+                "|outgateway:" + value(msg.outgateway) +
+                "|nextTarget:" + value(msg.nextTarget) +
+                "|onetwork:" + msg.onetwork +
+                "|cnetwork:" + msg.cnetwork +
+                "|smsCnt:" + msg.smsCnt +
+                "|submitParts:" + msg.smsSubmitCnt +
+                "|reassembledParts:" + size(msg.reassembledParts) +
+                "|hasUdh:" + hasValue(msg.binheader) +
+                "|tlvCount:" + size(msg.tlvs);
     }
 
     public static String pdu(Pdu pdu) {
@@ -80,6 +80,7 @@ public final class MessageTrace {
         }
 
         return value.replace('\r', '_')
+                .replace('|', '_')
                 .replace('\n', '_')
                 .replace('\t', '_')
                 .replace(' ', '_');
