@@ -12,6 +12,16 @@ These instructions apply to all work in this repository.
 - Before adding an abstraction, dependency, service, or maintenance command, explain what necessary benefit it provides over the simpler alternative.
 - Keep changes focused. Include tests and documentation proportionate to the behavior changed; avoid scaffolding that only supports unnecessary complexity.
 
+## Application Logging
+
+- Use `operation|status|field:value` for new or modified application log messages, for example `dlrCallback|retry|gatewayMsgId:{}|attempt:{}|reason:{}`. Apply the convention incrementally; do not bulk-convert unrelated logs.
+- Use stable operation names that describe application behavior rather than Java method names. Use consistent field names across related events.
+- Let the logger level express severity; use the status for the outcome, such as `accepted`, `success`, `retry`, or `error`.
+- Include available message correlation identifiers in message-processing logs. Preserve their meaning and field names across events; do not invent identifiers when unavailable.
+- Use parameterized logging and preserve appropriate exception details. Keep credentials and message payloads out of routine logs, and preserve existing masking.
+- Sanitize dynamic field values so pipe delimiters, carriage returns, and newlines cannot break the log format. Reuse existing message-tracing helpers where appropriate.
+- Preserve existing log levels, event filtering (including `message.trace.mode`), and logging volume when standardizing format. Add events or change verbosity only when explicitly required by the task.
+
 ## Release Notes and Commit Messages
 
 - Classify changes by the distributed artifact and behavior they affect, not merely whether the work introduces something new. Sendium application releases publish Maven artifacts and rebuild the JVM and native application images.

@@ -525,7 +525,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                 StandardMessage submittedMsg = submitSm.getReferenceObject() instanceof StandardMessage ?
                         (StandardMessage) submitSm.getReferenceObject() : pMsg;
                 if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_SUBMITTED)) {
-                    logger.info("message.submitted worker={} part={}/{} {}", getFullName(), i + 1, requests.size(),
+                    logger.info("submitToProvider|submitted|worker:{}|part:{}/{}|{}", MessageTrace.value(getFullName()), i + 1, requests.size(),
                             MessageTrace.identifiers(submittedMsg));
                 }
             } catch (Exception e) {
@@ -1398,7 +1398,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
 
     protected void logSubmitResponse(int statusCode, String providerMessageId, M msg) {
         if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_SUBMIT_RESPONSE)) {
-            logger.info("message.submit.response worker={} status={} providerMessageId={} {}", getFullName(),
+            logger.info("submitToProvider|response|worker:{}|providerStatus:{}|providerMessageId:{}|{}", MessageTrace.value(getFullName()),
                     statusCode, MessageTrace.value(providerMessageId), MessageTrace.identifiers(msg));
         }
     }

@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
+import gr.cytech.sendium.util.MessageTrace;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -68,7 +69,7 @@ public class ForwardDlrService {
         try {
             dueDeliveries = dlrService.claimDueHttpDeliveries(DUE_BATCH_SIZE);
         } catch (RuntimeException e) {
-            logger.error("Unable to claim due HTTP DLR deliveries");
+            logger.error("claimDlrCallbacks|error");
             return;
         }
 
@@ -84,7 +85,7 @@ public class ForwardDlrService {
         try {
             dispatch(state, hostLimits);
         } catch (RuntimeException e) {
-            logger.error("Unexpected HTTP DLR dispatch failure for gatewayMsgId={}", state.getGatewayMsgId());
+            logger.error("dlrCallback|error|gatewayMsgId:{}|reason:unexpected_dispatch_failure", MessageTrace.value(state.getGatewayMsgId()));
         }
     }
 
@@ -177,8 +178,8 @@ public class ForwardDlrService {
     }
 
     private void handleAttemptFailure(String gatewayMsgId, int attempt, String result) {
-        logger.warn("HTTP DLR delivery attempt failed for gatewayMsgId={} attempt={} outcome={}",
-                gatewayMsgId, attempt, result);
+        logger.warn("dlrCallback|{}|gatewayMsgId:{}|attempt:{}|reason:{}",
+                attempt < MAX_ATTEMPTS ? "retry" : "error", MessageTrace.value(gatewayMsgId), attempt, MessageTrace.value(result));
         try {
             boolean updated;
             if (attempt < MAX_ATTEMPTS) {
@@ -196,7 +197,7 @@ public class ForwardDlrService {
     }
 
     private void failInvalidDelivery(String gatewayMsgId, int attempt) {
-        logger.warn("Invalid HTTP DLR callback for gatewayMsgId={}", gatewayMsgId);
+        logger.warn("dlrCallback|error|gatewayMsgId:{}|reason:invalid_uri", MessageTrace.value(gatewayMsgId));
         try {
             if (!dlrService.failInvalidDelivery(gatewayMsgId, attempt, "invalid_uri")) {
                 recordStorageError(gatewayMsgId, attempt, "invalid");
@@ -207,8 +208,8 @@ public class ForwardDlrService {
     }
 
     private void recordStorageError(String gatewayMsgId, int attempt, String operation) {
-        logger.error("HTTP DLR storage update failed for gatewayMsgId={} attempt={} operation={}",
-                gatewayMsgId, attempt, operation);
+        logger.error("updateDlrCallback|error|gatewayMsgId:{}|attempt:{}|action:{}",
+                MessageTrace.value(gatewayMsgId), attempt, MessageTrace.value(operation));
     }
 
     int mapToKannelType(MessageState.MessageStatus status) {

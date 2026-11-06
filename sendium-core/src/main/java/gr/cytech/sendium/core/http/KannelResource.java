@@ -240,7 +240,7 @@ public class KannelResource {
                 acceptedMessageId = accepted.value().toString();
             }
             if (MessageTrace.shouldLog(configurationHandler, MessageTrace.EVENT_ACCEPTED)) {
-                logger.info("message.accepted ingress=http {}", MessageTrace.identifiers(msg));
+                logger.info("submitMessage|accepted|ingress:http|{}", MessageTrace.identifiers(msg));
             }
 
             return Response.status(Response.Status.ACCEPTED)
@@ -248,7 +248,7 @@ public class KannelResource {
                     .build();
 
         } catch (OutboundStorageException e) {
-            logger.warn("HTTP SMS admission failed stage={} reason={}", e.stage(), e.reason());
+            logger.warn("submitMessage|rejected|ingress:http|stage:{}|reason:{}", e.stage(), e.reason());
             return switch (e.reason()) {
                 case CAPACITY_EXCEEDED, UNAVAILABLE, OWNERSHIP_CONFLICT -> Response.status(Response.Status.SERVICE_UNAVAILABLE)
                         .entity("Temporal failure, try again later.").build();
@@ -257,12 +257,12 @@ public class KannelResource {
             };
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            logger.error("Failed to enqueue message", e);
+            logger.error("submitMessage|error|ingress:http|reason:enqueue_interrupted", e);
             return Response.status(Response.Status.SERVICE_UNAVAILABLE)
                     .entity("Temporal failure, try again later.")
                     .build();
         } catch (Exception e) {
-            logger.error("Error processing SMS", e);
+            logger.error("submitMessage|error|ingress:http", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity("Error processing SMS")
                     .build();

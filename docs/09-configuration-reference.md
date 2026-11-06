@@ -119,7 +119,7 @@ If you customize `quarkus.http.access-log.pattern`, avoid `%r`, `%q`, `%{QUERY_S
 
 Worker diagnostic flags such as `log.pdus`, `log.bytes`, `print.msgs`, `print.resps`, and `print.mos` are disabled by default. Enabling them can write SMPP credentials, phone numbers, provider identifiers, callback URLs, and message bodies to logs.
 
-`message.*` lifecycle trace logs are controlled by `message.trace.mode`. The default `necessary` mode keeps `message.accepted`, `message.submitted`, `message.dlr`, and `message.deliver.sent`; use `off` to disable all message-flow logs or `all` to include route/enqueue/response/retry detail.
+Lifecycle trace logs use `operation|status|field:value` and are controlled by `message.trace.mode`. The default `necessary` mode keeps `submitMessage|accepted`, `submitToProvider|submitted`, `receiveDlr|processed`, and `deliverToClient|sent`; use `off` to disable all message-flow logs or `all` to include route/enqueue/response/retry detail. Internal event identifiers and filtering behavior are unchanged.
 
 ## OpenAPI
 

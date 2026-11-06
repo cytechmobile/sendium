@@ -45,33 +45,33 @@ class MessageTraceTest {
         String trace = MessageTrace.identifiers(message);
 
         assertThat(trace).contains(
-                "serial=gw-1",
-                "msgId=17",
-                "extrid=provider-message-1",
-                "type=l",
-                "typeId=18",
-                "priority=3",
-                "acked=true",
-                "dcs=8",
-                "mclass=2",
-                "ttl=60",
-                "ddt=10",
-                "state=1",
-                "errcode=0",
-                "rtxCnt=2",
-                "accountId=account-1",
-                "systemId=system-1",
-                "messageCenter=smsc-1",
-                "ingateway=smpp.in",
-                "outgateway=smpp.out",
-                "nextTarget=fallback",
-                "onetwork=20201",
-                "cnetwork=20205",
-                "smsCnt=2",
-                "submitParts=3",
-                "reassembledParts=2",
-                "hasUdh=true",
-                "tlvCount=1");
+                "serial:gw-1",
+                "|msgId:17",
+                "|extrid:provider-message-1",
+                "|type:l",
+                "|typeId:18",
+                "|priority:3",
+                "|acked:true",
+                "|dcs:8",
+                "|mclass:2",
+                "|ttl:60",
+                "|ddt:10",
+                "|state:1",
+                "|errcode:0",
+                "|rtxCnt:2",
+                "|accountId:account-1",
+                "|systemId:system-1",
+                "|messageCenter:smsc-1",
+                "|ingateway:smpp.in",
+                "|outgateway:smpp.out",
+                "|nextTarget:fallback",
+                "|onetwork:20201",
+                "|cnetwork:20205",
+                "|smsCnt:2",
+                "|submitParts:3",
+                "|reassembledParts:2",
+                "|hasUdh:true",
+                "|tlvCount:1");
     }
 
     @Test
@@ -106,7 +106,27 @@ class MessageTraceTest {
         StandardMessage message = new StandardMessage();
         message.type = StandardMessage.MSG_VIBER;
 
-        assertThat(MessageTrace.identifiers(message)).contains("type=v", "typeId=22");
+        assertThat(MessageTrace.identifiers(message)).contains("|type:v", "|typeId:22");
+    }
+
+    @Test
+    void identifiersCannotInjectFieldsOrLines() {
+        StandardMessage message = new StandardMessage();
+        message.serial = "gw|status:forged\r\nnext";
+        message.extrid = "provider\tmessage id";
+
+        String trace = MessageTrace.identifiers(message);
+
+        assertThat(trace).startsWith("serial:gw_status:forged__next|msgId:");
+        assertThat(trace).contains("|extrid:provider_message_id|");
+        assertThat(trace).doesNotContain("\r", "\n", "\t", "|status:");
+        assertThat(MessageTrace.value(null)).isEqualTo("-");
+        assertThat(MessageTrace.value(" ")).isEqualTo("-");
+    }
+
+    @Test
+    void missingContextUsesNamedFields() {
+        assertThat(MessageTrace.identifiers(null)).isEqualTo("serial:-|msgId:-|extrid:-");
     }
 
     @Test

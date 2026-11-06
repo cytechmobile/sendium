@@ -769,7 +769,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             }
             enqueueOut(deliverSm);
             if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_ENQUEUED)) {
-                logger.info("message.deliver.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(pMsg));
+                logger.info("deliverToClient|enqueued|worker:{}|{}", MessageTrace.value(getFullName()), MessageTrace.identifiers(pMsg));
             }
         }
         return null;
@@ -807,7 +807,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             try {
                 enqueueOut(deliverSm);
                 if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_ENQUEUED)) {
-                    logger.info("message.deliver.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(message));
+                    logger.info("deliverToClient|enqueued|worker:{}|{}", MessageTrace.value(getFullName()), MessageTrace.identifiers(message));
                 }
             } catch (RuntimeException e) {
                 logger.warn("Failed to enqueue SMPP DLR gatewayMsgId={} attempt={}",
@@ -987,7 +987,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                 return;
             }
             if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVER_FAILED)) {
-                logger.warn("message.deliver.failed worker={} {}", getFullName(), MessageTrace.identifiers(message));
+                logger.warn("deliverToClient|error|worker:{}|{}", MessageTrace.value(getFullName()), MessageTrace.identifiers(message));
             }
             if (!markAsUnpushed(message)) {
                 enqueueNoExceptions(message);
@@ -1065,7 +1065,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                 event.pMsg.serial = acceptedSource.value().toString();
             }
             if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
-                logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(), MessageTrace.identifiers(event.pMsg));
+                logger.info("submitMessage|accepted|ingress:smppserver|worker:{}|{}", MessageTrace.value(getFullName()), MessageTrace.identifiers(event.pMsg));
             }
             return true;
         } catch (OutboundStorageException failure) {
@@ -1148,7 +1148,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
                 }
                 if (event.submitSm != null && MessageTrace.shouldLog(
                         configurationProvider, MessageTrace.EVENT_ACCEPTED)) {
-                    logger.info("message.accepted ingress=smppserver worker={} {}", getFullName(),
+                    logger.info("submitMessage|accepted|ingress:smppserver|worker:{}|{}", MessageTrace.value(getFullName()),
                             MessageTrace.identifiers(event.pMsg));
                 }
             } catch (InterruptedException e) {

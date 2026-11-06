@@ -546,7 +546,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         }
         pMsg.outgateway = getFullName();
         if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ENQUEUED)) {
-            logger.info("message.enqueued worker={} {}", getFullName(), MessageTrace.identifiers(pMsg));
+            logger.info("enqueueMessage|success|worker:{}|{}", MessageTrace.value(getFullName()), MessageTrace.identifiers(pMsg));
         }
         msgQ.enqueue(pMsg);
     }
@@ -708,7 +708,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         }
         routerQueue.enqueue(msg);
         if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_ENQUEUED)) {
-            logger.info("message.enqueued destination=router {}", MessageTrace.identifiers(msg));
+            logger.info("enqueueMessage|success|destination:router|{}", MessageTrace.identifiers(msg));
         }
     }
 
@@ -1127,7 +1127,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         if (!shouldAttemptWorkerRetry || m != msg || (internalTries >= getMaxRetries() && getMaxRetries() != 0)) {
             if (m != null) {
                 if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_FAILED)) {
-                    logger.info("message.delivery.failed mode=async tries={} {}", internalTries, MessageTrace.identifiers(msg));
+                    logger.info("deliverMessage|error|mode:async|tries:{}|{}", internalTries, MessageTrace.identifiers(msg));
                 }
                 handleMessageFailInWorker("async", m, enqueueInstead);
             }
@@ -1137,7 +1137,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         failedMsgCounter.put(m.msgId, internalTries);
 
         if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_RETRY)) {
-            logger.info("message.delivery.retry mode=async tries={} {}", internalTries, MessageTrace.identifiers(msg));
+            logger.info("deliverMessage|retry|mode:async|tries:{}|{}", internalTries, MessageTrace.identifiers(msg));
         }
 
         m = doFailDelayWorkerRetryPolicyAction(m, internalTries);
@@ -1588,7 +1588,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                 if (m == null || m != msg || (internalTries >= getMaxRetries() && getMaxRetries() != 0)) {
                     if (m != null && !enqueueInstead) {
                         if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_FAILED)) {
-                            logger.info("message.delivery.failed workerThread={} tries={} {}", id, internalTries,
+                            logger.info("deliverMessage|error|workerThread:{}|tries:{}|{}", id, internalTries,
                                     MessageTrace.identifiers(msg));
                         }
                     }
@@ -1605,7 +1605,7 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
                 } //else we use the current tries
 
                 if (MessageTrace.shouldLog(configurationProvider, MessageTrace.EVENT_DELIVERY_RETRY)) {
-                    logger.info("message.delivery.retry workerThread={} tries={} {}", id, tries, MessageTrace.identifiers(msg));
+                    logger.info("deliverMessage|retry|workerThread:{}|tries:{}|{}", id, tries, MessageTrace.identifiers(msg));
                 }
 
                 if (tries >= getMaxRetries() && getMaxRetries() != 0) {

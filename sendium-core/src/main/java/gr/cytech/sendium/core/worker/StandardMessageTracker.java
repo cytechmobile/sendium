@@ -51,7 +51,8 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         if (gatewayMessageId == null || gatewayMessageId.isBlank() ||
                 providerName == null || providerName.isBlank() ||
                 providerMessageId == null || providerMessageId.isBlank()) {
-            logger.warn("Invalid DLR correlation identifiers");
+            logger.warn("linkProviderMessage|error|reason:invalid_correlation_identifiers|gatewayMsgId:{}|providerMessageId:{}",
+                    MessageTrace.value(gatewayMessageId), MessageTrace.value(providerMessageId));
             return 0;
         }
         if (!outWorker.getWorkerResources().isDlrPersistenceEnabled()) {
@@ -66,11 +67,11 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
                 .recordProviderAcceptedAsync(state.get(), providerName, providerMessageId)
                 .whenComplete((ignored, failure) -> {
                     if (failure != null) {
-                        logger.error("Failed to persist provider acceptance gatewayMsgId={} providerMessageId={}",
-                                gatewayMessageId, MessageTrace.value(providerMessageId), failure);
+                        logger.error("linkProviderMessage|error|gatewayMsgId:{}|providerMessageId:{}",
+                                MessageTrace.value(gatewayMessageId), MessageTrace.value(providerMessageId), failure);
                     } else if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_PROVIDER_LINKED)) {
-                        logger.info("message.provider.linked providerMessageId={} gatewayMsgId={}",
-                                MessageTrace.value(providerMessageId), gatewayMessageId);
+                        logger.info("linkProviderMessage|success|providerMessageId:{}|gatewayMsgId:{}",
+                                MessageTrace.value(providerMessageId), MessageTrace.value(gatewayMessageId));
                     }
                 });
         return 1;
@@ -92,8 +93,8 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
                 .recordProviderAcceptedAsync(state.get(), providerName, providerMessageId)
                 .thenAccept(ignored -> {
                     if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_PROVIDER_LINKED)) {
-                        logger.info("message.provider.linked providerMessageId={} gatewayMsgId={}",
-                                MessageTrace.value(providerMessageId), gatewayMessageId);
+                        logger.info("linkProviderMessage|success|providerMessageId:{}|gatewayMsgId:{}",
+                                MessageTrace.value(providerMessageId), MessageTrace.value(gatewayMessageId));
                     }
                 });
     }
@@ -130,7 +131,8 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
             }
             enqueueDlr(msgState, providerMessageId, body, state, errorCode);
         } else {
-            logger.warn("DLR received for unknown/expired provider message ID");
+            logger.warn("receiveDlr|unresolved|reason:unknown_or_expired_provider_message|providerMessageId:{}",
+                    MessageTrace.value(providerMessageId));
         }
     }
 
@@ -150,7 +152,8 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
                 .resolveDlrAsync(outWorker.getDlrProviderName(), providerMessageId, state, errorCode)
                 .thenAccept(resolved -> {
                     if (resolved.isEmpty()) {
-                        logger.warn("DLR received for unknown/expired provider message ID");
+                        logger.warn("receiveDlr|unresolved|reason:unknown_or_expired_provider_message|providerMessageId:{}",
+                                MessageTrace.value(providerMessageId));
                     } else if (resolved.get().getDeliveryChannel() == MessageState.DeliveryChannel.SMPP) {
                         enqueueDlr(resolved.get(), providerMessageId, body, state, errorCode);
                     }
@@ -166,7 +169,7 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
         recordSubmissionFailure(message, providerMessageId, body, state, errorCode, false)
                 .whenComplete((ignored, failure) -> {
                     if (failure != null) {
-                        logger.error("Failed to persist provider rejection gatewayMsgId={}", gatewayMessageId, failure);
+                        logger.error("recordProviderRejection|error|gatewayMsgId:{}", MessageTrace.value(gatewayMessageId), failure);
                     }
                 });
     }
@@ -236,7 +239,7 @@ public class StandardMessageTracker implements Tracker<StandardMessage> {
             outWorker.handleException(ie);
         }
         if (MessageTrace.shouldLog(outWorker.getConfigurationProvider(), MessageTrace.EVENT_DLR)) {
-            logger.info("message.dlr status={} providerMessageId={} {}", dlrState,
+            logger.info("receiveDlr|processed|deliveryStatus:{}|providerMessageId:{}|{}", dlrState,
                     MessageTrace.value(providerMessageId), MessageTrace.identifiers(dlrMsg));
         }
     }
