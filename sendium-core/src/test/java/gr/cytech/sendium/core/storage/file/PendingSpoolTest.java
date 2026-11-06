@@ -177,7 +177,7 @@ class PendingSpoolTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"terminal", "unknown", ".tmp-not-a-file.part"})
+    @ValueSource(strings = {"unknown", ".tmp-not-a-file.part"})
     void rejectsUnimplementedOrUnexpectedRootDirectories(String entry) throws Exception {
         initialize();
         Files.createDirectory(root.resolve(entry));

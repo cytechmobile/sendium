@@ -59,7 +59,10 @@ class FileHeldPublicationTest {
             assertThatThrownBy(() -> store.makeHeldReady(Set.of(source(a)), execution))
                     .isInstanceOfSatisfying(OutboundStorageException.class,
                             failure -> assertThat(failure.reason()).isEqualTo(INVALID_TRANSITION));
-            assertThatThrownBy(() -> store.complete(sources)).hasMessageContaining("reason:boundCompletionUnavailable");
+            store.complete(sources);
+            router.complete(selected.id());
+            assertThat(store.find(source(a))).isEmpty();
+            assertThat(store.find(source(b))).isEmpty();
         }
     }
 

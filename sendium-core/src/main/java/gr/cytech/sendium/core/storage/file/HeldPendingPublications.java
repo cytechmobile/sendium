@@ -36,6 +36,20 @@ final class HeldPendingPublications {
         return codec.encode(publication);
     }
 
+    void remove(Publication publication) throws IOException {
+        for (SourceId source : publication.sources()) {
+            Optional<UUID> current = bindingId(source);
+            if (current.isPresent()) {
+                if (!current.orElseThrow().equals(publication.id())) {
+                    throw new IOException("pendingPublicationCleanup|error|reason:bindingMismatch");
+                }
+                Files.delete(binding(source));
+            }
+        }
+        requireFile(work(publication.id()));
+        Files.delete(work(publication.id()));
+    }
+
     Optional<Publication> find(SourceId source) throws IOException {
         Optional<UUID> binding = bindingId(source);
         if (binding.isEmpty()) {

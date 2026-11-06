@@ -80,6 +80,9 @@ final class FolderPendingIndex {
 
     void remove(PendingSourceRecord record) throws IOException {
         sources.remove(sourceKey(record.source()));
+        if (record.multipart() != null) {
+            multipart.remove(record.multipart());
+        }
         if (record.disposition() == PendingSourceRecord.Disposition.READY) {
             removeReady(record.source(), record.message().restore().priority);
         }

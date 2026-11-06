@@ -51,6 +51,18 @@ final class MultipartPendingIndex {
         matching(member.key()).remove(groupKey(member));
     }
 
+    void remove(MultipartMembership member) throws IOException {
+        closeGroup(member);
+        DirectoryReferenceIndex members = members(member.groupId());
+        members.remove(FolderPendingIndex.sourceKey(member.source()));
+        if (!member.duplicate()) {
+            Files.delete(group(member.groupId()).resolve("ordinals").resolve(Integer.toString(member.ordinal())));
+        }
+        if (members.after(null, 1).isEmpty()) {
+            FolderPendingIndex.discard(group(member.groupId()));
+        }
+    }
+
     List<SourceId> sourcesAfter(UUID group, SourceId after, int limit) throws IOException {
         if (Files.notExists(group(group), LinkOption.NOFOLLOW_LINKS)) {
             return List.of();

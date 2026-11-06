@@ -167,17 +167,58 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         });
     }
 
+    /** Complete an owned execution/ordinal source set; reject subsets that would orphan its handles. */
     @Override
     public void complete(Set<SourceId> sources) {
         withLock(() -> {
             requireReady();
-            for (SourceId source : Set.copyOf(sources)) {
-                if (spool.remove(source)) {
-                    retained--;
-                }
-            }
+            Set<SourceId> checked = Set.copyOf(sources);
+            validateCompletion(checked);
+            retained -= spool.completeSources(checked);
             return null;
         });
+    }
+
+    private void validateCompletion(Set<SourceId> sources) {
+        var bindings = new HashSet<UUID>();
+        var groups = new HashSet<UUID>();
+        for (SourceId source : sources) {
+            Optional<PendingSourceRecord> record = spool.find(source);
+            if (record.isEmpty()) {
+                continue;
+            }
+            Optional<UUID> binding = spool.publicationId(source);
+            if (binding.isPresent() && bindings.add(binding.orElseThrow())) {
+                Publication publication = spool.findPublication(source).orElseThrow(FilePendingMessageStore::invalidPublication);
+                if (!sources.containsAll(publication.sources())) {
+                    throw invalidCompletion(source);
+                }
+            }
+            if (record.orElseThrow().multipart() != null) {
+                groups.add(record.orElseThrow().multipart().groupId());
+            }
+        }
+        for (UUID group : groups) {
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = spool.groupSourcesAfter(group, cursor, 128);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (SourceId source : page) {
+                    MultipartMembership member = retainedMembership(source);
+                    if (sources.contains(member.originalSource()) && !sources.contains(source)) {
+                        throw invalidCompletion(member.originalSource());
+                    }
+                }
+                cursor = page.getLast();
+            }
+        }
+    }
+
+    private static OutboundStorageException invalidCompletion(SourceId source) {
+        return new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                "pendingCompletion|error|sourceId:" + source.value() + "|reason:incompleteOwnedSourceSet");
     }
 
     @Override
@@ -269,7 +310,8 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             if (!candidate.key().equals(key)) {
                 continue; // A matching-key hash is only a lookup hint, never identity.
             }
-            if (!candidate.deadline().isAfter(now) || spool.groupOriginalCount(candidate.groupId()) == key.total()) {
+            if (spool.isGroupClosed(candidate.groupId()) || !candidate.deadline().isAfter(now) ||
+                    spool.groupOriginalCount(candidate.groupId()) == key.total()) {
                 spool.closeGroup(candidate);
                 continue;
             }
