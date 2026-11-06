@@ -10,6 +10,7 @@ import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 import gr.cytech.sendium.util.MessageUtil;
 
@@ -19,6 +20,7 @@ import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -339,8 +341,86 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     public void makeHeldReady(Set<SourceId> sources, StandardMessage message) {
         withLock(() -> {
             requireReady();
-            throw unsupported("pendingPublication|error|reason:heldPublicationUnavailable");
+            publishHeld(sources, message);
+            return null;
         });
+    }
+
+    private void publishHeld(Set<SourceId> sources, StandardMessage message) {
+        var checked = new HashSet<>(Set.copyOf(sources));
+        Objects.requireNonNull(message, "message");
+        if (checked.isEmpty()) {
+            throw new IllegalArgumentException("pendingPublication|error|reason:emptySources");
+        }
+        MultipartMembership assigned = null;
+        boolean unassigned = false;
+        var originals = new HashSet<SourceId>();
+        for (SourceId source : checked) {
+            PendingSourceRecord record = spool.find(source).orElseThrow(FilePendingMessageStore::invalidPublication);
+            if (record.disposition() != PendingSourceRecord.Disposition.HELD) {
+                throw invalidPublication();
+            }
+            MultipartMembership member = record.multipart();
+            if (member == null) {
+                unassigned = true;
+            } else {
+                if (assigned != null && !sameGroup(assigned, member)) {
+                    throw invalidPublication();
+                }
+                assigned = member;
+                originals.add(member.originalSource());
+            }
+        }
+        if (assigned != null) {
+            if (unassigned || !checked.containsAll(originals) || (originals.size() > 1 && originals.size() != assigned.key().total())) {
+                throw invalidPublication();
+            }
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = spool.groupSourcesAfter(assigned.groupId(), cursor, 128);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (SourceId source : page) {
+                    if (originals.contains(retainedMembership(source).originalSource())) {
+                        checked.add(source);
+                    }
+                }
+                cursor = page.getLast();
+            }
+        }
+        UUID existing = null;
+        int bound = 0;
+        for (SourceId source : checked) {
+            Optional<UUID> binding = spool.publicationId(source);
+            if (binding.isPresent()) {
+                if (existing != null && !existing.equals(binding.orElseThrow())) {
+                    throw invalidPublication();
+                }
+                existing = binding.orElseThrow();
+                bound++;
+            }
+        }
+        if (existing != null) {
+            if (bound != checked.size()) {
+                throw invalidPublication();
+            }
+            Publication previous = spool.findPublication(checked.iterator().next()).orElseThrow(FilePendingMessageStore::invalidPublication);
+            if (!previous.sources().equals(checked)) {
+                throw invalidPublication();
+            }
+            return;
+        }
+        spool.publishHeld(new Publication(UUID.randomUUID(), checked, PendingMessageData.capture(message)));
+        if (assigned != null) {
+            spool.closeGroup(assigned);
+        }
+        changed.signalAll();
+    }
+
+    private static OutboundStorageException invalidPublication() {
+        return new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                "pendingPublication|error|reason:conflictingSourceBinding");
     }
 
     private void requireReady() {
@@ -408,9 +488,25 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             throw new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE,
                     "pendingSelection|error|sourceId:" + source.value() + "|reason:missingSource");
         }
-        StandardMessage message = found.orElseThrow().message().restore();
+        PendingSourceRecord record = found.orElseThrow();
+        StandardMessage message;
+        Set<SourceId> sources;
+        if (record.disposition() == PendingSourceRecord.Disposition.HELD) {
+            Optional<Publication> binding = spool.findPublication(source);
+            if (binding.isEmpty()) {
+                state = State.FAILED;
+                throw new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE,
+                        "pendingSelection|error|sourceId:" + source.value() + "|reason:missingPublication");
+            }
+            Publication work = binding.orElseThrow();
+            message = work.message().restore();
+            sources = work.sources();
+        } else {
+            message = record.message().restore();
+            sources = Set.of(source);
+        }
         int priority = message.priority;
-        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), Set.of(source), message));
+        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), sources, message));
         spool.removeReady(source, priority);
         return true;
     }
