@@ -2,6 +2,8 @@ package gr.cytech.sendium.core.storage.file;
 
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.pending.MultipartKey;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingRecordCodec;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 
@@ -88,6 +90,39 @@ public final class PendingSpool implements AutoCloseable {
 
     synchronized boolean isReady() {
         return ready;
+    }
+
+    synchronized List<String> matchingGroupsAfter(MultipartKey key, String cursor, int limit) {
+        return multipartIndex(() -> index.multipart().matchingAfter(key, cursor, limit));
+    }
+
+    synchronized List<SourceId> groupSourcesAfter(UUID group, SourceId cursor, int limit) {
+        return multipartIndex(() -> index.multipart().sourcesAfter(group, cursor, limit));
+    }
+
+    synchronized SourceId groupOriginal(UUID group, int ordinal) {
+        return multipartIndex(() -> index.multipart().original(group, ordinal));
+    }
+
+    synchronized int groupOriginalCount(UUID group) {
+        return multipartIndex(() -> index.multipart().originalCount(group));
+    }
+
+    synchronized void closeGroup(MultipartMembership member) {
+        multipartIndex(() -> {
+            index.multipart().closeGroup(member);
+            return null;
+        });
+    }
+
+    private <T> T multipartIndex(IndexOperation<T> operation) {
+        requireReady();
+        try {
+            return operation.run();
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingMultipartIndex|error|reason:operationFailed", failure);
+        }
     }
 
     public synchronized Optional<PendingSourceRecord> find(SourceId source) {
@@ -233,7 +268,11 @@ public final class PendingSpool implements AutoCloseable {
                         if (!sourcePath(source).equals(path)) {
                             throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:misplacedSource", null);
                         }
-                        index.add(read(path, source));
+                        try {
+                            index.add(read(path, source));
+                        } catch (IOException failure) {
+                            throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:indexRebuildFailed", failure);
+                        }
                         recoveredSources++;
                     }
                 }
@@ -363,5 +402,10 @@ public final class PendingSpool implements AutoCloseable {
         if (releaseFailure != null) {
             throw unavailable("pendingSpoolOwnership|error|reason:lockCloseFailed", releaseFailure);
         }
+    }
+
+    @FunctionalInterface
+    private interface IndexOperation<T> {
+        T run() throws IOException;
     }
 }

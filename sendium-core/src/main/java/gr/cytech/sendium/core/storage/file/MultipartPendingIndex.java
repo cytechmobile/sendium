@@ -1,0 +1,132 @@
+package gr.cytech.sendium.core.storage.file;
+
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.pending.MultipartKey;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.UUID;
+
+/** Disposable membership references. Accepted CBOR remains authoritative, including for hash collisions. */
+final class MultipartPendingIndex {
+    private static final int LEAF_LIMIT = 128;
+    private final Path root;
+
+    MultipartPendingIndex(Path root) throws IOException {
+        this.root = root;
+        Files.createDirectories(root.resolve("groups"));
+        Files.createDirectories(root.resolve("matching"));
+    }
+
+    void add(MultipartMembership member) throws IOException {
+        members(member.groupId()).add(FolderPendingIndex.sourceKey(member.source()));
+        Path ordinals = group(member.groupId()).resolve("ordinals");
+        Files.createDirectories(ordinals);
+        Path original = ordinals.resolve(Integer.toString(member.ordinal()));
+        String identity = member.originalSource().value().toString();
+        if (Files.exists(original, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.readString(original).equals(identity)) {
+                throw new IOException("pendingMultipartRecovery|error|reason:conflictingOrdinalOwner");
+            }
+        } else {
+            Files.writeString(original, identity, StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE_NEW);
+        }
+        matching(member.key()).add(groupKey(member));
+    }
+
+    List<String> matchingAfter(MultipartKey key, String after, int limit) throws IOException {
+        return matching(key).after(after, limit);
+    }
+
+    void closeGroup(MultipartMembership member) throws IOException {
+        matching(member.key()).remove(groupKey(member));
+    }
+
+    List<SourceId> sourcesAfter(UUID group, SourceId after, int limit) throws IOException {
+        if (Files.notExists(group(group), LinkOption.NOFOLLOW_LINKS)) {
+            return List.of();
+        }
+        return members(group).after(after == null ? null : FolderPendingIndex.sourceKey(after), limit)
+                .stream().map(FolderPendingIndex::source).toList();
+    }
+
+    SourceId original(UUID group, int ordinal) throws IOException {
+        Path path = group(group).resolve("ordinals").resolve(Integer.toString(ordinal));
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            return null;
+        }
+        try {
+            return new SourceId(UUID.fromString(Files.readString(path)));
+        } catch (IllegalArgumentException failure) {
+            throw new IOException("pendingMultipartLookup|error|reason:invalidOrdinalReference");
+        }
+    }
+
+    int originalCount(UUID group) throws IOException {
+        int count = 0;
+        try (var entries = Files.newDirectoryStream(group(group).resolve("ordinals"))) {
+            for (Path entry : entries) {
+                if (++count > 255 || !Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("pendingMultipartLookup|error|reason:invalidOrdinalDirectory");
+                }
+            }
+        }
+        return count;
+    }
+
+    static UUID groupId(String key) {
+        return new UUID(Long.parseUnsignedLong(key.substring(16, 32), 16), Long.parseUnsignedLong(key.substring(32), 16));
+    }
+
+    private static String groupKey(MultipartMembership member) {
+        return "%016x%016x%016x".formatted(member.groupOrder(), member.groupId().getMostSignificantBits(),
+                member.groupId().getLeastSignificantBits());
+    }
+
+    private Path group(UUID id) {
+        return root.resolve("groups").resolve(id.toString());
+    }
+
+    private DirectoryReferenceIndex members(UUID group) throws IOException {
+        return new DirectoryReferenceIndex(group(group).resolve("members"), 32, LEAF_LIMIT);
+    }
+
+    private DirectoryReferenceIndex matching(MultipartKey key) throws IOException {
+        String hash = hash(key);
+        return new DirectoryReferenceIndex(root.resolve("matching").resolve(hash.substring(0, 2)).resolve(hash), 48, LEAF_LIMIT);
+    }
+
+    private static String hash(MultipartKey key) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            field(digest, key.accountId());
+            field(digest, key.systemId());
+            field(digest, key.sender());
+            field(digest, key.recipient());
+            field(digest, Integer.toString(key.referenceBits()));
+            field(digest, Integer.toString(key.reference()));
+            field(digest, Integer.toString(key.total()));
+            field(digest, key.normalizedUdh());
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("pendingMultipartIndex|error|reason:sha256Unavailable", failure);
+        }
+    }
+
+    private static void field(MessageDigest digest, String value) {
+        byte[] bytes = value == null ? null : value.getBytes(StandardCharsets.UTF_8);
+        digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes == null ? -1 : bytes.length).array());
+        if (bytes != null) {
+            digest.update(bytes);
+        }
+    }
+}

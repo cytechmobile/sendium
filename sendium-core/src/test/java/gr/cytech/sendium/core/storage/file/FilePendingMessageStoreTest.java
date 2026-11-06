@@ -209,7 +209,7 @@ class FilePendingMessageStoreTest {
         store.open();
         store.open();
         assertThatThrownBy(() -> store.admitPart(source(1), message(source(1), "part"), Duration.ofSeconds(1)))
-                .hasMessageContaining("reason:multipartAdmissionUnavailable");
+                .hasMessageContaining("reason:invalidIdentity");
         assertThatThrownBy(() -> store.makeHeldReady(Set.of(source(1)), message(source(1), "held")))
                 .hasMessageContaining("reason:heldPublicationUnavailable");
         assertThat(store.multipartSources(UUID.randomUUID())).isEmpty();
