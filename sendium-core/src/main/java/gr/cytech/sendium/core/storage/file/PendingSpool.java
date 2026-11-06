@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -35,6 +36,7 @@ public final class PendingSpool implements AutoCloseable {
     private boolean ready;
     private boolean closed;
     private long recoveredSources;
+    private FolderPendingIndex index;
 
     public PendingSpool(Path root) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
@@ -83,6 +85,37 @@ public final class PendingSpool implements AutoCloseable {
         return recoveredSources;
     }
 
+    public synchronized List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
+        requireReady();
+        try {
+            return index.sourcesAfter(afterExclusive, limit);
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingIndexTraversal|error|reason:sourcePageFailed", failure);
+        }
+    }
+
+    // Selection integration follows in the pending-store task; callers must retain the owner lock.
+    synchronized List<SourceId> readyCandidates(int limit) {
+        requireReady();
+        try {
+            return index.ready(limit);
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingIndexTraversal|error|reason:readyPageFailed", failure);
+        }
+    }
+
+    synchronized void removeReady(SourceId source, int priority) {
+        requireReady();
+        try {
+            index.removeReady(source, priority);
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingIndexTransition|error|sourceId:" + source.value() + "|reason:readyRemovalFailed", failure);
+        }
+    }
+
     /** Returns the first accepted record for this UUID, never replacing an existing source. */
     public synchronized PendingSourceRecord publish(PendingSourceRecord record) {
         requireReady();
@@ -92,6 +125,7 @@ public final class PendingSpool implements AutoCloseable {
             Files.createDirectories(target.getParent());
             requireDirectory(target.getParent());
             if (publishBytes(target, encoded)) {
+                index.add(record);
                 return record;
             }
             return read(target, record.source());
@@ -110,7 +144,8 @@ public final class PendingSpool implements AutoCloseable {
                 String name = entry.getFileName().toString();
                 if (temporary(name)) {
                     deleteTemporary(entry);
-                } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("sources")) {
+                } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("sources") &&
+                        !name.equals("derived")) {
                     throw unavailable("pendingRecovery|error|reason:unexpectedSpoolEntry", null);
                 }
             }
@@ -134,6 +169,8 @@ public final class PendingSpool implements AutoCloseable {
         Path probe = root.resolve(".tmp-" + UUID.randomUUID());
         publishBytes(probe, new byte[0]);
         Files.delete(probe);
+        FolderPendingIndex.discard(root.resolve("derived"));
+        index = new FolderPendingIndex(root.resolve("derived"));
         try (var buckets = Files.newDirectoryStream(sources)) {
             for (Path bucket : buckets) {
                 if (!bucket.getFileName().toString().matches("[0-9a-f]{2}")) {
@@ -151,7 +188,7 @@ public final class PendingSpool implements AutoCloseable {
                         if (!sourcePath(source).equals(path)) {
                             throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:misplacedSource", null);
                         }
-                        read(path, source);
+                        index.add(read(path, source));
                         recoveredSources++;
                     }
                 }
