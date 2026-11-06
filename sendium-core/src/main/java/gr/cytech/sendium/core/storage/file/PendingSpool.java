@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
@@ -83,6 +84,50 @@ public final class PendingSpool implements AutoCloseable {
     public synchronized long recoveredSources() {
         requireReady();
         return recoveredSources;
+    }
+
+    synchronized boolean isReady() {
+        return ready;
+    }
+
+    public synchronized Optional<PendingSourceRecord> find(SourceId source) {
+        requireReady();
+        Objects.requireNonNull(source, "source");
+        Path path = sourcePath(source);
+        try {
+            if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+                return Optional.empty();
+            }
+            return Optional.of(read(path, source));
+        } catch (RuntimeException failure) {
+            ready = false;
+            throw failure;
+        }
+    }
+
+    /** Ordinary sources only; multipart terminal-intent reconciliation is added separately. */
+    synchronized boolean remove(SourceId source) {
+        requireReady();
+        Optional<PendingSourceRecord> existing = find(source);
+        if (existing.isEmpty()) {
+            return false;
+        }
+        PendingSourceRecord record = existing.orElseThrow();
+        if (record.multipart() != null) {
+            throw new OutboundStorageException(PENDING, UNSUPPORTED,
+                    "pendingCompletion|error|sourceId:" + source.value() + "|reason:multipartCompletionUnavailable");
+        }
+        try {
+            Files.delete(sourcePath(source));
+            index.remove(record);
+            return true;
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            if (failure instanceof OutboundStorageException storage) {
+                throw storage;
+            }
+            throw unavailable("pendingCompletion|error|sourceId:" + source.value() + "|reason:sourceRemovalFailed", failure);
+        }
     }
 
     public synchronized List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {

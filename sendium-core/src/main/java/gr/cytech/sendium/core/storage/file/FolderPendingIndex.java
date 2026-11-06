@@ -70,6 +70,13 @@ final class FolderPendingIndex {
         }
     }
 
+    void remove(PendingSourceRecord record) throws IOException {
+        sources.remove(sourceKey(record.source()));
+        if (record.disposition() == PendingSourceRecord.Disposition.READY) {
+            removeReady(record.source(), record.message().restore().priority);
+        }
+    }
+
     private DirectoryReferenceIndex readyIndex(int priority) throws IOException {
         return new DirectoryReferenceIndex(readyPath(priority), 32, LEAF_LIMIT);
     }
