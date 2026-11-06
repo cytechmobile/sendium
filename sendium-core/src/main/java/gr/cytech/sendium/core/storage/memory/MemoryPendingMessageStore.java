@@ -1,9 +1,12 @@
 package gr.cytech.sendium.core.storage.memory;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.util.MessageUtil;
@@ -27,6 +30,7 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -41,7 +45,7 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * concrete message type and detach all mutable fields. Snapshot and eligibility functions run under
  * the store lock and must be side-effect-free, nonblocking, and must not call back into these stores.
  */
-public final class MemoryPendingMessageStore<M extends StandardMessage> implements PendingMessageStore<M> {
+public final class MemoryPendingMessageStore<M extends StandardMessage> implements PendingMessageStore<M>, PendingSelectionSource<M> {
     final ReentrantLock lock = new ReentrantLock();
     final Condition changed = lock.newCondition();
 
@@ -404,13 +408,38 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         }
     }
 
-    void requireReady(Role operation) {
+    @Override
+    public ReentrantLock selectionLock() {
+        return lock;
+    }
+
+    @Override
+    public Condition selectionChanged() {
+        return changed;
+    }
+
+    @Override
+    public boolean stageNext(Instant now, Consumer<Selected<M>> publication) {
+        requireReady(Role.ROUTER_QUEUE);
+        Entry<M> source = nextEligible(now);
+        if (source == null) {
+            return false;
+        }
+        M message = snapshot(source.message, Role.ROUTER_QUEUE);
+        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), source.sources, message));
+        removeWaiting(source);
+        return true;
+    }
+
+    @Override
+    public void requireReady(Role operation) {
         if (state != State.READY) {
             throw new OutboundStorageException(operation, UNAVAILABLE, "Memory pending store is not ready");
         }
     }
 
-    void attachSelector(Object owner) {
+    @Override
+    public void attachSelector(Object owner) {
         requireReady(Role.ROUTER_QUEUE);
         if (selectorOwner != null && selectorOwner != owner) {
             throw new OutboundStorageException(Role.ROUTER_QUEUE, OWNERSHIP_CONFLICT,
@@ -439,11 +468,13 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         }
     }
 
-    boolean contains(SourceId source) {
+    @Override
+    public boolean contains(SourceId source) {
         return records.containsKey(source);
     }
 
-    M snapshot(M message, Role operation) {
+    @Override
+    public M snapshot(M message, Role operation) {
         M copy;
         try {
             copy = snapshots.apply(message);

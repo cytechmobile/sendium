@@ -1,36 +1,48 @@
 package gr.cytech.sendium.core.storage.file;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMessageData;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.CAPACITY_EXCEEDED;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
+import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.OWNERSHIP_CONFLICT;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
 
 /**
  * File-owned accepted sources using the explicit StandardMessage representation, not Java serialization.
- * Application profile enablement follows multipart and router integration; these are not yet supported here.
+ * Application profile enablement follows multipart recovery and ingress integration.
  */
-public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage> {
+public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage>, PendingSelectionSource<StandardMessage> {
     private final PendingSpool spool;
     private final int capacity;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition changed = lock.newCondition();
     private State state = State.NEW;
     private long retained;
+    private Object selectorOwner;
 
     public FilePendingMessageStore(Path root, int capacity) {
         if (capacity <= 0) {
@@ -41,7 +53,14 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     }
 
     @Override
-    public synchronized void open() {
+    public void open() {
+        withLock(() -> {
+            initialize();
+            return null;
+        });
+    }
+
+    private void initialize() {
         if (state == State.READY) {
             requireReady();
             return;
@@ -80,19 +99,21 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     }
 
     @Override
-    public synchronized Status status() {
-        State effective = state == State.READY && !spool.isReady() ? State.FAILED : state;
-        return new Status("file", true, effective);
+    public Status status() {
+        return withLock(() -> {
+            State effective = state == State.READY && !spool.isReady() ? State.FAILED : state;
+            return new Status("file", true, effective);
+        });
     }
 
     @Override
-    public synchronized SourceId admit(SourceId source, StandardMessage message) {
-        return admitSource(source, message, PendingSourceRecord.Disposition.READY);
+    public SourceId admit(SourceId source, StandardMessage message) {
+        return withLock(() -> admitSource(source, message, PendingSourceRecord.Disposition.READY));
     }
 
     @Override
-    public synchronized SourceId admitHeld(SourceId source, StandardMessage message) {
-        return admitSource(source, message, PendingSourceRecord.Disposition.HELD);
+    public SourceId admitHeld(SourceId source, StandardMessage message) {
+        return withLock(() -> admitSource(source, message, PendingSourceRecord.Disposition.HELD));
     }
 
     private SourceId admitSource(SourceId source, StandardMessage message, PendingSourceRecord.Disposition disposition) {
@@ -118,55 +139,75 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     }
 
     @Override
-    public synchronized Optional<StandardMessage> find(SourceId source) {
-        requireReady();
-        return spool.find(source).map(record -> record.message().restore());
+    public Optional<StandardMessage> find(SourceId source) {
+        return withLock(() -> {
+            requireReady();
+            return spool.find(source).map(record -> record.message().restore());
+        });
     }
 
     @Override
-    public synchronized List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
-        requireReady();
-        return spool.sourcesAfter(afterExclusive, limit);
+    public List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
+        return withLock(() -> {
+            requireReady();
+            return spool.sourcesAfter(afterExclusive, limit);
+        });
     }
 
     @Override
-    public synchronized void complete(Set<SourceId> sources) {
-        requireReady();
-        for (SourceId source : Set.copyOf(sources)) {
-            if (spool.remove(source)) {
-                retained--;
+    public void complete(Set<SourceId> sources) {
+        withLock(() -> {
+            requireReady();
+            for (SourceId source : Set.copyOf(sources)) {
+                if (spool.remove(source)) {
+                    retained--;
+                }
             }
-        }
+            return null;
+        });
     }
 
     @Override
-    public synchronized MultipartMembership admitPart(SourceId source, StandardMessage message, Duration timeout) {
-        requireReady();
-        throw unsupported("pendingAdmission|error|reason:multipartAdmissionUnavailable");
+    public MultipartMembership admitPart(SourceId source, StandardMessage message, Duration timeout) {
+        return withLock(() -> {
+            requireReady();
+            throw unsupported("pendingAdmission|error|reason:multipartAdmissionUnavailable");
+        });
     }
 
     @Override
-    public synchronized Optional<MultipartMembership> findMultipart(SourceId source) {
-        requireReady();
-        return spool.find(source).map(PendingSourceRecord::multipart);
+    public Optional<MultipartMembership> findMultipart(SourceId source) {
+        return withLock(() -> {
+            requireReady();
+            return spool.find(source).map(PendingSourceRecord::multipart);
+        });
     }
 
     @Override
-    public synchronized List<SourceId> multipartSources(UUID groupId) {
-        requireReady();
-        Objects.requireNonNull(groupId, "groupId");
-        return List.of();
+    public List<SourceId> multipartSources(UUID groupId) {
+        return withLock(() -> {
+            requireReady();
+            Objects.requireNonNull(groupId, "groupId");
+            return List.of();
+        });
     }
 
     @Override
-    public synchronized void makeHeldReady(Set<SourceId> sources, StandardMessage message) {
-        requireReady();
-        throw unsupported("pendingPublication|error|reason:heldPublicationUnavailable");
+    public void makeHeldReady(Set<SourceId> sources, StandardMessage message) {
+        withLock(() -> {
+            requireReady();
+            throw unsupported("pendingPublication|error|reason:heldPublicationUnavailable");
+        });
     }
 
     private void requireReady() {
+        requireReady(PENDING);
+    }
+
+    @Override
+    public void requireReady(Role role) {
         if (status().state() != State.READY) {
-            throw new OutboundStorageException(PENDING, UNAVAILABLE, "pendingLifecycle|error|reason:notReady");
+            throw new OutboundStorageException(role, UNAVAILABLE, "pendingLifecycle|error|reason:notReady");
         }
     }
 
@@ -175,14 +216,83 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     }
 
     @Override
-    public synchronized void close() {
-        if (state == State.CLOSED) {
-            return;
+    public void close() {
+        withLock(() -> {
+            if (state != State.CLOSED) {
+                try {
+                    spool.close();
+                } finally {
+                    state = State.CLOSED;
+                    changed.signalAll();
+                }
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public ReentrantLock selectionLock() {
+        return lock;
+    }
+
+    @Override
+    public Condition selectionChanged() {
+        return changed;
+    }
+
+    @Override
+    public void attachSelector(Object owner) {
+        requireReady(Role.ROUTER_QUEUE);
+        Objects.requireNonNull(owner, "owner");
+        if (selectorOwner != null && selectorOwner != owner) {
+            throw new OutboundStorageException(Role.ROUTER_QUEUE, OWNERSHIP_CONFLICT,
+                    "pendingSelection|error|reason:alreadyOwned");
         }
+        selectorOwner = owner;
+    }
+
+    @Override
+    public boolean stageNext(Instant now, Consumer<Selected<StandardMessage>> publication) {
+        requireReady(Role.ROUTER_QUEUE);
+        List<SourceId> candidates = spool.readyCandidates(1);
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        SourceId source = candidates.getFirst();
+        Optional<PendingSourceRecord> found = spool.find(source);
+        if (found.isEmpty()) {
+            state = State.FAILED;
+            throw new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE,
+                    "pendingSelection|error|sourceId:" + source.value() + "|reason:missingSource");
+        }
+        StandardMessage message = found.orElseThrow().message().restore();
+        int priority = message.priority;
+        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), Set.of(source), message));
+        spool.removeReady(source, priority);
+        return true;
+    }
+
+    @Override
+    public StandardMessage snapshot(StandardMessage message, Role role) {
         try {
-            spool.close();
+            return PendingMessageData.capture(message).restore();
+        } catch (OutboundStorageException failure) {
+            throw new OutboundStorageException(role, failure.reason(), "pendingProjection|error|reason:unsupportedPayload", failure);
+        }
+    }
+
+    @Override
+    public boolean contains(SourceId source) {
+        requireReady();
+        return spool.find(source).isPresent();
+    }
+
+    private <T> T withLock(Supplier<T> operation) {
+        lock.lock();
+        try {
+            return operation.get();
         } finally {
-            state = State.CLOSED;
+            lock.unlock();
         }
     }
 }

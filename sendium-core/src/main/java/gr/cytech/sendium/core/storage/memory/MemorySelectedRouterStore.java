@@ -6,6 +6,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -16,18 +17,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
 
 /**
- * One selected-router owner per pending-store lifetime. A shared lock makes memory selection and
+ * One volatile selected-router owner per pending-store lifetime. A shared lock makes selection and
  * publication indivisible per ready item to other operations. Capacity includes queued and taken routing work;
  * routed records remain retained until source cleanup but no longer occupy a routing slot.
  */
 public final class MemorySelectedRouterStore<M extends StandardMessage> implements SelectedRouterStore<M> {
-    private final MemoryPendingMessageStore<M> pending;
+    private final PendingSelectionSource<M> pending;
     private final int capacity;
     private final Clock clock;
     private final Map<SelectionId, Entry<M>> records = new HashMap<>();
@@ -40,6 +40,14 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
     }
 
     public MemorySelectedRouterStore(MemoryPendingMessageStore<M> pending, int capacity, Clock clock) {
+        this((PendingSelectionSource<M>) pending, capacity, clock);
+    }
+
+    public MemorySelectedRouterStore(PendingSelectionSource<M> pending, int capacity) {
+        this(pending, capacity, Clock.systemUTC());
+    }
+
+    public MemorySelectedRouterStore(PendingSelectionSource<M> pending, int capacity, Clock clock) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("Router capacity must be positive");
         }
@@ -50,7 +58,7 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
 
     @Override
     public void open() {
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             if (state == State.CLOSED) {
                 throw invalid("Closed memory selected-router store cannot reopen");
@@ -58,18 +66,18 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
             pending.attachSelector(this);
             state = State.READY;
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
     @Override
     public Status status() {
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             State effective = state == State.READY && pending.status().state() != State.READY ? State.FAILED : state;
             return new Status("memory", false, effective);
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
@@ -78,36 +86,35 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
         if (limit <= 0) {
             throw new IllegalArgumentException("Selection limit must be positive");
         }
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             requireReady();
             int budget = Math.min(limit, capacity - routingSlots);
             int staged = 0;
             Instant now = clock.instant();
             while (staged < budget) {
-                MemoryPendingMessageStore.Entry<M> source = pending.nextEligible(now);
-                if (source == null) {
+                boolean selected = pending.stageNext(now, projection -> {
+                    Entry<M> entry = new Entry<>(projection.id(), projection.sources(), projection.message());
+                    records.put(entry.id, entry);
+                    ready.addLast(entry);
+                    routingSlots++;
+                });
+                if (!selected) {
                     break;
                 }
-                M message = pending.snapshot(source.message, Role.ROUTER_QUEUE);
-                Entry<M> entry = new Entry<>(new SelectionId(UUID.randomUUID()), source.sources, message);
-                records.put(entry.id, entry);
-                ready.addLast(entry);
-                pending.removeWaiting(source);
-                routingSlots++;
                 staged++;
-                pending.changed.signalAll();
+                pending.selectionChanged().signalAll();
             }
             return staged;
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
     @Override
     public Optional<Selected<M>> take(Duration timeout) throws InterruptedException {
         long remaining = timeoutNanos(timeout);
-        pending.lock.lockInterruptibly();
+        pending.selectionLock().lockInterruptibly();
         try {
             while (true) {
                 requireReady();
@@ -123,10 +130,10 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
                 if (remaining <= 0) {
                     return Optional.empty();
                 }
-                remaining = pending.changed.awaitNanos(remaining);
+                remaining = pending.selectionChanged().awaitNanos(remaining);
             }
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
@@ -134,7 +141,7 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
     @Override
     public void release(Selected<M> selected) {
         Objects.requireNonNull(selected, "selected");
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             requireReady();
             Entry<M> entry = requireEntry(selected.id());
@@ -150,16 +157,16 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
             entry.inFlight = null;
             entry.lastReturned = selected;
             ready.addLast(entry);
-            pending.changed.signalAll();
+            pending.selectionChanged().signalAll();
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
     @Override
     public void markRouted(SelectionId selection) {
         Objects.requireNonNull(selection, "selection");
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             requireReady();
             Entry<M> entry = requireEntry(selection);
@@ -174,14 +181,14 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
             entry.lastReturned = null;
             routingSlots--;
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
     @Override
     public void complete(SelectionId selection) {
         Objects.requireNonNull(selection, "selection");
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             requireReady();
             Entry<M> entry = records.get(selection);
@@ -199,21 +206,21 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
                 routingSlots--;
             }
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
     @Override
     public void close() {
-        pending.lock.lock();
+        pending.selectionLock().lock();
         try {
             state = State.CLOSED;
             records.clear();
             ready.clear();
             routingSlots = 0;
-            pending.changed.signalAll();
+            pending.selectionChanged().signalAll();
         } finally {
-            pending.lock.unlock();
+            pending.selectionLock().unlock();
         }
     }
 
