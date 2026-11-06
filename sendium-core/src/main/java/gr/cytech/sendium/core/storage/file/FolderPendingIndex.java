@@ -33,10 +33,13 @@ final class FolderPendingIndex {
             multipart.add(record.multipart());
         }
         if (record.disposition() == PendingSourceRecord.Disposition.READY) {
-            int priority = record.message().restore().priority;
-            readyIndex(priority).add(sourceKey(record.source()));
-            priorities.add(priorityKey(priority));
+            addReady(record.source(), record.message().restore().priority);
         }
+    }
+
+    void addReady(SourceId representative, int priority) throws IOException {
+        readyIndex(priority).add(sourceKey(representative));
+        priorities.add(priorityKey(priority));
     }
 
     List<SourceId> sourcesAfter(SourceId after, int limit) throws IOException {

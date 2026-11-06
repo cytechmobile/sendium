@@ -4,6 +4,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
 import gr.cytech.sendium.core.storage.pending.PendingRecordCodec;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 
@@ -40,6 +41,7 @@ public final class PendingSpool implements AutoCloseable {
     private boolean closed;
     private long recoveredSources;
     private FolderPendingIndex index;
+    private HeldPendingPublications publications;
 
     public PendingSpool(Path root) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
@@ -90,6 +92,39 @@ public final class PendingSpool implements AutoCloseable {
 
     synchronized boolean isReady() {
         return ready;
+    }
+
+    synchronized Optional<UUID> publicationId(SourceId source) {
+        requireReady();
+        try {
+            return publications.bindingId(source);
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingPublicationRead|error|sourceId:" + source.value() + "|reason:bindingReadFailed", failure);
+        }
+    }
+
+    synchronized Optional<Publication> findPublication(SourceId source) {
+        requireReady();
+        try {
+            return publications.find(source);
+        } catch (IOException | OutboundStorageException failure) {
+            ready = false;
+            throw unavailable("pendingPublicationRead|error|sourceId:" + source.value() + "|reason:snapshotReadFailed", failure);
+        }
+    }
+
+    synchronized void publishHeld(Publication publication) {
+        requireReady();
+        byte[] encoded = publications.encode(publication);
+        try {
+            publications.publish(publication, encoded);
+            index.addReady(publication.representative(), publication.message().restore().priority);
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            throw unavailable("pendingPublication|error|sourceId:" + publication.representative().value() +
+                    "|reason:bindingPublicationFailed", failure);
+        }
     }
 
     synchronized List<String> matchingGroupsAfter(MultipartKey key, String cursor, int limit) {
@@ -148,6 +183,10 @@ public final class PendingSpool implements AutoCloseable {
             return false;
         }
         PendingSourceRecord record = existing.orElseThrow();
+        if (publicationId(source).isPresent()) {
+            throw new OutboundStorageException(PENDING, UNSUPPORTED,
+                    "pendingCompletion|error|sourceId:" + source.value() + "|reason:boundCompletionUnavailable");
+        }
         if (record.multipart() != null) {
             throw new OutboundStorageException(PENDING, UNSUPPORTED,
                     "pendingCompletion|error|sourceId:" + source.value() + "|reason:multipartCompletionUnavailable");
@@ -251,6 +290,7 @@ public final class PendingSpool implements AutoCloseable {
         Files.delete(probe);
         FolderPendingIndex.discard(root.resolve("derived"));
         index = new FolderPendingIndex(root.resolve("derived"));
+        publications = new HeldPendingPublications(root.resolve("derived/publications"));
         try (var buckets = Files.newDirectoryStream(sources)) {
             for (Path bucket : buckets) {
                 if (!bucket.getFileName().toString().matches("[0-9a-f]{2}")) {

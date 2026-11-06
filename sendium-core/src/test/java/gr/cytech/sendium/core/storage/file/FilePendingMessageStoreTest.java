@@ -211,7 +211,7 @@ class FilePendingMessageStoreTest {
         assertThatThrownBy(() -> store.admitPart(source(1), message(source(1), "part"), Duration.ofSeconds(1)))
                 .hasMessageContaining("reason:invalidIdentity");
         assertThatThrownBy(() -> store.makeHeldReady(Set.of(source(1)), message(source(1), "held")))
-                .hasMessageContaining("reason:heldPublicationUnavailable");
+                .hasMessageContaining("reason:conflictingSourceBinding");
         assertThat(store.multipartSources(UUID.randomUUID())).isEmpty();
         assertThat(store.findMultipart(source(1))).isEmpty();
         store.close();
