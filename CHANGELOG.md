@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/cytechmobile/sendium/compare/v0.6.1...v0.7.0) (2026-11-06)
+
+
+### Features
+
+* **api:** add native JSON message submission and receipt callbacks ([#387](https://github.com/cytechmobile/sendium/issues/387)) ([e2cacb5](https://github.com/cytechmobile/sendium/commit/e2cacb5f51fc8680f2ca8fa29b61b4e3022861e0)), closes [#384](https://github.com/cytechmobile/sendium/issues/384)
+* **storage:** coordinate outbound message ownership across processing stages ([#351](https://github.com/cytechmobile/sendium/issues/351)) ([94d82c7](https://github.com/cytechmobile/sendium/commit/94d82c7ff1b0dcaa2d251e0e092eb3842b2ec104))
+* **storage:** define pending-message contracts and CBOR envelope ([#355](https://github.com/cytechmobile/sendium/issues/355)) ([63abda7](https://github.com/cytechmobile/sendium/commit/63abda7dec62e8320a9d60490ebecd7746018944)), closes [#343](https://github.com/cytechmobile/sendium/issues/343)
+
+
+### Bug Fixes
+
+* **http:** correct Kannel delivery-report compatibility ([#386](https://github.com/cytechmobile/sendium/issues/386)) ([34a0590](https://github.com/cytechmobile/sendium/commit/34a0590ce7249c9e5c933a215c819ea40fd19bc7)), closes [#375](https://github.com/cytechmobile/sendium/issues/375) [#385](https://github.com/cytechmobile/sendium/issues/385)
+
 ## [0.6.1](https://github.com/cytechmobile/sendium/compare/v0.6.0...v0.6.1) (2026-11-03)
 
 
