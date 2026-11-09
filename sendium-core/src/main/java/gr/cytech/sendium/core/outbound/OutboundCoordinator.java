@@ -8,6 +8,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -28,6 +29,11 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
      * earlier retained records must not independently schedule the same work.
      */
     void start();
+
+    /** Shared admission recovery, when owned by this coordinator. Consumers must not close/reconstruct it. */
+    default Optional<PendingMultipartRecovery<M>> pendingMultipartRecovery() {
+        return Optional.empty();
+    }
 
     /**
      * Begins shutdown by stopping new acceptance, selection, and takes. Existing routing, handoff,
