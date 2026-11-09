@@ -12,6 +12,8 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
@@ -20,11 +22,13 @@ import java.util.UUID;
 final class MultipartPendingIndex {
     private static final int LEAF_LIMIT = 128;
     private final Path root;
+    private final DirectoryReferenceIndex due;
 
     MultipartPendingIndex(Path root) throws IOException {
         this.root = root;
         Files.createDirectories(root.resolve("groups"));
         Files.createDirectories(root.resolve("matching"));
+        due = new DirectoryReferenceIndex(root.resolve("due"), 56, LEAF_LIMIT);
     }
 
     void add(MultipartMembership member) throws IOException {
@@ -41,6 +45,11 @@ final class MultipartPendingIndex {
             Files.writeString(original, identity, StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE_NEW);
         }
         matching(member.key()).add(groupKey(member));
+        if (originalCount(member.groupId()) == member.key().total()) {
+            schedule(member.groupId(), Instant.MIN);
+        } else if (!scheduled(member.groupId())) {
+            schedule(member.groupId(), member.deadline());
+        }
     }
 
     List<String> matchingAfter(MultipartKey key, String after, int limit) throws IOException {
@@ -59,7 +68,75 @@ final class MultipartPendingIndex {
             Files.delete(group(member.groupId()).resolve("ordinals").resolve(Integer.toString(member.ordinal())));
         }
         if (members.after(null, 1).isEmpty()) {
+            finish(member.groupId());
             FolderPendingIndex.discard(group(member.groupId()));
+        }
+    }
+
+    List<UUID> due(Instant now, int limit) throws IOException {
+        var groups = new ArrayList<UUID>();
+        for (String key : due.after(null, limit)) {
+            if (dueAt(key).isAfter(now)) {
+                break;
+            }
+            groups.add(new UUID(Long.parseUnsignedLong(key.substring(24, 40), 16), Long.parseUnsignedLong(key.substring(40), 16)));
+        }
+        return List.copyOf(groups);
+    }
+
+    boolean scheduled(UUID group) throws IOException {
+        return dueKey(group) != null;
+    }
+
+    void schedule(UUID group, Instant when) throws IOException {
+        String previous = dueKey(group);
+        String key = "%016x%08x%016x%016x".formatted(when.getEpochSecond() ^ Long.MIN_VALUE, when.getNano(),
+                group.getMostSignificantBits(), group.getLeastSignificantBits());
+        if (key.equals(previous)) {
+            return;
+        }
+        if (previous != null) {
+            due.remove(previous);
+        }
+        due.add(key);
+        Files.writeString(group(group).resolve("due-key"), key, StandardCharsets.UTF_8);
+    }
+
+    void finish(UUID group) throws IOException {
+        String previous = dueKey(group);
+        if (previous != null) {
+            due.remove(previous);
+            Files.delete(group(group).resolve("due-key"));
+        }
+    }
+
+    private String dueKey(UUID group) throws IOException {
+        Path path = group(group).resolve("due-key");
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            return null;
+        }
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("pendingMultipartLookup|error|reason:invalidDeadlineReference");
+        }
+        String key = Files.readString(path);
+        if (!key.matches("[0-9a-f]{56}") ||
+                !key.substring(24).equals("%016x%016x".formatted(group.getMostSignificantBits(), group.getLeastSignificantBits()))) {
+            throw new IOException("pendingMultipartLookup|error|reason:invalidDeadlineReference");
+        }
+        dueAt(key);
+        return key;
+    }
+
+    private static Instant dueAt(String key) throws IOException {
+        try {
+            long seconds = Long.parseUnsignedLong(key.substring(0, 16), 16) ^ Long.MIN_VALUE;
+            int nanos = Integer.parseUnsignedInt(key.substring(16, 24), 16);
+            if (nanos < 0 || nanos > 999_999_999) {
+                throw new IllegalArgumentException();
+            }
+            return Instant.ofEpochSecond(seconds, nanos);
+        } catch (RuntimeException failure) {
+            throw new IOException("pendingMultipartLookup|error|reason:invalidDeadlineReference");
         }
     }
 

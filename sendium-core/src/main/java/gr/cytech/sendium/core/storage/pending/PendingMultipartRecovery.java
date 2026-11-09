@@ -5,6 +5,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,6 +35,7 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
     private final ScheduledExecutorService scheduler;
     private final BiConsumer<Set<SourceId>, M> publisher;
     private final Map<UUID, Group> groups = new HashMap<>();
+    private final IndexedPendingMultipartRecovery<M> indexedRecovery;
     private volatile boolean ready;
     private boolean closed;
 
@@ -43,10 +45,16 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
         this.clock = Objects.requireNonNull(clock, "clock");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
+        this.indexedRecovery = pending instanceof IndexedMultipartSource source ?
+                new IndexedPendingMultipartRecovery<>(pending, source, clock, scheduler, publisher) : null;
     }
 
     /** Caller quiesces ingress/processing until successful return; no publication occurs before scan validation. */
     public synchronized void reconstruct(int pageSize) {
+        if (indexedRecovery != null) {
+            indexedRecovery.reconstruct(pageSize);
+            return;
+        }
         if (closed || pageSize <= 0) {
             throw new IllegalStateException("Recovery requires an open component and positive page size");
         }
@@ -92,11 +100,15 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
     }
 
     public boolean isReady() {
-        return ready;
+        return indexedRecovery == null ? ready : indexedRecovery.isReady();
     }
 
     /** Notification contains only a handle; accepted payload and current group members remain store-owned. */
     public synchronized void accepted(SourceId source) {
+        if (indexedRecovery != null) {
+            indexedRecovery.accepted(source);
+            return;
+        }
         if (!ready || closed) {
             throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNAVAILABLE,
                     "Pending multipart reconstruction is not ready");
@@ -226,6 +238,10 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
 
     @Override
     public synchronized void close() {
+        if (indexedRecovery != null) {
+            indexedRecovery.close();
+            return;
+        }
         ready = false;
         closed = true;
         cancelTimers();

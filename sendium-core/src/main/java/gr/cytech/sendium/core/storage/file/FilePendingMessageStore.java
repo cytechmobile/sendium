@@ -6,6 +6,7 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
 import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
@@ -42,7 +43,7 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * File-owned accepted sources using the explicit StandardMessage representation, not Java serialization.
  * Application profile enablement follows multipart recovery and ingress integration.
  */
-public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage>, PendingSelectionSource<StandardMessage> {
+public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage>, PendingSelectionSource<StandardMessage>, IndexedMultipartSource {
     private final PendingSpool spool;
     private final int capacity;
     private final Clock clock;
@@ -376,6 +377,68 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                 sources.addAll(page);
                 cursor = page.getLast();
             }
+        });
+    }
+
+    @Override
+    public List<UUID> dueMultipartGroups(Instant now, int limit) {
+        Objects.requireNonNull(now, "now");
+        if (limit <= 0) {
+            throw new IllegalArgumentException("pendingMultipartRecovery|error|reason:nonPositiveLimit");
+        }
+        return withLock(() -> {
+            requireReady();
+            return spool.dueGroups(now, limit);
+        });
+    }
+
+    @Override
+    public Optional<IndexedMultipartSource.Group> multipartGroup(UUID group) {
+        Objects.requireNonNull(group, "group");
+        return withLock(() -> {
+            requireReady();
+            if (spool.groupSourcesAfter(group, null, 1).isEmpty()) {
+                return Optional.empty();
+            }
+            MultipartMembership identity = groupIdentity(group);
+            var originals = new ArrayList<SourceId>();
+            for (int ordinal = 1; ordinal <= identity.key().total(); ordinal++) {
+                SourceId original = spool.groupOriginal(group, ordinal);
+                if (original != null) {
+                    MultipartMembership member = retainedMembership(original);
+                    if (member.duplicate() || member.ordinal() != ordinal || !sameGroup(identity, member)) {
+                        throw invalidMembership(original);
+                    }
+                    originals.add(original);
+                }
+            }
+            if (originals.isEmpty()) {
+                throw invalidMembership(identity.source());
+            }
+            return Optional.of(new IndexedMultipartSource.Group(identity, originals, spool.groupScheduled(group)));
+        });
+    }
+
+    @Override
+    public void scheduleMultipartGroup(UUID group, Instant due) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(due, "due");
+        withLock(() -> {
+            requireReady();
+            if (!spool.groupSourcesAfter(group, null, 1).isEmpty()) {
+                spool.scheduleGroup(group, due);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void finishMultipartGroup(UUID group) {
+        Objects.requireNonNull(group, "group");
+        withLock(() -> {
+            requireReady();
+            spool.finishGroup(group);
+            return null;
         });
     }
 

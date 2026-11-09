@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -147,6 +148,28 @@ public final class PendingSpool implements AutoCloseable {
         return multipartIndex(() -> index.multipart().originalCount(group));
     }
 
+    synchronized List<UUID> dueGroups(Instant now, int limit) {
+        return multipartIndex(() -> index.multipart().due(now, limit));
+    }
+
+    synchronized boolean groupScheduled(UUID group) {
+        return multipartIndex(() -> index.multipart().scheduled(group));
+    }
+
+    synchronized void scheduleGroup(UUID group, Instant due) {
+        multipartIndex(() -> {
+            index.multipart().schedule(group, due);
+            return null;
+        });
+    }
+
+    synchronized void finishGroup(UUID group) {
+        multipartIndex(() -> {
+            index.multipart().finish(group);
+            return null;
+        });
+    }
+
     synchronized void closeGroup(MultipartMembership member) {
         multipartIndex(() -> {
             index.multipart().closeGroup(member);
@@ -158,8 +181,11 @@ public final class PendingSpool implements AutoCloseable {
         requireReady();
         try {
             return operation.run();
-        } catch (IOException failure) {
+        } catch (IOException | RuntimeException failure) {
             ready = false;
+            if (failure instanceof OutboundStorageException storage) {
+                throw storage;
+            }
             throw unavailable("pendingMultipartIndex|error|reason:operationFailed", failure);
         }
     }
