@@ -212,12 +212,15 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public void setIngressCoordinator(OutboundCoordinator<M> coordinator) {
         Objects.requireNonNull(coordinator, "coordinator");
         if (ingressStarted || inExecutor != null) {
-            throw new IllegalStateException("Ingress lifecycle must be selected before worker startup/admission");
+            throw new IllegalStateException("smppIngressLifecycle|error|reason:selectionAfterStartupOrAdmission");
         }
         ingressLifecycleLock.writeLock().lock();
         try {
             if (ingressStarted || inExecutor != null || (ingressCoordinator != null && ingressCoordinator != coordinator)) {
-                throw new IllegalStateException("Ingress lifecycle cannot change after selection/startup");
+                throw new IllegalStateException("smppIngressLifecycle|error|reason:coordinatorSelectionConflict");
+            }
+            if (messagePartsHandler != null) {
+                coordinator.pendingMultipartRecovery().ifPresent(messagePartsHandler::useSharedRecovery);
             }
             ingressCoordinator = coordinator;
         } finally {
@@ -247,6 +250,9 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public Thread start() {
         ingressLifecycleLock.writeLock().lock();
         try {
+            if (ingressCoordinator != null && messagePartsHandler != null) {
+                ingressCoordinator.pendingMultipartRecovery().ifPresent(messagePartsHandler::useSharedRecovery);
+            }
             requirePendingRecoveryReady();
             ingressStarted = true;
         } finally {
@@ -657,6 +663,13 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     public void setMessagePartsHandler(MessagePartsHandler<M> messagePartsHandler) {
+        Objects.requireNonNull(messagePartsHandler, "smppIngressLifecycle|error|reason:missingPartsHandler");
+        if (this.messagePartsHandler != null && this.messagePartsHandler != messagePartsHandler && this.messagePartsHandler.hasSharedRecovery()) {
+            throw new IllegalStateException("smppIngressLifecycle|error|reason:cannotReplaceSharedRecoveryHandler");
+        }
+        if (ingressCoordinator != null) {
+            ingressCoordinator.pendingMultipartRecovery().ifPresent(messagePartsHandler::useSharedRecovery);
+        }
         this.messagePartsHandler = messagePartsHandler;
     }
 
@@ -1094,7 +1107,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     private void requirePendingRecoveryReady() {
         if (messagePartsHandler != null && messagePartsHandler.isRecordDriven() && !messagePartsHandler.isRecoveryReady()) {
             throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNAVAILABLE,
-                    "Pending multipart reconstruction is not ready");
+                    "smppIngressLifecycle|error|reason:pendingRecoveryNotReady");
         }
     }
 
