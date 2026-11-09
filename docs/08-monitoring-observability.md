@@ -22,7 +22,7 @@ The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. 
 
 ## Planned SMS Operations Metrics Contract
 
-> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP/SMPP admission counters and Pending/Selected gauges are implemented as described below; the remaining catalog and collection metadata are planned. Existing runtime and DLR storage-operation metrics remain available.
+> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP/SMPP admission counters, Pending/Selected/Routed gauges and coordinated provider request metrics are implemented as described below; receipt metrics and collection metadata remain planned. Existing runtime and DLR storage-operation metrics remain available.
 
 ### Implemented HTTP Admission Counter
 
@@ -63,6 +63,40 @@ The standalone memory pipeline exposes `sendium_sms_pending_sources{backend="mem
 `sendium.metrics.storage.enabled` defaults to `true`. Set it to `false` and restart to omit these gauges; admission and normal processing remain active. Before a store is ready or after it closes, registered gauges return NaN rather than implying a healthy empty store. Embedding applications opt in explicitly with the memory stores' `bindMetrics(MeterRegistry)` methods, once per store/registry ownership lifetime. Importing the core library does not register these metrics automatically.
 
 Only `waiting + routing` represents unassigned Selected capacity. A terminal discard stays counted as taken routing work until Selected completion; the memory store does not record a separate discard phase. `retained` means destination-recorded bookkeeping only. Pending remains occupied until source completion, even after routing; Selected bookkeeping can outlive source deletion during partial cleanup.
+
+### Implemented Routed And Provider Request Metrics
+
+`sendium_sms_routed_work{destination="<configured worker>",state="waiting|active|terminal"}` tracks retained logical selections. Waiting ends when work is taken for Dispatch, not necessarily when a network request is sent. Active includes preparation queues, rate waits, replacement attempts and required handoffs. Terminal begins when Routed completion succeeds and ends only when forget succeeds. Successful source deletion alone does not release Routed capacity. Counts are maintained at store transitions, and scrapes do not enumerate work. Destination series are created on first assignment and remain zero after drain; closed stores return NaN. The storage metrics off switch omits these gauges. Programmatic memory Routed stores must bind metrics once before opening.
+
+For coordinated SMPP provider requests, the implemented families are:
+
+- `sendium_sms_provider_attempts_total{provider,kind="initial|retry"}`: one send-boundary invocation per provider SMS part. Replacement work is marked explicitly by the dispatcher, including replacements sent to a different provider; do not infer it from source admission or mutable message retry counters.
+- `sendium_sms_provider_in_flight{provider}`: started requests without a claimed response/timeout/local failure. Requests generated but never sent, including unsent multipart parts after a first-send failure, do not occupy this gauge.
+- `sendium_sms_provider_response_seconds_count{provider,result}` and `sendium_sms_provider_response_seconds_sum{provider,result}`: count and total latency for the first result. Results are `accepted`, `rejected`, `timeout`, `transport_error`, and `protocol_error`. The timer also exposes its implementation's standard maximum series; histogram buckets are not enabled here.
+
+Timing starts immediately before the coordinated send-boundary invocation, after rate limiting and worker preparation. It includes handler/session selection and any time waiting within the send call, not just network round-trip time. Expiry callbacks and synchronous SMPP timeout exceptions are `timeout`; non-submit responses or recoverable malformed responses are `protocol_error`. A genuine negative submit response is `rejected`. These classifications do not change the existing failure/retry policy.
+
+Routed occupancy keeps the parent's originally recorded `destination`. Provider request metrics use the actual sending worker's `provider` identity, including when routing chooses a different worker for a replacement attempt. A retry does not transfer the parent record or create another Pending source.
+
+The existing per-part response claim prevents repeated callbacks from decrementing in-flight or counting/timing an outcome twice. Release and timing happen before tracking/storage handoffs. Retrying a failed handoff adds neither a provider request nor another response measurement. A transport send failure counts an attempt even when it is uncertain whether any bytes reached the provider. Provider acceptance is still not handset delivery.
+
+Provider series are created on first send. CDI-managed workers share a meter holder by configured full worker name, preserving in-flight state across worker replacement in the same application. Programmatic workers opt in before startup with `bindProviderMetrics(ProviderRequestMetrics)` and share one holder per registry. The existing overloads treat direct embedded submissions as initial attempts; callers scheduling replacements can use the overload with the explicit retry flag. There are no per-message metrics indexes. These request metrics currently cover the coordinated standalone provider path, not the legacy worker `doMessage` path. They remain active when storage-state metrics are disabled.
+
+```promql
+# Waiting logical Routed work per configured destination.
+sum by (destination) (sendium_sms_routed_work{state="waiting"})
+
+# Retry provider requests per second (not unique accepted sources).
+sum by (provider) (rate(sendium_sms_provider_attempts_total{kind="retry"}[5m]))
+
+# Rejected provider requests per second, using the response timer's count.
+sum by (provider) (rate(sendium_sms_provider_response_seconds_count{result="rejected"}[5m]))
+
+# Mean time until provider attempt completion; no data when no attempts complete.
+sum by (provider) (rate(sendium_sms_provider_response_seconds_sum[5m]))
+/
+sum by (provider) (rate(sendium_sms_provider_response_seconds_count[5m]))
+```
 
 ### Units And Counting Boundaries
 

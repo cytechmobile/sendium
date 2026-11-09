@@ -87,7 +87,7 @@ configured DLR subsystem below.
 | :--- | :--- | :--- |
 | `sendium.metrics.storage.enabled` | `SENDIUM_METRICS_STORAGE_ENABLED` | `true` |
 
-Set to `false` and restart to omit the standalone memory Pending/Selected occupancy gauges. This does not disable admission, storage operations or normal outbound processing. These gauges read maintained counts, not full backlog scans. Periodic PostgreSQL collection is not implemented by this setting yet. See [Monitoring And Observability](08-monitoring-observability.md#implemented-pending-and-selected-gauges).
+Set to `false` and restart to omit the standalone memory Pending/Selected/Routed occupancy gauges. This does not disable admission counters, coordinated provider request metrics, storage operations or normal outbound processing. These gauges read maintained counts, not full backlog scans. Periodic PostgreSQL collection is not implemented by this setting yet. See [Monitoring And Observability](08-monitoring-observability.md#implemented-pending-and-selected-gauges).
 
 ## DLR Storage Environment Variables
 

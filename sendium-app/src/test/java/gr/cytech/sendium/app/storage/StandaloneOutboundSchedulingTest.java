@@ -11,6 +11,7 @@ import gr.cytech.sendium.routing.StandardRoutingManager;
 import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@Timeout(30)
 class StandaloneOutboundSchedulingTest {
     @Test
     void recoverableCycleFailureBacksOffAndKeepsReadinessUp() throws Exception {

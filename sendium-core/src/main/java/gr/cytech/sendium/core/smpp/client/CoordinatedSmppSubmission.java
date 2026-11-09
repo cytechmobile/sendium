@@ -53,17 +53,31 @@ public final class CoordinatedSmppSubmission<M extends StandardMessage> {
         private boolean active;
         private boolean terminal;
         private Throwable failure;
+        private ProviderRequestMetrics.Attempt metricAttempt;
 
         Part(M message) {
             this.message = Objects.requireNonNull(message, "message");
         }
 
         synchronized boolean claimResponse() {
+            return claimResponse(null);
+        }
+
+        synchronized boolean claimResponse(ProviderRequestMetrics.Result result) {
             if (responding) {
                 return false;
             }
             responding = true;
+            if (metricAttempt != null) {
+                metricAttempt.complete(Objects.requireNonNull(result, "request result"));
+            }
             return true;
+        }
+
+        synchronized void startMetrics(ProviderRequestMetrics metrics, String provider, boolean retry) {
+            if (metrics != null) {
+                metricAttempt = metrics.start(provider, retry);
+            }
         }
 
         CompletionStage<Void> completion() {

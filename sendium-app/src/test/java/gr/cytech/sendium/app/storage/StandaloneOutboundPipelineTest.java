@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -104,7 +105,7 @@ class StandaloneOutboundPipelineTest {
             when(worker.isKeepOnRunning()).thenReturn(true);
             when(worker.acceptsMessages()).thenReturn(true);
             when(worker.getThreadCount()).thenReturn(1);
-            when(worker.submitPreparedCoordinated(any(), any())).thenAnswer(invocation -> {
+            when(worker.submitPreparedCoordinated(any(), any(), anyBoolean())).thenAnswer(invocation -> {
                 message = invocation.getArgument(0);
                 calls.incrementAndGet();
                 var submission = mock(CoordinatedSmppSubmission.class);

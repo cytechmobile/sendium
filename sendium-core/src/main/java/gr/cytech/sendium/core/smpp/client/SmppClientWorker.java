@@ -17,6 +17,7 @@ import com.cloudhopper.smpp.ssl.SslConfiguration;
 import com.cloudhopper.smpp.tlv.Tlv;
 import com.cloudhopper.smpp.type.Address;
 import com.cloudhopper.smpp.type.SmppInvalidArgumentException;
+import com.cloudhopper.smpp.type.SmppTimeoutException;
 import com.cloudhopper.smpp.util.DeliveryReceipt;
 import com.cloudhopper.smpp.util.SmppUtil;
 import com.google.common.base.Strings;
@@ -46,6 +47,7 @@ import gr.cytech.sendium.util.MessageTrace;
 import gr.cytech.sendium.util.SecurityUtils;
 import gr.cytech.sendium.util.TimeUtils;
 import jakarta.enterprise.context.Dependent;
+import jakarta.inject.Inject;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
@@ -263,6 +265,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     private ImmutableMap<Short, String> tlvsDlrs;
     private String messageHashPrefix;
     private HealthCheckReport healthCheckReport;
+    private ProviderRequestMetrics providerMetrics;
 
     //for fast initialization
     protected SmppClientWorker() {
@@ -325,6 +328,12 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
 
         checkAndGetHealthCheckReport();
         logger.debug("{} started", getFullName());
+    }
+
+    /** CDI binds automatically; programmatic workers share one holder per registry before startup. */
+    @Inject
+    public void bindProviderMetrics(ProviderRequestMetrics metrics) {
+        providerMetrics = metrics;
     }
 
     public void setupInstance(SendiumConfigurationProvider cp, String instName, Queue<M> routerQueue) {
@@ -548,6 +557,12 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     /** Applies worker preparation before an initial or replacement provider attempt. */
     public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry)
             throws Exception {
+        return submitPreparedCoordinated(message, retry, false);
+    }
+
+    /** Marks replacement work explicitly; message retry counters are not request-attempt identity. */
+    public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry, boolean retryAttempt)
+            throws Exception {
         if (!keepOnRunning || isPause()) {
             throw new IllegalStateException("Worker is stopped or paused: " + getFullName());
         }
@@ -566,7 +581,7 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                 logger.info("{}", message);
             }
             checkBeforeDoMessageFilters(message);
-            return submitCoordinated(message, retry);
+            return submitCoordinated(message, retry, retryAttempt);
         } catch (FilterException failure) {
             message.body = originalBody;
             var submission = new CoordinatedSmppSubmission<M>();
@@ -595,6 +610,11 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
      */
     public CoordinatedSmppSubmission<M> submitCoordinated(M message, CoordinatedRetry<M> retry)
             throws SmppInvalidArgumentException {
+        return submitCoordinated(message, retry, false);
+    }
+
+    public CoordinatedSmppSubmission<M> submitCoordinated(M message, CoordinatedRetry<M> retry, boolean retryAttempt)
+            throws SmppInvalidArgumentException {
         Objects.requireNonNull(retry, "retry");
         List<SubmitSm> requests = generateSubmitRequest(message);
         var submission = new CoordinatedSmppSubmission<M>();
@@ -606,11 +626,13 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         submission.seal();
         for (int index = 0; index < requests.size(); index++) {
             SubmitSm request = requests.get(index);
+            var response = (CoordinatedResponse<M>) request.getReferenceObject();
+            response.part.startMetrics(providerMetrics, getFullName(), retryAttempt);
             try {
                 sendCoordinatedRequest(request);
             } catch (Exception failure) {
-                var response = (CoordinatedResponse<M>) request.getReferenceObject();
-                if (response.part.claimResponse()) {
+                if (response.part.claimResponse(failure instanceof SmppTimeoutException ?
+                        ProviderRequestMetrics.Result.TIMEOUT : ProviderRequestMetrics.Result.TRANSPORT_ERROR)) {
                     if (index == 0) {
                         response.part.finish(() -> coordinateFailure(message, true, (payload, router) ->
                                 retry.retry(payload, router ? NackHandlePolicy.RETRY_ROUTER : NackHandlePolicy.RETRY_WORKER)));
@@ -634,11 +656,16 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
     }
 
     boolean handleCoordinatedResponse(Object reference, int status, String responseMessageId) {
+        return handleCoordinatedResponse(reference, status, responseMessageId, status == SmppConstants.STATUS_OK ?
+                ProviderRequestMetrics.Result.ACCEPTED : ProviderRequestMetrics.Result.REJECTED);
+    }
+
+    boolean handleCoordinatedResponse(Object reference, int status, String responseMessageId, ProviderRequestMetrics.Result result) {
         if (!(reference instanceof CoordinatedResponse<?>)) {
             return false;
         }
         var response = (CoordinatedResponse<M>) reference;
-        if (!response.part.claimResponse()) {
+        if (!response.part.claimResponse(result)) {
             return true;
         }
         M message = response.part.message;

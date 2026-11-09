@@ -9,6 +9,8 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.RoutedWorkStore;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -42,6 +44,8 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
     private final Map<WorkId, Entry<M>> work = new HashMap<>();
     private final Map<String, ArrayDeque<Entry<M>>> ready = new HashMap<>();
     private State state = State.NEW;
+    private MeterRegistry metrics;
+    private final Map<String, int[]> metricOccupancy = new HashMap<>();
 
     public MemoryRoutedWorkStore(int capacity, UnaryOperator<M> snapshots) {
         if (capacity <= 0) {
@@ -49,6 +53,48 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
         }
         this.capacity = capacity;
         this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
+    }
+
+    /** Opt in before open; destination counters are bounded by configured destination identities. */
+    public void bindMetrics(MeterRegistry registry) {
+        lock.lock();
+        try {
+            if (state != State.NEW || metrics != null) {
+                throw invalid("Bind Routed metrics once before opening the store");
+            }
+            metrics = Objects.requireNonNull(registry, "registry");
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void count(Entry<M> entry, Phase phase, int delta) {
+        if (metrics == null) {
+            return;
+        }
+        int[] counts = metricOccupancy.computeIfAbsent(entry.destination, destination -> {
+            for (Phase value : Phase.values()) {
+                String label = switch (value) {
+                    case QUEUED -> "waiting";
+                    case TAKEN -> "active";
+                    case COMPLETED -> "terminal";
+                };
+                Gauge.builder("sendium.sms.routed.work", this, store -> store.metricCount(destination, value))
+                        .description("Retained routed selections by destination and lifecycle state")
+                        .tags("destination", destination, "state", label).register(metrics);
+            }
+            return new int[Phase.values().length];
+        });
+        counts[phase.ordinal()] += delta;
+    }
+
+    private double metricCount(String destination, Phase phase) {
+        lock.lock();
+        try {
+            return state == State.READY ? metricOccupancy.get(destination)[phase.ordinal()] : Double.NaN;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
@@ -101,6 +147,7 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
             entry.sources.forEach(source -> sourceOwners.put(source, entry.selection));
             work.put(entry.id, entry);
             enqueue(entry);
+            count(entry, Phase.QUEUED, 1);
             return result;
         } finally {
             lock.unlock();
@@ -124,6 +171,8 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
                         ready.remove(destination);
                     }
                     entry.phase = Phase.TAKEN;
+                    count(entry, Phase.QUEUED, -1);
+                    count(entry, Phase.TAKEN, 1);
                     entry.inFlight = result;
                     return Optional.of(result);
                 }
@@ -156,6 +205,8 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
             entry.inFlight = null;
             entry.lastReturned = taken;
             enqueue(entry);
+            count(entry, Phase.TAKEN, -1);
+            count(entry, Phase.QUEUED, 1);
         } finally {
             lock.unlock();
         }
@@ -176,6 +227,8 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
             }
             entry.completed = new Completed(entry.selection, entry.sources);
             entry.phase = Phase.COMPLETED;
+            count(entry, Phase.TAKEN, -1);
+            count(entry, Phase.COMPLETED, 1);
             entry.message = null;
             entry.inFlight = null;
             entry.lastReturned = null;
@@ -201,6 +254,7 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
             work.remove(entry.id);
             entry.sources.forEach(sourceOwners::remove);
             selections.remove(id);
+            count(entry, Phase.COMPLETED, -1);
         } finally {
             lock.unlock();
         }

@@ -3,6 +3,7 @@ package gr.cytech.sendium.app.storage;
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardRoutingManager;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -37,7 +39,7 @@ class StandaloneOutboundConfigurationTest {
     }
 
     @Test
-    void storageMetricsDefaultOnAndCanBeDisabledWithoutDisablingAdmission() {
+    void storageMetricsDefaultOnAndCanBeDisabledWithoutDisablingAdmission() throws Exception {
         for (boolean enabled : List.of(true, false)) {
             var config = mock(Config.class);
             when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
@@ -50,9 +52,13 @@ class StandaloneOutboundConfigurationTest {
                 try {
                     coordinator.accept(new SourceId(UUID.randomUUID()),
                             new StandardMessage());
+                    coordinator.selectToRouter(1);
+                    var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                    coordinator.recordToRouted(selected, new Destination<>("provider", selected.message()));
                     if (enabled) {
                         assertThat(metrics.get("sendium.sms.pending.sources").gauge().value()).isEqualTo(1);
                         assertThat(metrics.find("sendium.sms.selected.work").gauges()).hasSize(3);
+                        assertThat(metrics.get("sendium.sms.routed.work").tag("state", "waiting").gauge().value()).isEqualTo(1);
                     } else {
                         assertThat(metrics.getMeters()).isEmpty();
                     }
