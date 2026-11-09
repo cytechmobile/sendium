@@ -38,6 +38,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -62,9 +63,11 @@ public class NativeE2eSmoke {
     private static final int SENDIUM_SMPP_PORT = 27777;
     private static final int UPSTREAM_SMPP_PORT = 27779;
     private static final Duration TIMEOUT = Duration.ofSeconds(90);
+    private static final boolean PENDING_RESTART = Boolean.parseBoolean(System.getenv("SENDIUM_E2E_PENDING_RESTART"));
 
     public static void main(String[] args) throws Exception {
         String containerName = "sendium-e2e-" + UUID.randomUUID().toString().substring(0, 8);
+        String spoolVolume = containerName + "-pending";
         Process container = null;
 
         try (UpstreamSmppServer upstream = new UpstreamSmppServer(UPSTREAM_SMPP_PORT);
@@ -74,13 +77,23 @@ public class NativeE2eSmoke {
 
             Path workDir = Files.createTempDirectory("sendium-e2e-");
             writeRuntimeConfig(workDir);
+            if (PENDING_RESTART) {
+                Process volume = run(List.of("docker", "volume", "create", spoolVolume), true);
+                require(volume.waitFor(30, TimeUnit.SECONDS) && volume.exitValue() == 0, "Cannot create retained spool volume");
+                Files.writeString(workDir.resolve("conf/smsg.properties"),
+                        "\noutSms.pause = true\noutSms.instance.smpp.reassembling.timeoutMillis = 120000\n", StandardOpenOption.APPEND);
+            }
             container = startSendiumContainer(containerName, workDir);
             waitForPostgresqlReadiness();
             waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
             require(upstream.awaitSessionBound(), "Sendium container did not bind to the upstream SMPP server");
 
-            container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 1);
-            verifySmppSubmitGetsDeliverSm(upstream, 2);
+            if (PENDING_RESTART) {
+                container = verifyPendingSurvivesReplacement(containerName, workDir, upstream, callbackServer);
+            } else {
+                container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 1);
+                verifySmppSubmitGetsDeliverSm(upstream, 2);
+            }
         } catch (Throwable t) {
             printDockerLogs(containerName);
             throw t;
@@ -88,6 +101,9 @@ public class NativeE2eSmoke {
             stopContainer(containerName);
             if (container != null) {
                 container.destroyForcibly();
+            }
+            if (PENDING_RESTART) {
+                run(List.of("docker", "volume", "rm", spoolVolume), true).waitFor(30, TimeUnit.SECONDS);
             }
         }
     }
@@ -163,7 +179,7 @@ public class NativeE2eSmoke {
     }
 
     private static Process startSendiumContainer(String containerName, Path workDir) throws Exception {
-        List<String> command = List.of(
+        List<String> command = new ArrayList<>(List.of(
                 "docker", "run", "--rm", "-d",
                 "--name", containerName,
                 "--add-host", "host.docker.internal:host-gateway",
@@ -175,13 +191,86 @@ public class NativeE2eSmoke {
                 "-e", "LOG_LEVEL=INFO",
                 "-e", "SENDIUM_DLR_POSTGRESQL_JDBC_URL=" + POSTGRESQL_JDBC_URL,
                 "-e", "SENDIUM_DLR_POSTGRESQL_USERNAME=" + POSTGRESQL_USERNAME,
-                "-e", "SENDIUM_DLR_POSTGRESQL_PASSWORD=" + POSTGRESQL_PASSWORD,
-                IMAGE
-        );
+                "-e", "SENDIUM_DLR_POSTGRESQL_PASSWORD=" + POSTGRESQL_PASSWORD
+        ));
+        if (PENDING_RESTART) {
+            command.addAll(List.of("-v", containerName + "-pending:/work/spool",
+                    "-e", "SENDIUM_MESSAGE_PENDING_BACKEND=file", "-e", "SENDIUM_MESSAGE_PENDING_PATH=/work/spool"));
+        }
+        command.add(IMAGE);
         Process process = run(command, true);
         require(process.waitFor(30, TimeUnit.SECONDS), "Timed out starting Sendium container");
         require(process.exitValue() == 0, "Failed to start Sendium container");
         return process;
+    }
+
+    private static Process verifyPendingSurvivesReplacement(String name, Path workDir, UpstreamSmppServer upstream,
+                                                           CallbackServer callbackServer) throws Exception {
+        var accepted = new ArrayList<String>();
+        try (var client = new DownstreamSmppClient()) {
+            client.start();
+            String callback = URLEncoder.encode("http://host.docker.internal:" + callbackServer.port() + "/dlr?id=%I", StandardCharsets.UTF_8);
+            var http = get("/sendsms?username=http-user&password=http-pass&from=http-sender&to=306900000002&text=pending-http" +
+                    "&dlr-mask=3&dlr-url=" + callback);
+            require(http.statusCode() == 202, "Pending HTTP admission failed: " + http.statusCode());
+            accepted.add(http.body().trim());
+            var ordinary = client.sendSms("smpp-sender", "306900000001", "pending-smpp");
+            require(ordinary.getCommandStatus() == SmppConstants.STATUS_OK, "Pending SMPP admission failed");
+            accepted.add(ordinary.getMessageId());
+            for (int duplicate = 0; duplicate < 2; duplicate++) {
+                var part = client.sendPart(1, "pending-");
+                require(part.getCommandStatus() == SmppConstants.STATUS_OK, "Pending multipart admission failed");
+                accepted.add(part.getMessageId());
+            }
+            for (String id : accepted) {
+                require(sourceExists(name, id), "Acknowledged source was not committed: " + id);
+            }
+            require(upstream.receivedSubmits.get() == 0, "Paused application submitted work before replacement");
+        }
+        int previousSessions = upstream.boundSessionCount();
+        require(stopContainer(name), "Cannot forcibly remove original pending container");
+        Path properties = workDir.resolve("conf/smsg.properties");
+        Files.writeString(properties, Files.readString(properties).replace("outSms.pause = true", "outSms.pause = false"));
+        Process restarted = startSendiumContainer(name, workDir);
+        waitForPostgresqlReadiness();
+        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
+        require(upstream.awaitSessionBoundAfter(previousSessions), "Replacement did not bind to provider");
+        require(get("/q/health/ready").body().contains("sendium-sms-storage"), "Replacement lacks storage readiness check");
+        try (var client = new DownstreamSmppClient()) {
+            client.start();
+            var last = client.sendPart(2, "multipart");
+            require(last.getCommandStatus() == SmppConstants.STATUS_OK, "Replacement rejected recovered multipart group");
+            accepted.add(last.getMessageId());
+            require(upstream.awaitSubmitCount(3), "Provider did not receive recovered HTTP/SMPP/multipart messages");
+            require(upstream.receivedBodies.containsAll(List.of("pending-http", "pending-smpp", "pending-multipart")),
+                    "Recovered provider payloads do not match acknowledged content");
+            long deadline = System.nanoTime() + TIMEOUT.toNanos();
+            for (String id : accepted) {
+                while (sourceExists(name, id) && System.nanoTime() < deadline) {
+                    Thread.sleep(100);
+                }
+                require(!sourceExists(name, id), "Terminal source was not removed: " + id);
+            }
+            require(upstream.receivedSubmits.get() == 3, "Duplicate ordinal produced extra provider submission");
+            String callback = callbackServer.awaitCallback();
+            require(callback != null && callback.contains("id=" + accepted.getFirst()), "Recovered HTTP DLR callback was not delivered");
+            while ((!upstream.pendingDeliveryReceipts.isEmpty() || client.receivedDeliveries.get() < 3) && System.nanoTime() < deadline) {
+                Thread.sleep(100);
+            }
+            require(upstream.pendingDeliveryReceipts.isEmpty(), "Provider DLR acknowledgements did not finish before teardown");
+            require(client.receivedDeliveries.get() >= 3, "Recovered ordinary/multipart SMPP DLRs were not delivered");
+        }
+        System.out.println("pendingRestart|success|image:" + IMAGE + "|acknowledgedSources:5|providerMessages:3|retainedVolume:true");
+        return restarted;
+    }
+
+    private static boolean sourceExists(String container, String gatewayId) throws Exception {
+        UUID id = UUID.fromString(gatewayId);
+        Process check = run(List.of("docker", "exec", container, "sh", "-c", "test -s \"$1\"", "sh",
+                "/work/spool/sources/" + id.toString().substring(0, 2) + "/" + id + ".cbor"), false);
+        require(check.waitFor(10, TimeUnit.SECONDS), "Timed out checking retained source");
+        require(check.exitValue() == 0 || check.exitValue() == 1, "Cannot inspect retained spool");
+        return check.exitValue() == 0;
     }
 
     private static void writeRuntimeConfig(Path workDir) throws IOException {
@@ -391,6 +480,7 @@ public class NativeE2eSmoke {
     private static final class UpstreamSmppServer implements AutoCloseable {
         private final int port;
         private final AtomicInteger receivedSubmits = new AtomicInteger();
+        private final Set<String> receivedBodies = ConcurrentHashMap.newKeySet();
         private final AtomicInteger boundSessions = new AtomicInteger();
         private final CountDownLatch sessionBound = new CountDownLatch(1);
         private final Set<SmppSession> sessions = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -414,6 +504,7 @@ public class NativeE2eSmoke {
                             "Sendium did not request an upstream delivery receipt");
 
                     int submitNumber = receivedSubmits.incrementAndGet();
+                    receivedBodies.add(new String(submitSm.getShortMessage(), StandardCharsets.UTF_8));
                     String messageId = "e2e-" + submitNumber;
                     pendingDeliveryReceipts.put(submitNumber,
                             new PendingDeliveryReceipt(submitSm.getDestAddress(), submitSm.getSourceAddress(), messageId));
@@ -548,6 +639,7 @@ public class NativeE2eSmoke {
 
     private static final class DownstreamSmppClient implements AutoCloseable {
         private final CountDownLatch deliverSmLatch = new CountDownLatch(1);
+        private final AtomicInteger receivedDeliveries = new AtomicInteger();
         private final DefaultSmppClient client;
         private volatile DeliverSm deliverSm;
         private SmppSession session;
@@ -596,6 +688,7 @@ public class NativeE2eSmoke {
                 public PduResponse firePduRequestReceived(PduRequest pduRequest) {
                     if (pduRequest instanceof DeliverSm receivedDeliverSm) {
                         deliverSm = receivedDeliverSm;
+                        receivedDeliveries.incrementAndGet();
                         deliverSmLatch.countDown();
                     }
                     return pduRequest.createResponse();
@@ -612,6 +705,22 @@ public class NativeE2eSmoke {
             submit.setRegisteredDelivery(SmppConstants.REGISTERED_DELIVERY_SMSC_RECEIPT_REQUESTED);
             submit.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
             submit.setShortMessage(text.getBytes(StandardCharsets.UTF_8));
+            return session.submit(submit, 10_000);
+        }
+
+        private SubmitSmResp sendPart(int ordinal, String text) throws Exception {
+            var submit = new SubmitSm();
+            submit.setSourceAddress(new Address((byte) 0, (byte) 0, "multipart-sender"));
+            submit.setDestAddress(new Address((byte) 0, (byte) 0, "306900000003"));
+            submit.setRegisteredDelivery(SmppConstants.REGISTERED_DELIVERY_SMSC_RECEIPT_REQUESTED);
+            submit.setEsmClass(SmppConstants.ESM_CLASS_UDHI_MASK);
+            submit.setDataCoding(SmppConstants.DATA_CODING_DEFAULT);
+            byte[] body = text.getBytes(StandardCharsets.UTF_8);
+            byte[] data = new byte[6 + body.length];
+            byte[] header = {5, 0, 3, 127, 2, (byte) ordinal};
+            System.arraycopy(header, 0, data, 0, header.length);
+            System.arraycopy(body, 0, data, header.length, body.length);
+            submit.setShortMessage(data);
             return session.submit(submit, 10_000);
         }
 

@@ -411,6 +411,24 @@ mean the multipart backlog has drained; bounded group publication can continue a
 
 ### Delivery and rollback boundary
 
+The existing `utils.NativeE2eSmoke` can verify retained-volume recovery against a freshly built JVM
+or native image. Keep its normal PostgreSQL fixture running and set:
+
+```sh
+export SENDIUM_E2E_IMAGE=sendium:your-test-image
+export SENDIUM_E2E_PENDING_RESTART=true
+./mvnw -pl sendium-core -DskipTests test-compile \
+  org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
+  -Dexec.classpathScope=test -Dexec.mainClass=utils.NativeE2eSmoke
+```
+
+This opt-in smoke creates its own named spool volume, pauses routing, checks committed HTTP/SMPP
+and duplicate multipart admissions, forcibly removes the container, and starts a replacement on the
+same volume with routing resumed. It then finishes the recovered multipart group and checks provider
+content, required source cleanup and HTTP/SMPP DLR delivery. Test containers/volume are removed at
+the end; this is not a production backup/restore command. Without the flag the existing memory-profile
+PostgreSQL correlation/restart smoke remains unchanged. The fixture uses ports 18080, 27777 and 27779.
+
 #343 adds pending contracts, source representation, shared runtime reconstruction and behavioral proofs.
 It adds no spool directory/publication scheme, PostgreSQL outbound schema, durable profile or durable-data
 migration. Its dependent commits can be reverted together, in reverse order, to the working #338 memory
