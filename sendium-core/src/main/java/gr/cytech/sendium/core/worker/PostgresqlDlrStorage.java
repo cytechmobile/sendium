@@ -34,6 +34,9 @@ public class PostgresqlDlrStorage implements DlrStorage {
     private static final Duration DEFAULT_DELIVERY_CLAIM_DURATION = Duration.ofMinutes(5);
     private static final int MAX_DELIVERY_BATCH_SIZE = 1_000;
     private static final int MAX_BATCH_ATTEMPTS = 3;
+    private static final String METRIC_SNAPSHOT_SQL = """
+            SELECT delivery_status FROM sendium_dlr.dlr_message LIMIT ?
+            """;
 
     private static final String STATE_COLUMNS = """
             gateway_message_id, account_id, system_id, source_address, destination_address,
@@ -615,6 +618,39 @@ public class PostgresqlDlrStorage implements DlrStorage {
         }
     }
 
+    /** One read-only MVCC statement; no expiry side effects, sorting or unbounded aggregation. */
+    Optional<ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
+        if (maxRows < 1 || maxRows == Integer.MAX_VALUE || timeout == null || timeout.getNano() != 0 ||
+                timeout.getSeconds() < 1 || timeout.getSeconds() > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Storage metric budget must be positive with a whole-second query timeout");
+        }
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(METRIC_SNAPSHOT_SQL)) {
+            statement.setInt(1, maxRows + 1);
+            statement.setQueryTimeout((int) timeout.getSeconds());
+            try (ResultSet rows = statement.executeQuery()) {
+                long waiting = 0;
+                long pending = 0;
+                long failed = 0;
+                int seen = 0;
+                while (rows.next()) {
+                    if (++seen > maxRows) {
+                        return Optional.empty();
+                    }
+                    switch (rows.getString(1)) {
+                        case "WAITING_PROVIDER" -> waiting++;
+                        case "PENDING" -> pending++;
+                        case "FAILED" -> failed++;
+                        default -> throw new DlrStorageException("Unknown receipt state in metric snapshot");
+                    }
+                }
+                return Optional.of(new ReceiptCounts(waiting, pending, failed));
+            }
+        } catch (SQLException e) {
+            throw failure("collect receipt storage metrics", e);
+        }
+    }
+
     @Override
     public Optional<MessageState> getState(String gatewayMsgId) {
         checkExpiry();
@@ -1011,6 +1047,8 @@ public class PostgresqlDlrStorage implements DlrStorage {
         logger.debug("DLR storage failure details while attempting to {}", operation, cause);
         return new DlrStorageException("Failed to " + operation, cause);
     }
+
+    record ReceiptCounts(long waitingProvider, long pendingReturn, long failedReturn) { }
 
     private record CorrelationKey(String provider, String messageId) { }
 

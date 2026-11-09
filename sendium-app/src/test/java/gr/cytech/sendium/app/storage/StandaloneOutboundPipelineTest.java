@@ -9,12 +9,15 @@ import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.smpp.client.CoordinatedSmppSubmission;
 import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
+import gr.cytech.sendium.core.worker.DlrStorageMetrics;
+import gr.cytech.sendium.core.worker.ManagedDlrStorage;
 import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardRoutingManager;
 import io.quarkus.test.QuarkusExtensionTest;
 import io.quarkus.test.common.http.TestHTTPResource;
 import jakarta.enterprise.inject.Produces;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.junit.jupiter.api.Test;
@@ -44,7 +47,8 @@ class StandaloneOutboundPipelineTest {
             .withApplicationRoot(archive -> archive.addClasses(StandaloneOutboundPipeline.class,
                     StandaloneOutboundPipeline.LifecycleRouting.class,
                     StandaloneMessageSnapshot.class, StandaloneMessageStorage.class, MessageStorageProfile.class,
-                    KannelResource.class, Beans.class, Providers.class, MessageLifecycleHttpTest.Credentials.class))
+                    KannelResource.class, Beans.class, Providers.class, MessageLifecycleHttpTest.Credentials.class,
+                    DlrStorageMetrics.class, ManagedDlrStorage.class))
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
             .overrideConfigKey("sendium.dlr.persistence.enabled", "false")
@@ -55,9 +59,11 @@ class StandaloneOutboundPipelineTest {
     @Inject Providers providers;
     @Inject InMemoryQueueProvider legacy;
     @Inject OutboundCoordinator<StandardMessage> coordinator;
+    @Inject Instance<DlrStorageMetrics> storageMetrics;
 
     @Test
     void productionAssemblyProcessesHttpThroughProviderCompletionWithoutLegacyAdmission() throws Exception {
+        assertThat(storageMetrics.isUnsatisfied()).isTrue();
         URI uri = URI.create(endpoint + "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello");
         try (HttpClient client = HttpClient.newHttpClient()) {
             var request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(5)).GET().build();

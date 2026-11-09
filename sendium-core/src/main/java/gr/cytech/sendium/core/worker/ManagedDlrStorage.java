@@ -81,6 +81,10 @@ public class ManagedDlrStorage implements DlrStorage {
         return BACKEND;
     }
 
+    Optional<PostgresqlDlrStorage.ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
+        return delegate.readMetricSnapshot(maxRows, timeout);
+    }
+
     void verifyPostgresqlSchema() throws SQLException {
         if (selectedPostgresqlDataSource == null) {
             return;

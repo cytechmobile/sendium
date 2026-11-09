@@ -20,9 +20,9 @@ curl http://localhost:8080/q/metrics
 
 The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. Sendium's PostgreSQL DLR subsystem also registers its selected-backend gauge and storage-operation timers.
 
-## Planned SMS Operations Metrics Contract
+## SMS Operations Metrics
 
-> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP/SMPP admission counters, Pending/Selected/Routed gauges, coordinated provider request metrics and receipt event counters are implemented as described below; receipt storage snapshots and collection metadata remain planned. Existing runtime and DLR storage-operation metrics remain available.
+Sendium provides basic live operational metrics for [#383](https://github.com/cytechmobile/sendium/issues/383): HTTP/SMPP admissions, Pending/Selected/Routed occupancy, coordinated provider requests, receipt events and optional bounded PostgreSQL receipt snapshots. These are useful built-in monitoring signals, not a reporting platform or durable message ledger. Existing runtime and DLR storage-operation metrics remain available.
 
 ### Implemented HTTP Admission Counter
 
@@ -146,7 +146,7 @@ The following names use Prometheus exposition spelling. Micrometer counter and t
 
 ### Minimal Operator Catalog
 
-Keep a metric only when it answers an operator question and suggests an action. The proposed catalog is limited to these six questions:
+Each metric answers an operator question and suggests an action. The catalog is limited to these six questions:
 
 | Operator question | Measurements | Action when unhealthy |
 | :--- | :--- | :--- |
@@ -157,9 +157,9 @@ Keep a metric only when it answers an operator question and suggests an action. 
 | Is a provider slow or rejecting traffic? | Request attempts, in-flight requests, response timer by result | Investigate provider health or adjust routing; distinguish retries from new work. |
 | Are receipts progressing? | Stored receipt states, final outcomes, client-return results | Investigate missing provider receipts or failing HTTP/SMPP returns. |
 
-No dedicated counters for multipart duplicates, suppressed callbacks, or retention deletions, and no separate Handoff/Cleanup metric families are proposed. Their semantics still matter for correctness, but they do not automatically justify another graph. Storage state and retained stage occupancy expose backlog; existing logs support deeper diagnosis. Separate handoff/cleanup occupancy, if required to satisfy #383 beyond this minimal view, must be reviewed explicitly rather than added implicitly.
+There are no dedicated counters for multipart duplicates, suppressed callbacks or retention deletions, and no separate Handoff/Cleanup metric families. Their semantics still matter for correctness, but they do not automatically justify another graph. Storage state and retained stage occupancy expose backlog; existing logs support deeper diagnosis. The documented states do not provide separate handoff/cleanup queue totals.
 
-| Proposed metric | Purpose / operator action | Type / labels | Counting boundary |
+| Metric | Purpose / operator action | Type / labels | Counting boundary |
 | :--- | :--- | :--- | :--- |
 | `sendium_sms_submissions_total` | See accepted/rejected traffic per protocol; investigate ingress failures or capacity pressure. | Counter; `ingress`, `result` | One classified SMS submission decision at HTTP/SMPP ingress: `accepted` or `rejected`. Newly admitted duplicate multipart ordinals count as accepted sources and consume Pending capacity. Internal retries are not submissions. |
 | `sendium_sms_pending_sources` | Detect growing unfinished work and admission-capacity pressure; locate downstream bottlenecks. | Gauge; `backend` | Unique retained accepted sources; increment only on new admission and release only on successful source deletion. Includes held/incomplete multipart sources and sources in later stages. |
@@ -190,29 +190,34 @@ Suppressed callbacks are not successful client returns. Retention removal is not
 
 ### Storage Collection Controls And Availability
 
-Storage configuration (`enabled` is implemented for Pending/Selected; periodic collection settings remain planned):
+Storage configuration (changes require restart):
 
 | Property | Default / behavior |
 | :--- | :--- |
 | `sendium.metrics.storage.enabled` | `true`; enable applicable storage-state collection. `false` stops monitoring queries/scans, not normal storage processing or event instrumentation. |
-| `sendium.metrics.storage.interval` | Positive duration; default to be selected after collection cost validation. Independent of Prometheus scrape interval. |
-| `sendium.metrics.storage.timeout` | Positive duration; default to be selected after strategy validation. Bound collection operations, including database resource waits where applicable. |
+| `sendium.metrics.storage.interval` | `60s`; PostgreSQL snapshot refresh interval, at least 1 second. Independent of Prometheus scrape interval; memory gauges stay live. |
+| `sendium.metrics.storage.timeout` | `2s`; positive whole-second JDBC query timeout for the snapshot statement. Does not replace connection acquisition or network timeouts. |
+| `sendium.metrics.storage.max-rows` | `100000`; maximum stored receipt records for a complete snapshot, from 1 to 2147483646. Above budget, publish unavailable rather than partial counts. |
 
 These settings initially require restart. They apply to storage occupancy collection, including future backend-specific collection; transition-based provider/admission/receipt event metrics continue independently. No database is introduced for memory-only pipeline metrics. Do not start a SQL collector if PostgreSQL receipt storage is not configured. Existing DLR persistence may itself require PostgreSQL; this switch does not alter that requirement or provide another DLR backend.
 
-Proposed collection metadata, labeled by bounded `backend` and `stage` (`pending`, `selected`, `routed`, or `dlr`, as implemented):
+PostgreSQL snapshot collection metadata is labeled `backend="postgresql",stage="dlr"`. No SQL collector or corresponding metadata is registered when the DLR persistence subsystem is not configured. Memory gauges are live store counts and do not need periodic-snapshot metadata.
 
 - `sendium_storage_collection_enabled`: 1 when collection is enabled for that configured stage, otherwise 0.
 - `sendium_storage_collection_available`: 1 only while a complete, sufficiently fresh snapshot is usable; otherwise 0. An unconfigured backend has no corresponding series.
-- `sendium_storage_collection_last_success_timestamp_seconds`: Unix time of the last complete successful snapshot; absent before first success. Snapshot age is `time() - sendium_storage_collection_last_success_timestamp_seconds`.
+- `sendium_storage_collection_last_success_timestamp_seconds`: Unix time of the last complete successful snapshot; NaN before first success. Snapshot age is `time() - sendium_storage_collection_last_success_timestamp_seconds`.
 
-Occupancy must be unavailable (NaN or absent, settled consistently during implementation), **not zero**, when disabled, uninitialized, failed, or stale. Retain the last-success timestamp for diagnosis, but do not continue presenting old occupancy as current. A snapshot is stale after two configured collection intervals without success. Never use PromQL `or vector(0)` to conceal unavailable storage tracking. Collection failure alone does not change readiness or admission.
+PostgreSQL receipt occupancy is NaN, **not zero**, when disabled, uninitialized, over budget, failed or stale. The three snapshot states are `waiting_provider`, `pending_return` (including claims, in-flight returns and retry delays), and `failed_return`. An empty successfully read store has three zeros with availability 1. Retain the last-success timestamp for diagnosis, but do not continue presenting old occupancy as current. A snapshot is stale after two configured collection intervals without success. Never use PromQL `or vector(0)` to conceal unavailable storage tracking. Collection failure alone does not change readiness or admission.
 
 Scrapes read cached snapshots or constant-cost maintained occupancy, not the entire backlog. At most one collection run per stage/backend is active in an instance. Do not publish partial results as a complete snapshot. Do not run retention or processing as a side effect of collecting metrics. No unbounded historical scans or per-message in-memory tracking solely for observability.
 
-**PostgreSQL decision gate:** exact `COUNT(*)` scales with qualifying rows even with indexes. Before implementation, select and validate deadline-limited indexed collection versus an explicitly approximate/bounded alternative. Deadline-limited exact collection may become unavailable under load; a timeout does not prove bounded rows examined. Transactional summary tables would add schema and write-path overhead and require separate explicit approval. No such machinery is approved by this contract.
+The collector starts shortly after application startup and reads only `delivery_status`, using one SQL statement with `LIMIT max-rows + 1`. The extra row detects budget overflow. There is no global count/group/sort, retention cleanup or schema change. Counts are exact for that statement's database snapshot only when all records fit. Overlapping runs are skipped; Prometheus scrapes only read the cached result. Turning collection off still leaves the enabled/available signals at zero and receipt occupancy at NaN; memory occupancy gauges are omitted as documented above.
 
-Storage occupancy over a shared PostgreSQL store is a global snapshot, whereas process event counters are instance-local. Do not sum identical database snapshots across instances. The implementation must document storage scope and an appropriate single-store aggregation rule before shipping examples for multi-instance deployments.
+The row budget bounds returned/processed records, **not** database pages or invisible/dead tuples. PostgreSQL work still depends on table health, concurrent load and connection/network behavior. The JDBC statement timeout cancels long-running queries (including table-lock waits), but is not a hard wall-clock limit on the entire collection. Pool acquisition retains the existing `quarkus.datasource.dlr.jdbc.acquisition-timeout` (default 5 seconds); monitoring does not change this shared processing-pool setting. A stalled run cannot queue overlapping monitoring reads, and old values expire independently at scrape time.
+
+If collection becomes unavailable, check the enable switch, database connectivity and row budget. Increase the interval or turn storage metrics off to reduce monitoring load; increase the row budget only if the additional read cost is acceptable. Other metrics keep working. This intentionally favors a simple safe failure mode over exact backlog visibility at every scale; no summary tables, replication or repair machinery are introduced. PostgreSQL 17 integration tests verify complete counts, overflow, lock-wait cancellation and a limited plan returning 101 records from a 100001-record table without sorting/aggregation. This is correctness/plan evidence, not a universal performance guarantee.
+
+Storage occupancy over a shared PostgreSQL store is a global snapshot, whereas process event counters are instance-local. Do not sum identical database snapshots across instances. For basic deployments, one collecting instance per shared store reduces query load. Remember that the global storage switch also omits that instance's local memory gauges; if those are needed from every instance, leave collection enabled and select a target for the shared-store view. If several instances collect the same store, select a collecting target or use `max` across only that store's healthy targets; never combine independent stores this way or turn unavailable values into zero.
 
 ### Requirements For Future Storage Implementations
 

@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.containsString;
 
 @QuarkusTest
 @QuarkusTestResource(value = PostgresqlDlrQuarkusTestResource.class, restrictToAnnotatedClass = true)
@@ -60,6 +61,9 @@ class PostgresqlDlrRuntimeIT {
 
     @Inject
     MeterRegistry meterRegistry;
+
+    @Inject
+    DlrStorageMetrics storageMetrics;
 
     @Inject
     OutgoingWorkerManager outgoingWorkerManager;
@@ -94,6 +98,14 @@ class PostgresqlDlrRuntimeIT {
         assertThat(meterRegistry.getMeters())
                 .extracting(meter -> meter.getId().getName())
                 .anyMatch(name -> name.startsWith("agroal"));
+        storageMetrics.collect();
+        assertThat(meterRegistry.get("sendium.storage.collection.available")
+                .tag("backend", "postgresql").tag("stage", "dlr").gauge().value()).isEqualTo(1);
+        assertThat(meterRegistry.get("sendium.dlr.storage.messages")
+                .tag("state", "waiting_provider").gauge().value()).isGreaterThanOrEqualTo(1);
+        given().when().get("/q/metrics").then().statusCode(200)
+                .body(containsString("sendium_dlr_storage_messages"))
+                .body(containsString("sendium_storage_collection_last_success_timestamp_seconds"));
     }
 
     @Test
