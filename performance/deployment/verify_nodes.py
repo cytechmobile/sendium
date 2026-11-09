@@ -46,7 +46,11 @@ def wait(predicate, seconds=60):
 def main():
     os.umask(0o077)
     workspace = Path("/workspace")
-    harness = workspace / "performance/harness/target/sendium-performance-harness-0.5.2-SNAPSHOT.jar"
+    harnesses = list((workspace / "performance/harness/target").glob("sendium-performance-harness-*.jar"))
+    assert len(harnesses) == 1, "Build exactly one current harness artifact first"
+    harness = harnesses[0]
+    pending_backend = os.environ.get("SENDIUM_PENDING_BACKEND", "memory")
+    assert pending_backend in ("memory", "file"), "Pending backend must be memory or file"
     native_archive = os.environ.get("SENDIUM_NATIVE_ARCHIVE")
     native_build = read(Path(native_archive).with_name("build-manifest.json"))["nativeBuild"] if native_archive else None
     evidence = Path(os.environ["SENDIUM_NODE_EVIDENCE"]) if os.environ.get("SENDIUM_NODE_EVIDENCE") else None
@@ -90,14 +94,14 @@ def main():
                     "artifacts": [{"name": "harness", "sha256": digest(harness)}]},
                     "application": {"runtime": "native" if native_archive else "jvm", "jvmArguments": [],
                         **({"nativeArguments": ["-Xms128m", "-Xmx512m"], "nativeBuild": native_build} if native_archive else {}),
-                        "connections": {}, "dlrStorage": "postgresql"},
+                         "connections": {}, "dlrStorage": "postgresql", "messageStorageProfile": pending_backend + "/memory/memory"},
                     "infrastructure": {"preset": "local-test", "region": "local", "sendium": {"architecture": native_build["architecture"]} if native_build else {}, "harness": {},
                                        "database": {"engine": "postgresql"}}, "diagnostics": []},
                 "resources": {"schemaVersion": 1, "sendiumSamples": None, "harnessSamples": None, "cpuCredits": None, "sampleBudget": 120},
                 "sampling": None}
             common = {"runIdentity": identity, "region": "local", "bucket": "bucket", "artifacts": artifacts,
                       "jvmArguments": ["-Xms128m", "-Xmx512m"], "sampleIntervalSeconds": 1, "sampleBudget": 120, "timeoutSeconds": 90}
-            sendium = Node({**common, "source": "sendium", "deployment": deployment, "workload": workload,
+            sendium = Node({**common, "source": "sendium", "deployment": deployment, "workload": workload, "pendingBackend": pending_backend,
                             **({"applicationRuntime": "native", "nativeArguments": ["-Xms128m", "-Xmx512m"],
                                 "architecture": {"x86_64": "x86_64", "aarch64": "arm64"}[platform.machine()]}
                                if native_archive else {}),
@@ -123,6 +127,7 @@ def main():
                 harness_thread.join(timeout=90)
                 assert not harness_thread.is_alive()
                 report = read(harness_node.root / "report/results.json")
+                assert report["configuration"]["application"]["messageStorageProfile"] == pending_backend + "/memory/memory"
                 if run_application:
                     assert report["validity"]["status"] != "failed", report["validity"]
                     counts = report["overall"]["counts"]
@@ -136,6 +141,8 @@ def main():
                 if run_application:
                     sendium_thread.join(timeout=90)
                     assert not sendium_thread.is_alive()
+                    if pending_backend == "file":
+                        assert (sendium.root / "pending/owner.lock").is_file(), "Application did not open the configured file spool"
                 output = aws.directory / "bucket" / prefix / "outputs"
                 published = [path for path in output.rglob("*") if path.is_file()]
                 if run_application:

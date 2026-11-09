@@ -48,6 +48,10 @@ def validate(document, request):
     prepare.require(application.get("benchmarkTarget", "sendium") == target, "Published gateway target mismatch")
     mode = "kannel" if target == "kannel" else runtime_mode(request["preset"])
     prepare.require(application.get("runtime", "jvm") == mode, "Published application runtime mismatch")
+    if target == "sendium":
+        prepare.require(application.get("messageStorageProfile", "memory/memory/memory") ==
+                        request["preset"]["runtime"].get("pendingBackend", "memory") + "/memory/memory",
+                        "Published message storage profile mismatch")
     if target == "kannel":
         prepare.require(application["dlrStorage"] == "postgresql" and application["messageStore"] == "spool"
                         and all(application["source"].get(key) == value for key, value in prepare.KANNEL_SOURCE.items()),
@@ -73,7 +77,8 @@ def unavailable(request, code):
                 "application": {"runtime": runtime_mode(preset),
                     "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if runtime_mode(preset) == "jvm" else [],
                     **({"nativeArguments": preset["runtime"]["native"]["arguments"]} if runtime_mode(preset) == "native" else {}),
-                    "connections": {}, "dlrStorage": "postgresql"},
+                     "connections": {}, "dlrStorage": "postgresql",
+                     "messageStorageProfile": preset["runtime"].get("pendingBackend", "memory") + "/memory/memory"},
                 "infrastructure": {"preset": preset["id"], "region": "unresolved",
                     "sendium": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["sendium"]},
                     "harness": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["harness"]},
@@ -145,6 +150,8 @@ def fallback_markdown(report):
         lines.append("Kannel source: <code>" + text(application["source"]["version"]) + "</code>; archive SHA-256: <code>"
                      + text(application["source"]["archiveSha256"]) + "</code>; DLR storage: **postgresql**")
     lines.append("Application runtime: **" + text(application.get("runtime", "jvm")) + "**; harness runtime: **jvm**")
+    if gateway == "Sendium":
+        lines.append("Message storage profile: **" + text(application.get("messageStorageProfile", "memory/memory/memory")) + "**")
     if "nativeBuild" in application:
         lines.extend(["Native builder: <code>" + text(application["nativeBuild"]["builderImage"]) + "</code>",
                       "Native compiler: <code>" + text(application["nativeBuild"]["compilerVersion"]) + "</code>"])

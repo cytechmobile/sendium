@@ -44,6 +44,20 @@ def measured():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_storage_profile_is_preserved_and_mislabeled_file_results_are_rejected(self):
+        for runtime in ("jvm", "native"):
+            for backend in ("memory", "file"):
+                with self.subTest(runtime=runtime, backend=backend):
+                    req = request({"application_runtime": runtime, "pending_backend": backend})
+                    report = publish.unavailable(req, "FIXTURE")
+                    self.assertEqual(report["configuration"]["application"]["messageStorageProfile"], backend + "/memory/memory")
+                    publish.validate(report, req)
+                    self.assertIn(backend + "/memory/memory", publish.fallback_markdown(report))
+                    if backend == "file":
+                        report["configuration"]["application"].pop("messageStorageProfile")
+                        with self.assertRaisesRegex(ValueError, "storage profile mismatch"):
+                            publish.validate(report, req)
+
     def test_rds_evidence_is_preserved_and_passed_to_offline_finalizer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -22,6 +22,12 @@ on:
         options: [http, smpp]
         default: http
         required: true
+      pending_backend:
+        description: 'Sendium-only pending storage (Kannel uses its own filesystem spool; keep this input at its default for Kannel)'
+        type: choice
+        options: [memory, file]
+        default: memory
+        required: true
       sendium_instance_type:
         description: Gateway EC2 instance type (Sendium or Kannel)
         type: string

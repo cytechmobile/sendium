@@ -250,6 +250,10 @@ public final class ResultReport {
         var application = root.path("configuration").path("application");
         out.append("Application runtime: **").append(text(application.path("runtime").asText("jvm")))
                 .append("** · Harness runtime: **jvm**\n\n");
+        if (target == BenchmarkTarget.SENDIUM) {
+            out.append("Message storage profile: **").append(text(application.path("messageStorageProfile").asText("memory/memory/memory")))
+                    .append("**\n\n");
+        }
         if (target == BenchmarkTarget.KANNEL) {
             out.append("Kannel version: **").append(text(application.path("source").path("version").asText()))
                     .append("** · DLR storage: **").append(text(application.path("dlrStorage").asText()))
