@@ -14,6 +14,10 @@ import gr.cytech.sendium.core.storage.pending.PendingMessageData;
 import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 import gr.cytech.sendium.util.MessageUtil;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.Clock;
@@ -23,10 +27,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -41,9 +48,13 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
 
 /**
  * File-owned accepted sources using the explicit StandardMessage representation, not Java serialization.
- * Application profile enablement follows multipart recovery and ingress integration.
+ * Metrics are optional for embedded use; standalone assembly supplies its existing registry.
  */
 public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage>, PendingSelectionSource<StandardMessage>, IndexedMultipartSource {
+    public static final String OPERATION_METRIC = "sendium.sms.storage.operation";
+    private static final Logger LOGGER = LoggerFactory.getLogger(FilePendingMessageStore.class);
+    private final MeterRegistry metrics;
+    private final Map<String, Timer> timers = new ConcurrentHashMap<>();
     private final PendingSpool spool;
     private final int capacity;
     private final Clock clock;
@@ -59,17 +70,22 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     }
 
     public FilePendingMessageStore(Path root, int capacity, Clock clock) {
+        this(root, capacity, clock, null);
+    }
+
+    public FilePendingMessageStore(Path root, int capacity, Clock clock, MeterRegistry metrics) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("pendingConfiguration|error|reason:nonPositiveCapacity");
         }
         this.spool = new PendingSpool(root);
         this.capacity = capacity;
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.metrics = metrics;
     }
 
     @Override
     public void open() {
-        withLock(() -> {
+        measured("open", () -> {
             initialize();
             return null;
         });
@@ -84,6 +100,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             throw new OutboundStorageException(PENDING, INVALID_TRANSITION,
                     "pendingLifecycle|error|reason:cannotReopen");
         }
+        long started = System.nanoTime();
         try {
             spool.open();
             retained = spool.recoveredSources();
@@ -104,6 +121,8 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                 cursor = page.getLast();
             }
             state = State.READY;
+            LOGGER.info("pendingRecovery|success|backend:file|retainedSources:{}|durationMs:{}", retained,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
         } catch (RuntimeException failure) {
             state = State.FAILED;
             try {
@@ -125,12 +144,12 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public SourceId admit(SourceId source, StandardMessage message) {
-        return withLock(() -> admitSource(source, message, PendingSourceRecord.Disposition.READY));
+        return measured("admit", () -> admitSource(source, message, PendingSourceRecord.Disposition.READY));
     }
 
     @Override
     public SourceId admitHeld(SourceId source, StandardMessage message) {
-        return withLock(() -> admitSource(source, message, PendingSourceRecord.Disposition.HELD));
+        return measured("admit_held", () -> admitSource(source, message, PendingSourceRecord.Disposition.HELD));
     }
 
     private SourceId admitSource(SourceId source, StandardMessage message, PendingSourceRecord.Disposition disposition) {
@@ -154,7 +173,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public Optional<StandardMessage> find(SourceId source) {
-        return withLock(() -> {
+        return measured("find", () -> {
             requireReady();
             return spool.find(source).map(record -> record.message().restore());
         });
@@ -162,7 +181,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
-        return withLock(() -> {
+        return measured("sources_after", () -> {
             requireReady();
             return spool.sourcesAfter(afterExclusive, limit);
         });
@@ -171,7 +190,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     /** Complete an owned execution/ordinal source set; reject subsets that would orphan its handles. */
     @Override
     public void complete(Set<SourceId> sources) {
-        withLock(() -> {
+        measured("complete", () -> {
             requireReady();
             Set<SourceId> checked = Set.copyOf(sources);
             validateCompletion(checked);
@@ -230,7 +249,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("pendingMultipartAdmission|error|reason:nonPositiveTimeout");
         }
-        return withLock(() -> admitMultipart(source, message, timeout));
+        return measured("admit_part", () -> admitMultipart(source, message, timeout));
     }
 
     private MultipartMembership admitMultipart(SourceId source, StandardMessage message, Duration timeout) {
@@ -356,7 +375,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public Optional<MultipartMembership> findMultipart(SourceId source) {
-        return withLock(() -> {
+        return measured("find_multipart", () -> {
             requireReady();
             return spool.find(source).map(PendingSourceRecord::multipart);
         });
@@ -364,7 +383,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public List<SourceId> multipartSources(UUID groupId) {
-        return withLock(() -> {
+        return measured("multipart_sources", () -> {
             requireReady();
             Objects.requireNonNull(groupId, "groupId");
             var sources = new ArrayList<SourceId>();
@@ -386,7 +405,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         if (limit <= 0) {
             throw new IllegalArgumentException("pendingMultipartRecovery|error|reason:nonPositiveLimit");
         }
-        return withLock(() -> {
+        return measured("due_groups", () -> {
             requireReady();
             return spool.dueGroups(now, limit);
         });
@@ -395,7 +414,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     @Override
     public Optional<IndexedMultipartSource.Group> multipartGroup(UUID group) {
         Objects.requireNonNull(group, "group");
-        return withLock(() -> {
+        return measured("multipart_group", () -> {
             requireReady();
             if (spool.groupSourcesAfter(group, null, 1).isEmpty()) {
                 return Optional.empty();
@@ -423,7 +442,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     public void scheduleMultipartGroup(UUID group, Instant due) {
         Objects.requireNonNull(group, "group");
         Objects.requireNonNull(due, "due");
-        withLock(() -> {
+        measured("schedule_group", () -> {
             requireReady();
             if (!spool.groupSourcesAfter(group, null, 1).isEmpty()) {
                 spool.scheduleGroup(group, due);
@@ -435,7 +454,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     @Override
     public void finishMultipartGroup(UUID group) {
         Objects.requireNonNull(group, "group");
-        withLock(() -> {
+        measured("finish_group", () -> {
             requireReady();
             spool.finishGroup(group);
             return null;
@@ -444,7 +463,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public void makeHeldReady(Set<SourceId> sources, StandardMessage message) {
-        withLock(() -> {
+        measured("publish_held", () -> {
             requireReady();
             publishHeld(sources, message);
             return null;
@@ -637,6 +656,31 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             return operation.get();
         } finally {
             lock.unlock();
+        }
+    }
+
+    private <T> T measured(String operation, Supplier<T> action) {
+        if (metrics == null) {
+            return withLock(action);
+        }
+        long started = System.nanoTime();
+        String outcome = "success";
+        String reason = "NONE";
+        try {
+            return withLock(action);
+        } catch (RuntimeException | Error failure) {
+            outcome = "error";
+            reason = failure instanceof OutboundStorageException storage ? storage.reason().name() : "OTHER";
+            throw failure;
+        } finally {
+            String key = operation + '/' + outcome + '/' + reason;
+            String result = outcome;
+            String failureReason = reason;
+            timers.computeIfAbsent(key, ignored -> Timer.builder(OPERATION_METRIC)
+                            .description("File pending storage operation latency including lock wait; error counts by bounded reason")
+                            .tags("backend", "file", "operation", operation, "outcome", result, "reason", failureReason)
+                            .register(metrics))
+                    .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
         }
     }
 }

@@ -19,6 +19,7 @@ import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardOutboundDispatch;
 import gr.cytech.sendium.routing.StandardRoutingManager;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.arc.DefaultBean;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -41,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,14 +73,14 @@ public class StandaloneOutboundPipeline implements HealthCheck {
     @Produces
     @Singleton
     @DefaultBean
-    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config) {
+    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config, MeterRegistry metrics) {
         int sourceCapacity = positive(config, "pending.capacity", 10000);
         int recoveryBatchSize = positive(config, "selection-batch-size", 100);
         int routerCapacity = positive(config, "router-queue.capacity", 1000);
         PendingMessageStore<StandardMessage> pending;
         MemorySelectedRouterStore<StandardMessage> selected;
         if ("file".equals(profile.pending())) {
-            var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity);
+            var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity, Clock.systemUTC(), metrics);
             pending = filePending;
             selected = new MemorySelectedRouterStore<>(filePending, routerCapacity);
         } else {
@@ -91,6 +93,10 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         var result = new DefaultOutboundCoordinator<>(pending, selected, routed, recoveryBatchSize);
         result.start();
         return result;
+    }
+
+    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config) {
+        return coordinator(profile, config, null);
     }
 
     // The observed parameter registers pipeline startup after worker startup; its payload is not needed.

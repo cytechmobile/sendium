@@ -30,6 +30,11 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
      */
     void start();
 
+    /** Cheap readiness probe; unknown/custom implementations are conservatively not ready by default. */
+    default boolean isReady() {
+        return false;
+    }
+
     /** Shared admission recovery, when owned by this coordinator. Consumers must not close/reconstruct it. */
     default Optional<PendingMultipartRecovery<M>> pendingMultipartRecovery() {
         return Optional.empty();

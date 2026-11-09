@@ -39,8 +39,10 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -56,6 +58,34 @@ class PendingRecoveryCoordinatorTest {
     private static final Instant NOW = Instant.parse("2026-11-09T12:00:00Z");
     @TempDir
     Path root;
+
+    @Test
+    void readinessCoversLifecycleAndDoesNotEnumerateSources() {
+        try (var harness = new Harness()) {
+            assertThat(harness.coordinator.isReady()).isFalse();
+            harness.coordinator.start();
+            clearInvocations(harness.pending);
+            assertThat(harness.coordinator.isReady()).isTrue();
+            verify(harness.pending, never()).sourcesAfter(any(), anyInt());
+            harness.coordinator.beginShutdown();
+            assertThat(harness.coordinator.isReady()).isFalse();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"pending", "router", "routed"})
+    void anyFailedStorageStageMakesTheCoordinatorNotReady(String role) {
+        try (var harness = new Harness()) {
+            harness.coordinator.start();
+            var stage = switch (role) {
+                case "pending" -> harness.pending;
+                case "router" -> harness.router;
+                default -> harness.routed;
+            };
+            doReturn(new OutboundStage.Status("test", false, OutboundStage.State.FAILED)).when(stage).status();
+            assertThat(harness.coordinator.isReady()).isFalse();
+        }
+    }
 
     @Test
     void ownsOneRecoveryAndRestoresOrdinaryAndMultipartSourcesBeforeAdmission() throws Exception {
@@ -162,6 +192,7 @@ class PendingRecoveryCoordinatorTest {
             harness.poll.get().run();
             assertThat(harness.pending.status().state()).isEqualTo(OutboundStage.State.READY);
             assertThat(harness.coordinator.pendingMultipartRecovery().orElseThrow().isReady()).isFalse();
+            assertThat(harness.coordinator.isReady()).isFalse();
             var message = message("new", null);
             assertThatThrownBy(() -> harness.coordinator.accept(source(message), message)).hasMessageContaining("reason:pendingRecoveryNotReady");
             assertThatThrownBy(() -> harness.coordinator.acceptPart(source(part), part, Duration.ofSeconds(60)))
