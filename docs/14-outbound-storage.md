@@ -4,7 +4,9 @@ Sendium's standalone application processes HTTP/SMPP submissions through one sha
 Accepted sources remain owned until provider processing and every required tracking/delivery-report
 (DLR) handoff finish. **Acceptance, queue removal and provider submission are not terminal completion.**
 
-Only **`memory/memory/memory`** is implemented: unfinished work is lost on process closure or restart.
+**`memory/memory/memory`** remains the non-durable default. Opt-in **`file/memory/memory`** retains
+accepted sources across process/container restarts using an explicitly configured local spool path.
+Selection and routing repeat after restart; power-loss durability and exactly-once delivery are not guaranteed.
 The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
 The working lifecycle comes from [#338](https://github.com/cytechmobile/sendium/issues/338), with pending-source
 contracts, multipart admission and the [versioned CBOR representation](15-pending-record-schema.md) refined by
@@ -367,24 +369,24 @@ All selectors and bounds are global, startup-only Quarkus configuration. See the
 environment variables and overrides. Selectors default to `memory`; blank, unknown or unimplemented
 values fail. Capacity/batch values must be positive.
 
-`StandaloneMessageStorage` validates before watcher/worker startup and reports the non-durable profile.
+`StandaloneMessageStorage` validates before watcher/worker startup and reports the profile's durability limits.
 `StandaloneOutboundPipeline` separately starts the shared coordinator and activates polling after
 existing router/worker startup. A failing coordinated admission never falls back to a legacy queue.
 
 | Pending / selected / routed | Availability | Restart behavior |
 |---|---|---|
 | `memory/memory/memory` | Implemented and activated; default | No recovery across closure/restart. |
-| `file/memory/memory` | Future [#339](https://github.com/cytechmobile/sendium/issues/339) | Recover sources; reselect and reroute. |
+| `file/memory/memory` | Implemented; explicit pending path required | Recover sources; reselect and reroute. |
 | `file/file/memory` | Future [#345](https://github.com/cytechmobile/sendium/issues/345) | Recover selected work; reroute. |
 | `file/memory/file` | Future #345 | Reselect not-yet-routed sources; restore recorded destinations. |
 | `file/file/file` | Future #345 | Restore selected work and recorded destinations. |
 | PostgreSQL profiles | Future [#333](https://github.com/cytechmobile/sendium/issues/333) | Only explicitly implemented combinations. |
 
-Future profiles are not selectable today. Memory remains the non-durable default; planned file profiles
+Future profiles are not selectable today. Memory remains the non-durable default; file profiles
 are opt-in. Durable recovery must reconcile identities and resume the latest recorded stage without
 scheduling earlier retained records independently. It requires surviving storage and remains at least
 once: provider submission before recorded completion may repeat. The CBOR source codec is implemented;
-physical backends and durable later-stage implementations belong to subsequent issues. Durable provider
+durable later-stage implementations belong to subsequent issues. Durable provider
 outcome/retry checkpoints remain outside this delivery.
 
 ### Delivery and rollback boundary

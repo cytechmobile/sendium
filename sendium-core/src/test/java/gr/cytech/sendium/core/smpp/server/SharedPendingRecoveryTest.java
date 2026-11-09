@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.smpp.server;
 import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.pdu.Pdu;
 import com.cloudhopper.smpp.pdu.SubmitSm;
+import com.cloudhopper.smpp.pdu.SubmitSmResp;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
@@ -26,6 +27,49 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SharedPendingRecoveryTest {
     @TempDir
     Path root;
+
+    @Test
+    void smppSuccessObservesCommittedOrdinaryAndMultipartSourcesAndCapacityFailureDoesNotAccept() {
+        var pending = new FilePendingMessageStore(root, 2);
+        var router = new MemorySelectedRouterStore<>(pending, 2);
+        var routed = new MemoryRoutedWorkStore<StandardMessage>(2, message -> PendingMessageData.capture(message).restore());
+        var accepted = new ArrayList<SourceId>();
+        var rejected = new ArrayList<Integer>();
+        var worker = new SmppServerWorker<StandardMessage>(
+                new SmppServerWorkerReassemblyTest.TestConfigurationProvider(), "smpp", new Queue<>()) {
+            @Override
+            public void enqueueOut(Pdu event) {
+                var response = (SubmitSmResp) event;
+                if (response.getCommandStatus() == SmppConstants.STATUS_OK) {
+                    var source = new SourceId(UUID.fromString(response.getMessageId()));
+                    // Check at the acknowledgement boundary, not after enqueueIn returns.
+                    assertThat(pending.find(source)).isPresent();
+                    assertThat(root.resolve("sources").resolve(response.getMessageId().substring(0, 2))
+                            .resolve(response.getMessageId() + ".cbor")).isRegularFile();
+                    accepted.add(source);
+                } else {
+                    rejected.add(response.getCommandStatus());
+                }
+            }
+        };
+        try (var coordinator = new DefaultOutboundCoordinator<>(pending, router, routed)) {
+            coordinator.start();
+            worker.setIngressCoordinator(coordinator);
+            worker.enqueueIn(new InEvent<>(part("ordinary", null), new SubmitSm(), 1, new Timestamp(System.currentTimeMillis())));
+            worker.enqueueIn(new InEvent<>(part("A", "0500037F0201"), new SubmitSm(), 1, new Timestamp(System.currentTimeMillis())));
+            worker.enqueueIn(new InEvent<>(part("overflow", null), new SubmitSm(), 1, new Timestamp(System.currentTimeMillis())));
+            assertThat(accepted).hasSize(2);
+            assertThat(rejected).containsExactly(SmppConstants.STATUS_THROTTLED);
+            assertThat(pending.sourcesAfter(null, 3)).hasSize(2);
+        } finally {
+            worker.messagePartsHandler.stop();
+        }
+        try (var reopened = new FilePendingMessageStore(root, 2)) {
+            reopened.open();
+            assertThat(reopened.find(accepted.get(0)).orElseThrow().body).isEqualTo("ordinary");
+            assertThat(reopened.find(accepted.get(1)).orElseThrow().body).isEqualTo("A");
+        }
+    }
 
     @Test
     void unsafeSharedRecoveryRejectsStartupAndSubmissionWithoutRecordingAcceptance() {

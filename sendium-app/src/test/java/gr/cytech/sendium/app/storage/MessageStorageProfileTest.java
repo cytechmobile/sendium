@@ -39,8 +39,8 @@ class MessageStorageProfileTest {
                 MessageStorageProfile.ROUTER_BACKEND, router,
                 MessageStorageProfile.ROUTED_BACKEND, routed)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("'" + pending + "/" + router + "/" + routed + "'")
-                .hasMessageContaining("Supported profiles: memory/memory/memory")
+                .hasMessageContaining("reason:unsupportedProfile")
+                .hasMessageContaining("supported:memory/memory/memory,file/memory/memory")
                 .hasMessageContaining(MessageStorageProfile.PENDING_BACKEND)
                 .hasMessageContaining(MessageStorageProfile.ROUTER_BACKEND)
                 .hasMessageContaining(MessageStorageProfile.ROUTED_BACKEND);
@@ -53,7 +53,7 @@ class MessageStorageProfileTest {
                 MessageStorageProfile.ROUTER_BACKEND, MessageStorageProfile.ROUTED_BACKEND)) {
             assertThatThrownBy(() -> profile(Map.of(key, value)))
                     .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("Unsupported outbound message storage profile");
+                    .hasMessageContaining("reason:unsupportedProfile");
         }
     }
 
@@ -61,6 +61,7 @@ class MessageStorageProfileTest {
         List<String> backends = List.of("memory", "file", "postgresql");
         return backends.stream().flatMap(pending -> backends.stream().flatMap(router -> backends.stream()
                 .filter(routed -> !List.of(pending, router, routed).equals(List.of("memory", "memory", "memory")))
+                .filter(routed -> !List.of(pending, router, routed).equals(List.of("file", "memory", "memory")))
                 .map(routed -> Arguments.of(pending, router, routed))));
     }
 
