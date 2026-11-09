@@ -24,6 +24,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 | Configure PostgreSQL DLR persistence and review durability | [13. DLR Persistence](13-dlr-persistence.md) |
 | Understand outbound storage and extension contracts | [14. Outbound Message Storage](14-outbound-storage.md) |
 | Implement pending-source encoding and reconstruction | [15. Pending Record Schema](15-pending-record-schema.md) |
+| Deploy, recover or back up a filesystem pending spool | [16. Filesystem Pending Storage](16-filesystem-pending-storage.md) |
 | Contribute code or docs | [Contributing](../.github/CONTRIBUTING.md) |
 
 ## Core Concepts
@@ -67,6 +68,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [13. DLR Persistence](13-dlr-persistence.md) | PostgreSQL setup, retention, restart guarantees, and durability limits. |
 | [14. Outbound Message Storage](14-outbound-storage.md) | Diagram-led lifecycle guide, class responsibilities, capacity bounds, retries, shutdown, profiles, and extension contracts. |
 | [15. Pending Record Schema](15-pending-record-schema.md) | Versioned CBOR source fields, multipart membership/deadlines, supported extensions, validation and record-driven reconstruction boundaries. |
+| [16. Filesystem Pending Storage](16-filesystem-pending-storage.md) | As-built file-pending architecture, retained-volume deployment, bounds, backup/restore, rollback and at-least-once limits. |
 | [Kannel migration converter](https://cytechmobile.github.io/sendium/kannelconverter/) | Browser-only helper for turning a legacy `kannel.conf` into Sendium starter files. |
 
 ## API Discovery
@@ -80,7 +82,7 @@ When Sendium is running, the HTTP API can be inspected through:
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI specification. |
 | `/q/metrics` | Prometheus-compatible Micrometer metrics endpoint. |
-| `/q/health/ready` | Readiness status, including configured DLR storage and the standalone outbound pipeline. |
+| `/q/health/ready` | Readiness status, including configured DLR storage, `sendium-sms-storage` and the standalone outbound pipeline. |
 
 ## Community And Project Files
 

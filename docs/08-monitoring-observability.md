@@ -20,6 +20,12 @@ curl http://localhost:8080/q/metrics
 
 The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. Sendium's PostgreSQL DLR subsystem also registers its selected-backend gauge and storage-operation timers.
 
+File pending adds `sendium.sms.storage.operation` timers with bounded operation/outcome/reason labels;
+error counts are the timer counts for `outcome=error`. `/q/health/ready` includes `sendium-sms-storage`,
+which goes DOWN when selected stores or shared recovery are unsafe. See the
+[exact readiness/metrics contract](14-outbound-storage.md#storage-readiness-and-metrics) and
+[file recovery operations](16-filesystem-pending-storage.md). Neither probe nor metric scrape scans the spool.
+
 ## Prometheus Configuration
 
 Create a `prometheus.yml` file in your monitoring deployment directory.
