@@ -1,16 +1,20 @@
 package gr.cytech.sendium.core.worker;
 
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.runtime.Startup;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.ToDoubleFunction;
 
@@ -40,6 +44,7 @@ public class DlrStorageMetrics {
 
     private long staleAfterNanos;
     private final AtomicBoolean collecting = new AtomicBoolean();
+    private final List<Meter> ownedMeters = new ArrayList<>();
     private volatile Snapshot snapshot = new Snapshot(null, 0, Double.NaN);
 
     @PostConstruct
@@ -55,15 +60,21 @@ public class DlrStorageMetrics {
         register("sendium.storage.collection.last.success.timestamp.seconds", "Unix timestamp of last complete receipt snapshot",
                 ignored -> snapshot.timestamp());
         for (String state : new String[]{"waiting_provider", "pending_return", "failed_return"}) {
-            Gauge.builder("sendium.dlr.storage.messages", this, collector -> collector.occupancy(state))
+            ownedMeters.add(Gauge.builder("sendium.dlr.storage.messages", this, collector -> collector.occupancy(state))
                     .description("Complete receipt storage snapshot; NaN when unavailable")
-                    .tags("backend", "postgresql", "state", state).register(metrics);
+                    .tags("backend", "postgresql", "state", state).register(metrics));
         }
     }
 
     private void register(String name, String description, ToDoubleFunction<DlrStorageMetrics> value) {
-        Gauge.builder(name, this, value).description(description)
-                .tags("backend", "postgresql", "stage", "dlr").register(metrics);
+        ownedMeters.add(Gauge.builder(name, this, value).description(description)
+                .tags("backend", "postgresql", "stage", "dlr").register(metrics));
+    }
+
+    @PreDestroy
+    void unregister() {
+        ownedMeters.forEach(metrics::remove);
+        ownedMeters.clear();
     }
 
     @Scheduled(every = "${sendium.metrics.storage.interval:60s}", delayed = "1s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)

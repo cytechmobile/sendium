@@ -69,7 +69,7 @@ class PostgresqlDlrRuntimeIT {
     OutgoingWorkerManager outgoingWorkerManager;
 
     @Test
-    void wiresPoolMigrationStorageHealthAndMetrics() throws SQLException {
+    void wiresPoolMigrationStorageHealthAndMetrics() throws Exception {
         long successfulSavesBefore = metricCount("record_provider_accepted", "success");
         assertThat(storage).isSameAs(managedStorage);
         assertThat(managedStorage.backend()).isEqualTo("postgresql");
@@ -98,7 +98,16 @@ class PostgresqlDlrRuntimeIT {
         assertThat(meterRegistry.getMeters())
                 .extracting(meter -> meter.getId().getName())
                 .anyMatch(name -> name.startsWith("agroal"));
-        storageMetrics.collect();
+        // A scheduled refresh may already own the collector, so a manual call can be skipped.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        do {
+            storageMetrics.collect();
+            if (meterRegistry.get("sendium.storage.collection.available").gauge().value() == 1 &&
+                    meterRegistry.get("sendium.dlr.storage.messages").tag("state", "waiting_provider").gauge().value() >= 1) {
+                break;
+            }
+            TimeUnit.MILLISECONDS.sleep(20);
+        } while (System.nanoTime() < deadline);
         assertThat(meterRegistry.get("sendium.storage.collection.available")
                 .tag("backend", "postgresql").tag("stage", "dlr").gauge().value()).isEqualTo(1);
         assertThat(meterRegistry.get("sendium.dlr.storage.messages")

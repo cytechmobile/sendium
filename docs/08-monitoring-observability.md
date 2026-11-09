@@ -24,6 +24,16 @@ The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. 
 
 Sendium provides basic live operational metrics for [#383](https://github.com/cytechmobile/sendium/issues/383): HTTP/SMPP admissions, Pending/Selected/Routed occupancy, coordinated provider requests, receipt events and optional bounded PostgreSQL receipt snapshots. These are useful built-in monitoring signals, not a reporting platform or durable message ledger. Existing runtime and DLR storage-operation metrics remain available.
 
+### Start With Six Operator Questions
+
+After configuring Prometheus and adding its data source to Grafana below, create time-series panels using the queries in [Example Panels](#example-panels). Start with traffic, Pending, Selected/Routed, provider activity and receipt progress; no custom administration UI or dashboard provisioning is required.
+
+- Give gauges a count unit and rates a per-second unit; do not label provider request counts as unique customer messages.
+- Use separate series/legends for `ingress`, `state`, `destination`, `provider` or `channel`, as applicable.
+- Keep Pending separate from Selected/Routed. The same sources remain owned across those stages; they are not three independent queues to add together.
+- Show unavailable snapshots as **No data/unavailable**, not zero. Pair receipt occupancy with its collection-availability panel.
+- Treat the sample alerts as optional starting points. Tune thresholds for your configured capacities, normal traffic and expected provider/receipt delays.
+
 ### Implemented HTTP Admission Counter
 
 `sendium_sms_submissions_total{ingress="http",result="accepted|rejected"}` counts one response decision for each `GET /sendsms` or `POST /api/v1/messages` handled by the REST layer. HTTP 202 is accepted; all other response statuses are rejected, including authentication, validation, unsupported media and capacity failures. Optional trailing slashes are recognized. Both APIs share the same counter and label values; no account, URL or error details become labels.
@@ -231,6 +241,117 @@ Each storage backend issue owns these checks before claiming metrics support:
 6. Document per-process versus shared-storage scope, restart limitations, performance evidence, and any added backend-specific diagnostics in this guide.
 
 File-backed and bounded-memory receipt storage remain owned by their respective issues under [#337](https://github.com/cytechmobile/sendium/issues/337). This contract does not implement them or require a generic metrics plugin framework.
+
+## Example Panels
+
+These queries assume the scrape job is named `sendium` as in the configuration below. Filter further by deployment/instance when several Sendium installations share Prometheus. A five-minute rate needs multiple scrapes; newly created counters may initially show no rate. Counter series for provider activity appear after the first request; this alone does not prove a failed collector.
+
+| Grafana panel | PromQL | Unit / interpretation |
+| :--- | :--- | :--- |
+| Accepted and rejected traffic | `sum by (ingress, result) (rate(sendium_sms_submissions_total{job="sendium"}[5m]))` | Submissions/second, separated by HTTP/SMPP and result. |
+| Observed submissions in the last hour | `sum by (ingress, result) (increase(sendium_sms_submissions_total{job="sendium"}[1h]))` | Estimated observed decisions, not an exact ledger or billing total. |
+| Pending retained sources | `sendium_sms_pending_sources{job="sendium"}` | Sources per instance, including held parts and later-stage work. |
+| Pending growth/drain trend | `delta(sendium_sms_pending_sources{job="sendium"}[10m])` | Positive means net growth; negative means net drain or restart/reset. |
+| Selected routing work and bookkeeping | `sum by (instance, state) (sendium_sms_selected_work{job="sendium"})` | Selections; only waiting plus routing occupies unassigned Selected capacity. |
+| Routed work by destination | `sum by (instance, destination, state) (sendium_sms_routed_work{job="sendium"})` | Retained selections; waiting, active and terminal have different meanings. |
+| Provider traffic including retries | `sum by (provider, kind) (rate(sendium_sms_provider_attempts_total{job="sendium"}[5m]))` | Provider-part request invocations/second; keep initial and retry series separate. |
+| Requests awaiting provider response | `sendium_sms_provider_in_flight{job="sendium"}` | Requests per provider and instance, not logical selections. |
+| Provider response results | `sum by (provider, result) (rate(sendium_sms_provider_response_seconds_count{job="sendium"}[5m]))` | First results/second; acceptance is not handset delivery. |
+| Final receipt outcomes | `sum by (provider, outcome) (rate(sendium_dlr_outcomes_total{job="sendium"}[5m]))` | Committed tracked receipt transitions/second. |
+| Client receipt-return activity | `sum by (channel, result) (rate(sendium_dlr_return_attempts_total{job="sendium"}[5m]))` | Logical return attempts/second; successful retries can deliver the same receipt again. |
+| Receipt snapshot availability | `sendium_storage_collection_available{job="sendium",stage="dlr"}` | 1 = usable, 0 = unavailable. Check enabled flag and budget/database settings. |
+| Receipt snapshot age | `time() - sendium_storage_collection_last_success_timestamp_seconds{job="sendium",stage="dlr"}` | Seconds since last complete success; unavailable before first success. |
+
+Use the following additional queries for latency and receipt backlog. The latency denominator is filtered to positive activity rather than replacing idle time with zero:
+
+```promql
+# Mean provider completion latency in seconds; no result when no requests complete.
+sum by (provider) (rate(sendium_sms_provider_response_seconds_sum{job="sendium"}[5m]))
+/
+(sum by (provider) (rate(sendium_sms_provider_response_seconds_count{job="sendium"}[5m])) > 0)
+
+# Receipt backlog by state and instance, only while its snapshot is available.
+sendium_dlr_storage_messages{job="sendium"}
+and on (job, instance, backend)
+(sendium_storage_collection_available{job="sendium",stage="dlr"} == 1)
+```
+
+For receipt occupancy, select one collecting instance when several targets share one PostgreSQL store. Do not sum those copies. In contrast, summing instance-local event rates for the same deployment is meaningful. Keep independent database stores separated with your Prometheus target labels.
+
+### Basic Alerts
+
+Save the following as a Prometheus rule file and reference it with `rule_files` in your Prometheus configuration. This only supplies examples; Sendium does not install or enable alerts for you. Thresholds are illustrative, not service-level objectives. A sustained backlog is a reason to investigate, not proof that processing is completely stuck: compare Selected/Routed state, provider traffic, pauses, capacity and diagnostic logs.
+
+```yaml
+groups:
+  - name: sendium-basic
+    rules:
+      - alert: SendiumTargetDown
+        expr: up{job="sendium"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sendium target {{ $labels.instance }} cannot be scraped"
+          description: "Check the process, network and metrics endpoint before interpreting missing traffic."
+
+      - alert: SendiumPendingBacklog
+        expr: sendium_sms_pending_sources{job="sendium"} > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sendium retained-source backlog is sustained"
+          description: "Check Selected/Routed state, worker pauses, provider progress and cleanup errors. Tune for your pending capacity."
+
+      - alert: SendiumProviderFailures
+        expr: sum by (job, instance, provider) (increase(sendium_sms_provider_response_seconds_count{job="sendium",result!="accepted"}[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Provider {{ $labels.provider }} has repeated request failures"
+          description: "Inspect rejection, timeout, transport and protocol result series; these are provider-part attempts, not unique messages."
+
+      - alert: SendiumReceiptReturnFailures
+        expr: sum by (job, instance, channel) (increase(sendium_dlr_return_attempts_total{job="sendium",result="failure"}[10m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Client receipt returns are failing on {{ $labels.channel }}"
+          description: "Check HTTP callback reachability/responses or SMPP client sessions and acknowledgements."
+
+      - alert: SendiumReceiptCollectionUnavailable
+        expr: (sendium_storage_collection_enabled{job="sendium",stage="dlr"} == 1) and on (job, instance, backend, stage) (sendium_storage_collection_available{job="sendium",stage="dlr"} == 0)
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Receipt storage snapshot is unavailable"
+          description: "Check the row budget, last-success time, database connectivity and timeout. Unavailable does not mean an empty backlog."
+```
+
+Add this top-level setting to your Prometheus configuration after saving the examples as `sendium-alerts.yml`:
+
+```yaml
+rule_files:
+  - /etc/prometheus/sendium-alerts.yml
+```
+
+For the Docker deployment below, also mount that file with `-v "${SCRIPT_DIRECTORY}/sendium-alerts.yml:/etc/prometheus/sendium-alerts.yml:ro"`. Leave `rule_files` unset if you are not enabling alerts.
+
+The collection alert intentionally excludes disabled collection. An unconfigured DLR backend has no collection series and is not treated as a failed backend. Unreachable configured targets are covered separately by `SendiumTargetDown`; a target removed entirely from discovery needs an expected-target check outside these basic examples. Adapt labels and target selectors before using these rules across multiple deployments or shared stores.
+
+## Coverage And Limitations
+
+- **Supported baseline:** live store gauges cover the implemented standalone `memory/memory/memory` pipeline. Memory work is lost on closure/restart; monitoring introduces no durability guarantee. PostgreSQL receipt occupancy is rebuilt by the next successful snapshot after restart, without replaying event counters.
+- **Sending phases:** Routed waiting means not yet taken for Dispatch. Active includes preparation FIFO/rate waits, provider processing, replacement attempts and handoffs. There is no exact combined waiting-to-send gauge including the preparation FIFO, nor an independent handoff queue total. Do not subtract provider in-flight requests from active Routed selections to infer these counts: multipart/retry units differ.
+- **Cleanup:** terminal Routed and retained Selected states expose outstanding bookkeeping, but a failure before Routed terminal marking still appears active. Routing discards remain Selected routing work until completion. See the cleanup table above rather than assuming every retained record is waiting to send.
+- **Embedding:** core constructors are passive and programmatic workers/stores opt in through documented binding methods. Coordinated provider metrics do not instrument the legacy `doMessage` provider path. Raw receipt storage used outside the managed wrapper does not automatically emit final-outcome counters.
+- **Not a ledger:** process counters reset, scrapes can miss activity, and accepted sources, selections, provider parts and receipt events are not interchangeable. Provider acceptance is not handset delivery. Duplicate receipts, multipart aggregation, suppressed returns and local retention cleanup have the documented boundaries above.
+- **Bounded snapshots:** database collection may be unavailable above the configured row budget, during failures or after staleness. Disabling it leaves event counters working, but omits memory store gauges as well. No unsupported or unavailable backend is represented as a zero backlog.
+- **No new backends or reporting platform:** file/memory DLR and durable outbound implementations belong to #337. They must preserve the shared meanings and add backend-specific collection/recovery tests. No account labels, per-message lookup, billing reports, dashboard provisioning, replicas or persisted metric summaries are added here.
 
 ## Prometheus Configuration
 

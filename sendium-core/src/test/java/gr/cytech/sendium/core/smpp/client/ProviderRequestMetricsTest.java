@@ -4,6 +4,8 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import io.micrometer.core.instrument.MockClock;
 import io.micrometer.core.instrument.simple.SimpleConfig;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheus.PrometheusConfig;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -57,6 +59,26 @@ class ProviderRequestMetricsTest {
         assertThat(inFlight()).isEqualTo(1);
         replacement.claimResponse(ProviderRequestMetrics.Result.ACCEPTED);
         assertThat(inFlight()).isZero();
+    }
+
+    @Test
+    void prometheusNamesMatchOperatorQueriesWithoutSensitiveOrUnboundedLabels() {
+        var prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            var meters = new ProviderRequestMetrics(prometheus);
+            var message = new StandardMessage();
+            message.serial = "message-secret";
+            message.to = "+306900000001";
+            var part = new CoordinatedSmppSubmission.Part<>(message);
+            part.startMetrics(meters, "smppclient.provider", false);
+            part.claimResponse(ProviderRequestMetrics.Result.ACCEPTED);
+            assertThat(prometheus.scrape()).contains("sendium_sms_provider_attempts_total",
+                            "sendium_sms_provider_in_flight", "sendium_sms_provider_response_seconds_count",
+                            "sendium_sms_provider_response_seconds_sum", "provider=\"smppclient.provider\"")
+                    .doesNotContain("message-secret", "+306900000001", "sendium_sms_provider_response_seconds_bucket");
+        } finally {
+            prometheus.close();
+        }
     }
 
     @Test

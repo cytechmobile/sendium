@@ -1,11 +1,14 @@
 package gr.cytech.sendium.core.storage.memory;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.Assignment;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheus.PrometheusConfig;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -18,6 +21,30 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class MemoryStoreMetricsTest {
+    @Test
+    void prometheusStoreNamesMatchTheDocumentedPanels() throws Exception {
+        var metrics = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        var pending = new MemoryPendingMessageStore<StandardMessage>(1, MemoryStoreMetricsTest::copy);
+        var selected = new MemorySelectedRouterStore<>(pending, 1);
+        var routed = new MemoryRoutedWorkStore<StandardMessage>(1, MemoryStoreMetricsTest::copy);
+        var coordinator = new DefaultOutboundCoordinator<>(pending, selected, routed);
+        try {
+            pending.bindMetrics(metrics);
+            selected.bindMetrics(metrics);
+            routed.bindMetrics(metrics);
+            coordinator.start();
+            coordinator.accept(new SourceId(UUID.randomUUID()), new StandardMessage());
+            coordinator.selectToRouter(1);
+            var taken = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+            coordinator.recordToRouted(taken, new Destination<>("smppclient.provider", taken.message()));
+            assertThat(metrics.scrape()).contains("sendium_sms_pending_sources", "sendium_sms_selected_work",
+                    "sendium_sms_routed_work", "backend=\"memory\"", "destination=\"smppclient.provider\"");
+        } finally {
+            coordinator.close();
+            metrics.close();
+        }
+    }
+
     @Test
     void routedSnapshotFailuresDoNotMoveOccupancy() throws Exception {
         var metrics = new SimpleMeterRegistry();

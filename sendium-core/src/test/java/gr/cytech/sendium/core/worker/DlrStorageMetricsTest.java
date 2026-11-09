@@ -122,6 +122,26 @@ class DlrStorageMetricsTest {
     }
 
     @Test
+    void collectorReplacementUnregistersOnlyItsOwnedMetersBeforeBindingFreshState() {
+        var first = collector(true);
+        registry.counter("unrelated.counter").increment();
+        when(storage.readMetricSnapshot(anyInt(), any()))
+                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(1, 0, 0)))
+                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(7, 0, 0)));
+        first.collect();
+        assertThat(occupancy("waiting_provider")).isEqualTo(1);
+        first.unregister();
+        first.unregister();
+        assertThat(registry.find("sendium.dlr.storage.messages").gauges()).isEmpty();
+        assertThat(registry.get("unrelated.counter").counter().count()).isEqualTo(1);
+        var replacement = collector(true);
+        assertThat(metadata("available")).isZero();
+        assertThat(occupancy("waiting_provider")).isNaN();
+        replacement.collect();
+        assertThat(occupancy("waiting_provider")).isEqualTo(7);
+    }
+
+    @Test
     void rejectsInvalidBudgetsWithoutDatabaseAccess() {
         for (int invalid : new int[]{0, -1, Integer.MAX_VALUE}) {
             var collector = new DlrStorageMetrics();
