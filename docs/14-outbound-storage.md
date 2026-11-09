@@ -389,6 +389,26 @@ once: provider submission before recorded completion may repeat. The CBOR source
 durable later-stage implementations belong to subsequent issues. Durable provider
 outcome/retry checkpoints remain outside this delivery.
 
+### Storage readiness and metrics
+
+`/q/health/ready` includes `sendium-sms-storage`. It is UP only while the shared coordinator
+is running, all selected stores report READY, and any coordinator-owned multipart recovery is safe.
+Shutdown, a failed store or unsafe recovery makes this check DOWN. Health probes do not scan the spool
+or imply that its retained backlog is empty. Custom coordinator implementations must implement
+`isReady()` to report readiness; the default is conservatively false.
+
+Standalone file pending records the Micrometer timer `sendium.sms.storage.operation`, including
+lock-wait time, for opening/reconstruction, admission, source reads/pages, multipart recovery operations,
+held publication and terminal cleanup. Timer counts with `outcome=error` provide operation error counts.
+Labels are restricted to `backend=file`, fixed operation names, `outcome=success|error`, and a typed
+storage `reason` (`NONE` for success, `OTHER` for non-storage failures). No message, account, group or
+path labels are emitted. Status probes are not timed and metric collection does not enumerate files.
+Embedded file stores opt in by supplying a `MeterRegistry` to the constructor.
+
+After source validation/reconstruction, `pendingRecovery|success|backend:file|retainedSources:…|durationMs:…`
+reports retained source count and startup duration without payloads or paths. This summary does not
+mean the multipart backlog has drained; bounded group publication can continue after startup.
+
 ### Delivery and rollback boundary
 
 #343 adds pending contracts, source representation, shared runtime reconstruction and behavioral proofs.

@@ -152,6 +152,18 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         }
     }
 
+    @Override
+    public boolean isReady() {
+        lock.lock();
+        try {
+            return lifecycle == Lifecycle.RUNNING && pending.status().state() == OutboundStage.State.READY &&
+                    router.status().state() == OutboundStage.State.READY && routed.status().state() == OutboundStage.State.READY &&
+                    (multipartRecovery == null || multipartRecovery.isReady());
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void open(OutboundStage stage, Role role, List<OutboundStage> attempted) {
         OutboundStage.Status status = stage.status();
         if (status.durable() && (role != Role.PENDING || !(stage instanceof IndexedMultipartSource))) {

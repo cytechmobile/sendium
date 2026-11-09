@@ -4,6 +4,8 @@ import gr.cytech.sendium.core.http.KannelResource;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
+import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.test.QuarkusExtensionTest;
 import io.quarkus.test.common.http.TestHTTPResource;
 import jakarta.inject.Inject;
@@ -28,7 +30,7 @@ class FilePendingHttpTest {
     static final QuarkusExtensionTest APP = new QuarkusExtensionTest()
             .withApplicationRoot(archive -> archive.addClasses(StandaloneOutboundPipeline.class,
                     StandaloneOutboundPipeline.LifecycleRouting.class, StandaloneMessageSnapshot.class,
-                    StandaloneMessageStorage.class, MessageStorageProfile.class, KannelResource.class,
+                    StandaloneMessageStorage.class, MessageStorageProfile.class, MessageStorageReadiness.class, KannelResource.class,
                     StandaloneOutboundPipelineTest.Beans.class, StandaloneOutboundPipelineTest.Providers.class,
                     MessageLifecycleHttpTest.Credentials.class))
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
@@ -44,11 +46,16 @@ class FilePendingHttpTest {
     @Inject OutboundCoordinator<StandardMessage> coordinator;
     @Inject StandaloneOutboundPipelineTest.Providers providers;
     @Inject InMemoryQueueProvider legacy;
+    @Inject MeterRegistry metrics;
 
     @Test
     void configuredFileAdmissionCommitsBeforeHttpSuccessAndRetainsSourcesThroughHandoff() throws Exception {
         assertThat(coordinator.pendingMultipartRecovery().orElseThrow().isReady()).isTrue();
         try (HttpClient client = HttpClient.newHttpClient()) {
+            var healthRequest = HttpRequest.newBuilder(endpoint.resolve("/q/health/ready")).GET().build();
+            var ready = client.send(healthRequest, HttpResponse.BodyHandlers.ofString());
+            assertThat(ready.statusCode()).isEqualTo(200);
+            assertThat(ready.body()).contains("sendium-sms-storage");
             var request = HttpRequest.newBuilder(URI.create(endpoint +
                     "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello"))
                     .timeout(Duration.ofSeconds(5)).GET().build();
@@ -69,6 +76,10 @@ class FilePendingHttpTest {
                 TimeUnit.MILLISECONDS.sleep(20);
             }
             assertThat(source).doesNotExist();
+            assertThat(metrics.get(FilePendingMessageStore.OPERATION_METRIC).tag("operation", "admit")
+                    .tag("outcome", "success").timer().count()).isEqualTo(1);
+            coordinator.beginShutdown();
+            assertThat(client.send(healthRequest, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(503);
         } finally {
             providers.handoff.complete(null);
         }

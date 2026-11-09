@@ -42,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -79,22 +80,32 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         PendingMessageStore<StandardMessage> pending;
         MemorySelectedRouterStore<StandardMessage> selected;
         if ("file".equals(profile.pending())) {
-            var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity);
+            var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity, Clock.systemUTC(), metrics);
             pending = filePending;
             selected = new MemorySelectedRouterStore<>(filePending, routerCapacity);
         } else {
             var memoryPending = new MemoryPendingMessageStore<StandardMessage>(sourceCapacity, StandaloneMessageSnapshot::copy);
             pending = memoryPending;
             selected = new MemorySelectedRouterStore<>(memoryPending, routerCapacity);
-            memoryPending.bindMetrics(metrics);
+            if (metrics != null) {
+                memoryPending.bindMetrics(metrics);
+            }
         }
         var routed = new MemoryRoutedWorkStore<StandardMessage>(sourceCapacity,
                 StandaloneMessageSnapshot::copy);
-        routed.bindMetrics(metrics);
+        if (metrics != null) {
+            routed.bindMetrics(metrics);
+        }
         var result = new DefaultOutboundCoordinator<>(pending, selected, routed, recoveryBatchSize);
         result.start();
-        selected.bindMetrics(metrics);
+        if (metrics != null) {
+            selected.bindMetrics(metrics);
+        }
         return result;
+    }
+
+    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config) {
+        return coordinator(profile, config, null);
     }
 
     // The observed parameter registers pipeline startup after worker startup; its payload is not needed.
