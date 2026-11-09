@@ -3,6 +3,7 @@ package gr.cytech.sendium.app.storage;
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.http.KannelResource;
+import gr.cytech.sendium.core.http.HttpSubmissionMetricsFilter;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
@@ -16,6 +17,7 @@ import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
 import io.quarkus.test.QuarkusExtensionTest;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.test.common.http.TestHTTPResource;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Produces;
@@ -49,7 +51,7 @@ class MessageLifecycleHttpTest {
     @RegisterExtension
     static final QuarkusExtensionTest APP = new QuarkusExtensionTest()
             .withApplicationRoot(archive -> archive.addClasses(KannelResource.class, Beans.class, Credentials.class,
-                    StandaloneMessageStorage.class, MessageStorageProfile.class))
+                    StandaloneMessageStorage.class, MessageStorageProfile.class, HttpSubmissionMetricsFilter.class))
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
             .overrideConfigKey("sendium.dlr.persistence.enabled", "false")
@@ -67,6 +69,9 @@ class MessageLifecycleHttpTest {
     @Inject
     PendingMessageStore<StandardMessage> pending;
 
+    @Inject
+    MeterRegistry metrics;
+
     @AfterEach
     void clearAdmissionFaults() {
         reset(pending);
@@ -74,6 +79,8 @@ class MessageLifecycleHttpTest {
 
     @Test
     void successReferencesAcceptedHandle() throws Exception {
+        double acceptedBefore = submissions("accepted");
+        double rejectedBefore = submissions("rejected");
         URI requestUri = URI.create(endpoint + "?username=http-user&password=secret&from=Sender&to=306900000001&text=Hello" +
                 "&dlr-mask=3&dlr-url=https%3A%2F%2Fcallback.test%2Fdlr");
         try (HttpClient client = HttpClient.newHttpClient()) {
@@ -85,6 +92,8 @@ class MessageLifecycleHttpTest {
             assertThat(retained.body).isEqualTo("Hello");
             var full = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertThat(full.statusCode()).isEqualTo(503);
+            assertThat(submissions("accepted")).isEqualTo(acceptedBefore + 1);
+            assertThat(submissions("rejected")).isEqualTo(rejectedBefore + 1);
             assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
             assertThat(coordinator.selectToRouter(1)).isEqualTo(1);
             var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
@@ -120,6 +129,24 @@ class MessageLifecycleHttpTest {
             assertThat(pending.sourcesAfter(null, 1)).isEmpty();
             assertThat(legacy.getRouterQueue().isEmpty()).isTrue();
         }
+    }
+
+    @Test
+    void countsAuthenticationAndValidationRejectionsWithoutAdmission() throws Exception {
+        double before = submissions("rejected");
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            var unauthorized = HttpRequest.newBuilder(URI.create(endpoint + "?text=Hello")).GET().build();
+            assertThat(client.send(unauthorized, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(401);
+            var invalid = HttpRequest.newBuilder(URI.create(endpoint + "?username=http-user&password=secret")).GET().build();
+            assertThat(client.send(invalid, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(400);
+            assertThat(submissions("rejected")).isEqualTo(before + 2);
+            assertThat(pending.sourcesAfter(null, 1)).isEmpty();
+        }
+    }
+
+    private double submissions(String result) {
+        var counter = metrics.find("sendium.sms.submissions").tag("ingress", "http").tag("result", result).counter();
+        return counter == null ? 0 : counter.count();
     }
 
     @Test

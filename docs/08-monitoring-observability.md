@@ -22,7 +22,23 @@ The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. 
 
 ## Planned SMS Operations Metrics Contract
 
-> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). Pending and Selected gauges are implemented as described below; the remaining catalog and collection metadata are planned. Existing runtime and DLR storage-operation metrics remain available.
+> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP admission counters and Pending/Selected gauges are implemented as described below; the remaining catalog and collection metadata are planned. Existing runtime and DLR storage-operation metrics remain available.
+
+### Implemented HTTP Admission Counter
+
+`sendium_sms_submissions_total{ingress="http",result="accepted|rejected"}` counts one response decision for each `GET /sendsms` or `POST /api/v1/messages` handled by the REST layer. HTTP 202 is accepted; all other response statuses are rejected, including authentication, validation, unsupported media and capacity failures. Optional trailing slashes are recognized. Both APIs share the same counter and label values; no account, URL or error details become labels.
+
+Counting happens once in a response filter, not in each authentication/resource/error path. It measures HTTP submission decisions, not delivery or a durable count of source records. It includes the existing legacy Kannel enqueue path when embedded without an outbound coordinator. Other routes, unsupported methods (including native GET), OPTIONS and metrics scrapes are excluded. Requests rejected before reaching the REST layer, such as HTTP-server-level limits or connection failures, are not observable here. An accepted source whose HTTP response is never processed by the filter can be missing from this counter; it is not a message ledger.
+
+The counter remains active when `sendium.metrics.storage.enabled=false`. SMPP admission counting is a separate pending implementation task.
+
+```promql
+# Accepted HTTP submissions per second.
+rate(sendium_sms_submissions_total{ingress="http",result="accepted"}[5m])
+
+# Rejected HTTP submissions per second.
+rate(sendium_sms_submissions_total{ingress="http",result="rejected"}[5m])
+```
 
 ### Implemented Pending And Selected Gauges
 

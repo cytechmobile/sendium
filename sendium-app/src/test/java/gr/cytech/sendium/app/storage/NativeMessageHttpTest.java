@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.core.http.NativeApiAuthenticated;
+import gr.cytech.sendium.core.http.HttpSubmissionMetricsFilter;
 import gr.cytech.sendium.core.http.NativeApiAuthenticationFilter;
 import gr.cytech.sendium.core.http.NativeApiError;
 import gr.cytech.sendium.core.http.NativeApiExceptionMapper;
@@ -18,6 +19,7 @@ import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
 import io.quarkus.test.QuarkusExtensionTest;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.test.common.http.TestHTTPResource;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Produces;
@@ -54,7 +56,7 @@ class NativeMessageHttpTest {
             .withApplicationRoot(archive -> archive.addClasses(NativeMessageHttpTest.class, NativeMessageResource.class,
                     NativeMessageResource.Accepted.class, NativeMessageRequest.class, NativeApiAuthenticationFilter.class,
                     NativeApiAuthenticated.class, NativeApiError.class, NativeApiExceptionMapper.class, NativeApiPrincipal.class,
-                    StandaloneMessageSnapshot.class, Beans.class))
+                    StandaloneMessageSnapshot.class, Beans.class, HttpSubmissionMetricsFilter.class))
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
             .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
             .overrideConfigKey("sendium.dlr.persistence.enabled", "false")
@@ -65,6 +67,7 @@ class NativeMessageHttpTest {
     @Inject OutboundCoordinator<StandardMessage> coordinator;
     @Inject CredentialFileWatcher credentials;
     @Inject ObjectMapper mapper;
+    @Inject MeterRegistry metrics;
 
     @BeforeEach
     void credentials() {
@@ -78,6 +81,29 @@ class NativeMessageHttpTest {
         if (selected.isPresent()) {
             coordinator.discard(selected.orElseThrow().id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
         }
+    }
+
+    @Test
+    void countsAdmissionAndPreResourceRejectionsExactlyOnce() throws Exception {
+        double acceptedBefore = submissions("accepted");
+        double rejectedBefore = submissions("rejected");
+        assertThat(send(endpoint, VALID, null).statusCode()).isEqualTo(401);
+        assertThat(submit("{").statusCode()).isEqualTo(400);
+        assertThat(submit(VALID).statusCode()).isEqualTo(202);
+        assertThat(submit(VALID).statusCode()).isEqualTo(503);
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            var scrape = client.send(HttpRequest.newBuilder(endpoint.resolve("/q/metrics")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(scrape.statusCode()).isEqualTo(200);
+            assertThat(scrape.body()).contains("sendium_sms_submissions_total");
+        }
+        assertThat(submissions("accepted")).isEqualTo(acceptedBefore + 1);
+        assertThat(submissions("rejected")).isEqualTo(rejectedBefore + 3);
+    }
+
+    private double submissions(String result) {
+        var counter = metrics.find("sendium.sms.submissions").tag("ingress", "http").tag("result", result).counter();
+        return counter == null ? 0 : counter.count();
     }
 
     @Test
