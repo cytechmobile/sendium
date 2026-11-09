@@ -15,8 +15,11 @@ import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.RoutedWorkStore;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,16 +31,19 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
 
 /**
- * Coordinates fresh non-durable stages. All execution goes through this instance; its stores are not
- * independently scheduled. Durable startup reconciliation is deliberately unavailable in this baseline.
+ * Coordinates fresh volatile stages with optional indexed durable pending recovery. Retained pending
+ * sources repeat selection/routing on restart; durable selected/routed stages remain unsupported.
  * Handoff waits and callbacks on returned completion stages never run under the coordinator lock.
  */
 public final class DefaultOutboundCoordinator<M extends StandardMessage> implements OutboundCoordinator<M> {
@@ -50,43 +56,97 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     private final Map<SourceId, Context<M>> sourceSelections = new HashMap<>();
     private final Map<WorkId, Execution<M>> executions = new HashMap<>();
     private final Set<Execution<M>> pendingReturns = new HashSet<>();
+    private final int recoveryBatchSize;
+    private final Clock recoveryClock;
+    private final Supplier<ScheduledExecutorService> recoverySchedulers;
+    private PendingMultipartRecovery<M> multipartRecovery;
+    private ScheduledExecutorService recoveryScheduler;
     private Lifecycle lifecycle = Lifecycle.NEW;
 
     public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed) {
+        this(pending, router, routed, 100);
+    }
+
+    public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
+                                      int recoveryBatchSize) {
+        this(pending, router, routed, recoveryBatchSize, Clock.systemUTC(), () ->
+                Executors.newSingleThreadScheduledExecutor(task -> {
+                    var thread = new Thread(task, "outbound-pending-recovery");
+                    thread.setDaemon(true);
+                    return thread;
+                }));
+    }
+
+    DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
+                               int recoveryBatchSize, Clock recoveryClock, Supplier<ScheduledExecutorService> recoverySchedulers) {
         this.pending = Objects.requireNonNull(pending, "pending");
         this.router = Objects.requireNonNull(router, "router");
         this.routed = Objects.requireNonNull(routed, "routed");
+        if (recoveryBatchSize <= 0) {
+            throw new IllegalArgumentException("outboundConfiguration|error|reason:nonPositiveRecoveryBatchSize");
+        }
+        this.recoveryBatchSize = recoveryBatchSize;
+        this.recoveryClock = Objects.requireNonNull(recoveryClock, "outboundConfiguration|error|reason:missingRecoveryClock");
+        this.recoverySchedulers = Objects.requireNonNull(recoverySchedulers, "outboundConfiguration|error|reason:missingRecoverySchedulerFactory");
     }
 
     @Override
     public void start() {
+        List<OutboundStage> attempted = new ArrayList<>();
+        Throwable startupFailure = null;
         lock.lock();
         try {
             if (lifecycle == Lifecycle.RUNNING) {
+                requireRunning(Role.PENDING);
                 return;
             }
             if (lifecycle != Lifecycle.NEW) {
-                throw invalid(Role.PENDING, "Coordinator cannot restart");
+                throw invalid(Role.PENDING, "outboundStartup|error|reason:cannotRestart");
             }
-            List<OutboundStage> attempted = new ArrayList<>();
             try {
                 open(pending, Role.PENDING, attempted);
                 open(router, Role.ROUTER_QUEUE, attempted);
                 open(routed, Role.ROUTED_WORK, attempted);
                 lifecycle = Lifecycle.RUNNING;
+                if (pending.status().durable()) {
+                    recoveryScheduler = Objects.requireNonNull(recoverySchedulers.get(), "outboundStartup|error|reason:missingRecoveryScheduler");
+                    multipartRecovery = new PendingMultipartRecovery<>(pending, recoveryClock, recoveryScheduler, this::makeHeldReady);
+                    multipartRecovery.reconstruct(recoveryBatchSize);
+                }
             } catch (RuntimeException | Error failure) {
-                for (OutboundStage stage : attempted.reversed()) {
-                    try {
-                        stage.close();
-                    } catch (RuntimeException | Error cleanupFailure) {
-                        if (cleanupFailure != failure) {
-                            failure.addSuppressed(cleanupFailure);
-                        }
+                lifecycle = Lifecycle.CLOSED;
+                startupFailure = failure;
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (startupFailure != null) {
+            // A recovery callback may need our lock: stop/join its monitor outside the coordinator lock.
+            try {
+                stopRecovery();
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (cleanupFailure != startupFailure) {
+                    startupFailure.addSuppressed(cleanupFailure);
+                }
+            }
+            for (OutboundStage stage : attempted.reversed()) {
+                try {
+                    stage.close();
+                } catch (RuntimeException | Error cleanupFailure) {
+                    if (cleanupFailure != startupFailure) {
+                        startupFailure.addSuppressed(cleanupFailure);
                     }
                 }
-                lifecycle = Lifecycle.CLOSED;
-                throw failure;
             }
+            rethrow(startupFailure);
+        }
+    }
+
+    @Override
+    public Optional<PendingMultipartRecovery<M>> pendingMultipartRecovery() {
+        lock.lock();
+        try {
+            return Optional.ofNullable(multipartRecovery);
         } finally {
             lock.unlock();
         }
@@ -94,16 +154,16 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     private void open(OutboundStage stage, Role role, List<OutboundStage> attempted) {
         OutboundStage.Status status = stage.status();
-        if (status.durable()) {
-            throw new OutboundStorageException(role, UNSUPPORTED, "Durable stage recovery is not implemented by this coordinator");
+        if (status.durable() && (role != Role.PENDING || !(stage instanceof IndexedMultipartSource))) {
+            throw new OutboundStorageException(role, UNSUPPORTED, "outboundStartup|error|reason:unsupportedDurableStage");
         }
         if (status.state() != OutboundStage.State.NEW) {
-            throw invalid(role, "Coordinator requires fresh, unopened stages");
+            throw invalid(role, "outboundStartup|error|reason:stageAlreadyOpened");
         }
         attempted.add(stage);
         stage.open();
         if (stage.status().state() != OutboundStage.State.READY) {
-            throw unavailable(role, "Stage did not become ready during startup");
+            throw unavailable(role, "outboundStartup|error|reason:stageNotReady");
         }
     }
 
@@ -115,11 +175,12 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 lifecycle = Lifecycle.SHUTTING_DOWN;
                 changed.signalAll();
             } else if (lifecycle == Lifecycle.NEW) {
-                throw unavailable(Role.PENDING, "Coordinator has not started");
+                throw unavailable(Role.PENDING, "outboundShutdown|error|reason:notStarted");
             }
         } finally {
             lock.unlock();
         }
+        stopRecovery();
     }
 
     @Override
@@ -513,12 +574,21 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             }
             lifecycle = Lifecycle.SHUTTING_DOWN;
             changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+        stopRecovery();
+        lock.lock();
+        try {
+            if (lifecycle == Lifecycle.CLOSED) {
+                return;
+            }
             for (Context<M> context : selections.values()) {
                 if (context.attempt != null || (context.finishing && context.handoffAccepted)) {
-                    throw unavailable(Role.ROUTED_WORK, "Resolve outstanding handoffs and retry terminal cleanup before close");
+                    throw unavailable(Role.ROUTED_WORK, "outboundShutdown|error|reason:unresolvedHandoffOrCleanup");
                 }
                 if (context.assignment != null && !context.markedRouted) {
-                    throw unavailable(Role.ROUTER_QUEUE, "Retry unfinished routing transitions before close");
+                    throw unavailable(Role.ROUTER_QUEUE, "outboundShutdown|error|reason:unfinishedRoutingTransition");
                 }
             }
             for (Context<M> context : selections.values()) {
@@ -550,15 +620,54 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             sourceSelections.clear();
             executions.clear();
             pendingReturns.clear();
-            if (failure instanceof RuntimeException runtimeFailure) {
-                throw runtimeFailure;
-            }
-            if (failure instanceof Error error) {
-                throw error;
+            if (failure != null) {
+                rethrow(failure);
             }
         } finally {
             lock.unlock();
         }
+    }
+
+    private void stopRecovery() {
+        PendingMultipartRecovery<M> recovery;
+        ScheduledExecutorService scheduler;
+        lock.lock();
+        try {
+            recovery = multipartRecovery;
+            scheduler = recoveryScheduler;
+        } finally {
+            lock.unlock();
+        }
+        // Never hold our lock while acquiring recovery's monitor: its publisher calls back into us.
+        Throwable failure = null;
+        if (recovery != null) {
+            try {
+                recovery.close();
+            } catch (RuntimeException | Error closeFailure) {
+                failure = closeFailure;
+            }
+        }
+        if (scheduler != null) {
+            try {
+                scheduler.shutdown();
+            } catch (RuntimeException | Error closeFailure) {
+                if (failure == null) {
+                    failure = closeFailure;
+                } else if (failure != closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+        }
+        if (failure != null) {
+            rethrow(failure);
+        }
+    }
+
+    private static void rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        throw (Error) failure;
     }
 
     private Execution<M> registerAssignment(Context<M> context, Routed<M> result) {
@@ -613,7 +722,10 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     private void requireRunning(Role role) {
         if (lifecycle != Lifecycle.RUNNING) {
-            throw unavailable(role, "Coordinator is not accepting new work");
+            throw unavailable(role, "outboundLifecycle|error|reason:notAcceptingNewWork");
+        }
+        if (multipartRecovery != null && !multipartRecovery.isReady()) {
+            throw unavailable(role, "outboundLifecycle|error|reason:pendingRecoveryNotReady");
         }
     }
 
