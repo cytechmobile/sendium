@@ -2,6 +2,8 @@ package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
@@ -17,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.concurrent.Callable;
@@ -41,6 +44,8 @@ public class MessagePartsHandler<M extends StandardMessage> {
     private final Map<String, Future<Boolean>> scheduledTasks;
     private final MessagePartsEventsListener<M> listener;
     private PendingMultipartRecovery<M> recovery;
+    private boolean ownsRecovery;
+    private boolean stopped;
 
     private volatile long timeoutInMilliseconds;
     private ScheduledThreadPoolExecutor executor;
@@ -66,7 +71,8 @@ public class MessagePartsHandler<M extends StandardMessage> {
     public synchronized boolean stop() {
         logger.info("Stopping MessagePartsHandler: {} ...", listener.getName());
 
-        if (recovery != null) {
+        stopped = true;
+        if (recovery != null && ownsRecovery) {
             recovery.close();
         }
         //process any scheduled tasks and stop the executor
@@ -92,14 +98,32 @@ public class MessagePartsHandler<M extends StandardMessage> {
 
     /** Rebuild from a quiescent pending store; the caller supplies its existing coordinated publication boundary. */
     public synchronized void reconstruct(PendingMessageStore<M> pending, int pageSize, BiConsumer<Set<SourceId>, M> publisher) {
-        if (!pendingMessageParts.isEmpty()) {
-            throw new IllegalStateException("Reconstruction must precede runtime part handling");
+        if (stopped || !pendingMessageParts.isEmpty()) {
+            throw new IllegalStateException("multipartIngress|error|reason:reconstructionAfterHandlingOrStop");
+        }
+        if (hasSharedRecovery()) {
+            throw new IllegalStateException("multipartIngress|error|reason:sharedRecoveryIsCoordinatorOwned");
         }
         if (recovery != null) {
             recovery.close();
         }
         recovery = new PendingMultipartRecovery<>(pending, Clock.systemUTC(), executor, publisher);
+        ownsRecovery = true;
         recovery.reconstruct(pageSize);
+    }
+
+    /** Attach an existing coordinator-owned component without creating timers or reconstructing its sources. */
+    public synchronized void useSharedRecovery(PendingMultipartRecovery<M> shared) {
+        Objects.requireNonNull(shared, "multipartIngress|error|reason:missingSharedRecovery");
+        if (stopped || !pendingMessageParts.isEmpty() || (recovery != null && (ownsRecovery || recovery != shared))) {
+            throw new IllegalStateException("multipartIngress|error|reason:recoverySelectionConflict");
+        }
+        recovery = shared;
+        ownsRecovery = false;
+    }
+
+    synchronized boolean hasSharedRecovery() {
+        return recovery != null && !ownsRecovery;
     }
 
     public synchronized boolean isRecordDriven() {
@@ -107,12 +131,16 @@ public class MessagePartsHandler<M extends StandardMessage> {
     }
 
     public synchronized boolean isRecoveryReady() {
-        return recovery != null && recovery.isReady();
+        return !stopped && recovery != null && recovery.isReady();
     }
 
     public synchronized void addAcceptedSource(SourceId source) {
+        if (stopped) {
+            throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNAVAILABLE,
+                    "multipartIngress|error|reason:handlerStopped");
+        }
         if (recovery == null) {
-            throw new IllegalStateException("Record-driven reconstruction has not been selected");
+            throw new IllegalStateException("multipartIngress|error|reason:recoveryNotSelected");
         }
         recovery.accepted(source);
     }
@@ -124,7 +152,7 @@ public class MessagePartsHandler<M extends StandardMessage> {
             throw new IllegalArgumentException("Part does not match its accepted membership");
         }
         if (recovery != null) {
-            recovery.accepted(membership.source());
+            addAcceptedSource(membership.source());
             return;
         }
         if (membership.duplicate()) {
