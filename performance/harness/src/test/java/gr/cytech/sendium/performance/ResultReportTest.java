@@ -36,6 +36,17 @@ class ResultReportTest {
     }
 
     @Test
+    void selectedStorageProfileIsVisibleInJsonAndMarkdown() {
+        var context = context();
+        context.application().put("messageStorageProfile", "file/memory/memory");
+        var config = config(true);
+        var ledger = ledger(config); ledger.freeze();
+        var report = writer.build(config, ledger, context, List.of(), false);
+        assertEquals("file/memory/memory", report.json().at("/configuration/application/messageStorageProfile").asText());
+        assertTrue(report.markdown().contains("Message storage profile: **file/memory/memory**"));
+    }
+
+    @Test
     void localModeledDataLimitationsRemainVisibleInStandaloneJsonAndMarkdown() {
         var context = context();
         String limitation = "RDS resource series are deterministic local fixtures, not observed database utilization.";

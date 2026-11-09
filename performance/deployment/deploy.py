@@ -83,7 +83,8 @@ def validate_plan(plan, preset):
     validate_preset(effective, Draft202012Validator(read(HERE.parent / "contracts/run-config.schema.json")))
     if target == "kannel":
         require(effective["workload"]["ingressMode"] == "http" and runtime_mode(effective) == "jvm"
-                and "nativeBuild" not in plan, "Kannel requires HTTP ingress and its C runtime, without Sendium native settings")
+                and "nativeBuild" not in plan and effective["runtime"].get("pendingBackend", "memory") == "memory",
+                "Kannel requires HTTP ingress and its C runtime, without Sendium native/file-pending settings")
         validate_kannel_build(plan.get("kannelBuild"), plan.get("resolution", {}).get("nodes", {}).get("sendium", {}).get("architecture"))
     if runtime_mode(effective) == "native":
         architecture = plan.get("resolution", {}).get("nodes", {}).get("sendium", {}).get("architecture")
@@ -258,7 +259,8 @@ def documents(staged, result, instances, timeout):
     target = benchmark_target(staged)
     mode = runtime_mode(preset)
     application = {"runtime": mode, "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if mode == "jvm" else [],
-                   "connections": {"outgoingTransceivers": 1}, "dlrStorage": "postgresql"}
+                   "connections": {"outgoingTransceivers": 1}, "dlrStorage": "postgresql",
+                   "messageStorageProfile": preset["runtime"].get("pendingBackend", "memory") + "/memory/memory"}
     if mode == "native":
         architecture = instances[result["SendiumInstanceId"]]["Architecture"]
         validate_native_build(staged.get("nativeBuild"), preset, architecture)
@@ -315,6 +317,8 @@ def documents(staged, result, instances, timeout):
             "sampleIntervalSeconds": preset["measurement"]["sampleIntervalSeconds"], "sampleBudget": preset["measurement"]["sampleBudgetPerSource"]}
     result_documents["sendium"].update(databaseSecretArn=result["DatabaseCredentialsArn"], deployment=deployment, workload=preset["workload"])
     result_documents["sendium"]["applicationRuntime"] = mode
+    if target == "sendium":
+        result_documents["sendium"]["pendingBackend"] = preset["runtime"].get("pendingBackend", "memory")
     if target == "kannel":
         result_documents["sendium"].update(benchmarkTarget="kannel", kannelBuild=staged["kannelBuild"], jvmArguments=[])
         result_documents["harness"]["benchmarkTarget"] = "kannel"
