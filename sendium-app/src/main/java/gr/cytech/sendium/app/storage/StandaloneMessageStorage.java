@@ -25,15 +25,20 @@ public class StandaloneMessageStorage {
                     backend(config, MessageStorageProfile.ROUTED_BACKEND));
         } catch (IllegalArgumentException failure) {
             // Startup can exit before asynchronous log handlers flush. Selectors contain no message payload.
-            System.err.println("Outbound message storage startup failed: " + failure.getMessage());
+            System.err.println(failure.getMessage());
             throw failure;
         }
     }
 
     // The observed parameter registers early startup validation/logging; its payload is not needed.
     void start(@Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) StartupEvent event, MessageStorageProfile profile) {
-        logger.info("Outbound message storage profile (pending/router-queue/routed-work): {}", profile);
-        logger.warn("NON-DURABLE outbound message storage: accepted messages and in-flight work can be lost on process restart.");
+        logger.info("messageStorage|configured|profile:{}", profile);
+        if ("file".equals(profile.pending())) {
+            logger.warn("messageStorage|durabilityLimited|pending:processRestart|routing:repeatedAfterRestart" +
+                    "|powerLoss:notGuaranteed|exactlyOnce:notGuaranteed");
+        } else {
+            logger.warn("messageStorage|nonDurable|restart:acceptedAndInFlightMessagesMayBeLost");
+        }
     }
 
     private static String backend(Config config, String name) {

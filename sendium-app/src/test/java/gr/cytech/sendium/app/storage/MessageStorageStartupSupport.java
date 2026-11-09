@@ -39,9 +39,8 @@ final class MessageStorageStartupSupport {
                 .overrideRuntimeConfigKey(MessageStorageProfile.ROUTER_BACKEND, router)
                 .overrideRuntimeConfigKey(MessageStorageProfile.ROUTED_BACKEND, routed)
                 .assertException(failure -> assertThat(failure)
-                        .hasStackTraceContaining("Unsupported outbound message storage profile '" +
-                                pending + "/" + router + "/" + routed + "'")
-                        .hasStackTraceContaining("Supported profiles: memory/memory/memory"))
+                        .hasStackTraceContaining("reason:unsupportedProfile")
+                        .hasStackTraceContaining("supported:memory/memory/memory,file/memory/memory"))
                 .assertLogRecords(records -> assertThat(records).isEmpty());
     }
 

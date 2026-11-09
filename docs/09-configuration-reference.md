@@ -52,23 +52,32 @@ settings in `smsg.properties`.
 | Property | Environment variable | Default |
 | :--- | :--- | :--- |
 | `sendium.message.pending.backend` | `SENDIUM_MESSAGE_PENDING_BACKEND` | `memory` |
+| `sendium.message.pending.path` | `SENDIUM_MESSAGE_PENDING_PATH` | None; required for `file` pending |
 | `sendium.message.router-queue.backend` | `SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND` | `memory` |
 | `sendium.message.routed-work.backend` | `SENDIUM_MESSAGE_ROUTED_WORK_BACKEND` | `memory` |
 | `sendium.message.pending.capacity` | `SENDIUM_MESSAGE_PENDING_CAPACITY` | `10000` |
 | `sendium.message.router-queue.capacity` | `SENDIUM_MESSAGE_ROUTER_QUEUE_CAPACITY` | `1000` |
 | `sendium.message.selection-batch-size` | `SENDIUM_MESSAGE_SELECTION_BATCH_SIZE` | `100` |
 
-Only **`memory/memory/memory`** is currently selectable. Missing settings default to `memory`;
+**`memory/memory/memory`** and **`file/memory/memory`** are selectable. Missing backend settings default to `memory`;
 explicitly empty, unknown, or unsupported values fail startup. Values are case-sensitive. Requests
-such as `file/file/memory`, partial-file combinations, or any PostgreSQL outbound combination fail
-with an error naming the requested profile, supported profile, and configuration keys. There is no
+such as `file/file/memory`, file router/routed combinations, or any PostgreSQL outbound combination fail
+with an error naming the supported profiles and configuration keys. There is no
 fallback to a less durable backend.
 
 Validation runs before Sendium's file-watcher and router/worker startup observers. The validated
-profile is retained for the process lifetime. Startup logs the effective profile and a prominent
-`NON-DURABLE` warning: accepted messages and in-flight work can be lost on restart. The current
+profile is retained for the process lifetime. Startup logs the effective profile and its durability limits.
+Memory pending is non-durable: accepted messages and in-flight work can be lost on restart. The current
 standalone pipeline binds HTTP/SMPP to one shared coordinator and executes bounded selection, routing,
 SMPP-client submission, retries and terminal handoffs. All capacity/batch settings must be positive.
+
+For `file` pending, set `sendium.message.pending.path` explicitly to a writable local spool directory.
+Only one process may own it. Startup validates and reconstructs retained sources before admission;
+unsafe storage fails closed. Retain the directory across process/container restarts. Selection and
+routing repeat after restart; power-loss durability and exactly-once delivery are not guaranteed.
+Drain the spool or preserve it for later file-profile recovery before switching to memory or rolling back;
+changing the selector does not migrate retained messages.
+
 Pending capacity counts retained accepted sources (including held multipart parts); router capacity
 counts queued plus taken unassigned selections. Routed capacity equals pending source capacity, so
 normal source-retaining operation does not introduce a smaller destination-record bound. Partial terminal

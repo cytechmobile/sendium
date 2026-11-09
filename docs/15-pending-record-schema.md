@@ -3,9 +3,9 @@
 [Outbound storage lifecycle](14-outbound-storage.md) · [Documentation map](DocumentationMap.md)
 
 This documents the explicit pending-source representation introduced by #343.
-It is not Java serialization, a serialization of `StandardMessage`, a file layout,
-or a supported durable backend. The standalone runtime still supports only
-`memory/memory/memory`. Filesystem admission/restart recovery belongs to #339.
+It is not Java serialization, a serialization of `StandardMessage`, or a file layout specification.
+The standalone runtime supports `memory/memory/memory` and opt-in `file/memory/memory`;
+see [storage configuration](09-configuration-reference.md#outbound-message-storage-profile).
 
 ## API and ownership
 

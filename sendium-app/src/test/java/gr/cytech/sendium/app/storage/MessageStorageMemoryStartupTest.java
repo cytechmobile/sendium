@@ -15,8 +15,8 @@ class MessageStorageMemoryStartupTest {
             .overrideRuntimeConfigKey(MessageStorageProfile.ROUTED_BACKEND, "memory")
             .assertLogRecords(records -> assertThat(records).extracting(MessageStorageStartupSupport::message)
                     .containsExactly(
-                            "Outbound message storage profile (pending/router-queue/routed-work): memory/memory/memory",
-                            "NON-DURABLE outbound message storage: accepted messages and in-flight work can be lost on process restart.",
+                            "messageStorage|configured|profile:memory/memory/memory",
+                            "messageStorage|nonDurable|restart:acceptedAndInFlightMessagesMayBeLost",
                             MessageStorageStartupSupport.ADMISSION_STARTED));
 
     @Inject

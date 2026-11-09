@@ -8,6 +8,8 @@ import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
@@ -37,6 +39,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -69,13 +73,22 @@ public class StandaloneOutboundPipeline implements HealthCheck {
     @DefaultBean
     static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config) {
         int sourceCapacity = positive(config, "pending.capacity", 10000);
-        positive(config, "selection-batch-size", 100);
-        var pending = new MemoryPendingMessageStore<StandardMessage>(sourceCapacity,
-                StandaloneMessageSnapshot::copy);
-        var selected = new MemorySelectedRouterStore<>(pending, positive(config, "router-queue.capacity", 1000));
+        int recoveryBatchSize = positive(config, "selection-batch-size", 100);
+        int routerCapacity = positive(config, "router-queue.capacity", 1000);
+        PendingMessageStore<StandardMessage> pending;
+        MemorySelectedRouterStore<StandardMessage> selected;
+        if ("file".equals(profile.pending())) {
+            var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity);
+            pending = filePending;
+            selected = new MemorySelectedRouterStore<>(filePending, routerCapacity);
+        } else {
+            var memoryPending = new MemoryPendingMessageStore<StandardMessage>(sourceCapacity, StandaloneMessageSnapshot::copy);
+            pending = memoryPending;
+            selected = new MemorySelectedRouterStore<>(memoryPending, routerCapacity);
+        }
         var routed = new MemoryRoutedWorkStore<StandardMessage>(sourceCapacity,
                 StandaloneMessageSnapshot::copy);
-        var result = new DefaultOutboundCoordinator<>(pending, selected, routed);
+        var result = new DefaultOutboundCoordinator<>(pending, selected, routed, recoveryBatchSize);
         result.start();
         return result;
     }
@@ -93,7 +106,7 @@ public class StandaloneOutboundPipeline implements HealthCheck {
             return thread;
         });
         scheduleNextCycle(0);
-        logger.info("Standalone outbound memory pipeline activated");
+        logger.info("outboundPipeline|activated");
     }
 
     private void scheduleNextCycle(long delay) {
@@ -254,9 +267,22 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         String key = "sendium.message." + suffix;
         int value = config.getOptionalValue(key, Integer.class).orElse(defaultValue);
         if (value <= 0) {
-            throw new IllegalArgumentException(key + " must be positive");
+            throw new IllegalArgumentException("messageStorageConfiguration|error|reason:nonPositiveValue|setting:" + key);
         }
         return value;
+    }
+
+    private static Path pendingPath(Config config) {
+        String value = config.getConfigValue(MessageStorageProfile.PENDING_PATH).getValue();
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("messageStorageConfiguration|error|reason:missingPendingPath|setting:" + MessageStorageProfile.PENDING_PATH);
+        }
+        try {
+            return Path.of(value);
+        } catch (InvalidPathException failure) {
+            // Do not include the operator's filesystem path in routine startup diagnostics.
+            throw new IllegalArgumentException("messageStorageConfiguration|error|reason:invalidPendingPath|setting:" + MessageStorageProfile.PENDING_PATH);
+        }
     }
 
     private static void logFailure(String operation, Exception failure) {

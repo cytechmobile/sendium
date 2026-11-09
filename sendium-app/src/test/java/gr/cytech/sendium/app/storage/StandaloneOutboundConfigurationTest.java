@@ -29,7 +29,7 @@ class StandaloneOutboundConfigurationTest {
             when(config.getOptionalValue(key, Integer.class)).thenReturn(Optional.of(0));
             assertThatThrownBy(() -> StandaloneOutboundPipeline.coordinator(
                     new MessageStorageProfile("memory", "memory", "memory"), config))
-                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(key).hasMessageContaining("positive");
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(key).hasMessageContaining("reason:nonPositiveValue");
         }
     }
 
