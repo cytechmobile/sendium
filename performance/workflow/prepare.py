@@ -77,12 +77,13 @@ def boolean(value):
 
 
 def normalize(inputs, context, preset):
-    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target"}
+    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "pending_backend"}
     require(isinstance(inputs, dict) and set(inputs) <= allowed, "Unknown dispatch input")
     result = json.loads(json.dumps(preset))
     mode = inputs.get("application_runtime", runtime_mode(result))
     require(mode in RUNTIMES, "Application runtime must be jvm or native")
     result["runtime"]["applicationRuntime"] = mode
+    result["runtime"]["pendingBackend"] = inputs.get("pending_backend", result["runtime"].get("pendingBackend", "memory"))
     workload = result["workload"]
     for name, field in INPUT_FIELDS.items():
         workload[field] = number(inputs.get(name, workload[field]), integral=name != "offered_rate")
@@ -92,6 +93,7 @@ def normalize(inputs, context, preset):
     require(target in ("sendium", "kannel"), "Unknown benchmark target")
     require(target != "kannel" or (workload["ingressMode"] == "http" and mode == "jvm"),
             "Kannel requires HTTP ingress and cannot select Sendium native runtime")
+    require(target != "kannel" or result["runtime"]["pendingBackend"] == "memory", "Kannel cannot select Sendium file pending storage")
     for source in ("sendium", "harness"):
         instance_type = inputs.get(source + "_instance_type", result["aws"]["instanceDefaults"][source])
         require(isinstance(instance_type, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*\.[a-z0-9]+", instance_type), "Invalid EC2 instance type")

@@ -33,6 +33,7 @@
   },
   "runtime": {
     "applicationRuntime": "jvm",
+    "pendingBackend": "memory",
     "os": "amazon-linux-2023",
     "amiParameters": {
       "x86_64": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",

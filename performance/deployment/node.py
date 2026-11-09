@@ -151,6 +151,11 @@ class Node:
         if self.target not in ("sendium", "kannel"):
             raise ValueError("Unknown benchmark target")
         self.mode = validate_runtime_mode(document.get("applicationRuntime", "jvm"))
+        self.pending_backend = document.get("pendingBackend", "memory")
+        if self.pending_backend not in ("memory", "file"):
+            raise ValueError("Pending backend must be memory or file")
+        if self.pending_backend == "file" and (self.target != "sendium" or self.source != "sendium"):
+            raise ValueError("File pending storage belongs only to the Sendium gateway node")
         if self.target == "kannel" and self.mode != "jvm":
             raise ValueError("Kannel cannot use Sendium native runtime settings")
         if self.source == "harness" and self.mode != "jvm":
@@ -260,10 +265,29 @@ class Node:
                                     str(self.root / "generated")], capture_output=True, timeout=60, env=child_environment())
         if completed.returncode:
             raise RuntimeError("Configuration generation failed")
+        self.configure_storage()
         for name in ("runtime-settings.json", "run-config.json", "effective-configuration.json"):
             self.aws.put(self.bucket, self.prefix + "inputs/harness/generated/" + name,
                          self.root / "generated/harness" / name, immutable=True)
         self.status("configured")
+
+    def configure_storage(self):
+        # Configure the launched process here, not the shared harness generator or Kannel adapter.
+        settings = {"sendium.message.pending.backend": self.pending_backend,
+                    "sendium.message.router-queue.backend": "memory", "sendium.message.routed-work.backend": "memory"}
+        if self.pending_backend == "file":
+            spool = self.root / "pending"
+            spool.mkdir(mode=0o700, exist_ok=True)
+            settings["sendium.message.pending.path"] = str(spool)
+        environment_path = self.root / "generated/sendium/environment.json"
+        environment = read(environment_path)
+        environment.update({key.upper().replace(".", "_").replace("-", "_"): value for key, value in settings.items()})
+        write(environment_path, environment)
+        effective = read(self.root / "generated/harness/effective-configuration.json")
+        effective["messageStorageProfile"] = self.pending_backend + "/memory/memory"
+        effective["applicationProperties"].update(settings)
+        for location in ("public", "harness"):
+            write(self.root / ("generated/" + location + "/effective-configuration.json"), effective)
 
     def secrets(self):
         values = []

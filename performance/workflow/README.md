@@ -23,13 +23,14 @@ reviewers, with separate read-only and deletion-only roles. See
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
-allows 25 top-level dispatch inputs (checked 2026-10-16). All 13 required controls
+allows 25 top-level dispatch inputs (checked 2026-10-16). All 14 required controls
 therefore have individual fields; durations do not need a grouped string.
 
 | Input | Default | Validation |
 |---|---:|---|
 | `benchmark_target` | `sendium` | `sendium` or `kannel`; one target per dispatch |
 | `application_runtime` | `jvm` | Sendium: `jvm` or `native`; leave `jvm` for Kannel, which uses its C runtime |
+| `pending_backend` | `memory` | Sendium: `memory` or `file`; selected/routed stages remain memory. Leave `memory` for Kannel. |
 | `ingress_mode` | `http` | Sendium: `http` or `smpp`; Kannel: HTTP only |
 | `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
@@ -113,6 +114,19 @@ for schema, readiness and transport details. Live AWS execution remains to be
 validated after merge; local integration results are not AWS capacity findings.
 
 ## Sendium build and runtime details
+
+`pending_backend` is independent of JVM/native runtime and HTTP/SMPP ingress. `memory` remains
+the default; `file` selects `file/memory/memory`. The gateway node creates a private writable
+`pending/` directory under its existing per-run root and passes explicit backend/path settings to
+the application process. Existing spool content is not cleared on reconfiguration. This uses the
+instance's existing root volume: it survives application restarts but is deleted with the temporary
+benchmark instance; it is not a new retained production volume or a backup.
+
+The effective configuration, `results.json` application metadata, and Markdown summary record
+`messageStorageProfile`. Publication rejects results labeled with a different profile from the
+normalized request, so file runs cannot silently be reported as memory runs. PostgreSQL DLR storage
+is unchanged. Kannel retains its own spool settings and rejects Sendium's `file` choice. The selected
+application revision must implement the requested profile; choosing `file` does not retrofit older builds.
 
 The maintained `build_selected_application.py` helper validates the exact selected
 checkout, Linux runner architecture, Java 25 and absence of cloud credential

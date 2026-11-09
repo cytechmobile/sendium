@@ -28,6 +28,23 @@ def request(inputs=None):
 
 
 class InputTests(unittest.TestCase):
+    def test_pending_backend_defaults_and_runtime_ingress_matrix(self):
+        self.assertEqual(request()["preset"]["runtime"]["pendingBackend"], "memory")
+        field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["pending_backend"]
+        self.assertEqual(field["options"], ["memory", "file"])
+        self.assertEqual(field["default"], "memory")
+        for runtime in ("jvm", "native"):
+            for ingress in ("http", "smpp"):
+                for backend in ("memory", "file"):
+                    with self.subTest(runtime=runtime, ingress=ingress, backend=backend):
+                        result = request({"application_runtime": runtime, "ingress_mode": ingress, "pending_backend": backend})
+                        self.assertEqual(result["preset"]["runtime"]["pendingBackend"], backend)
+        for backend in ("", "FILE", "postgresql", "file;echo unsafe", None):
+            with self.subTest(backend=backend), self.assertRaises(ValueError):
+                request({"pending_backend": backend})
+        with self.assertRaisesRegex(ValueError, "Kannel cannot select"):
+            request({"benchmark_target": "kannel", "pending_backend": "file"})
+
     def test_defaults_match_preset_and_dispatch_commit_is_independent_from_harness(self):
         result = request()
         self.assertEqual(result["preset"], PRESET)
@@ -163,7 +180,7 @@ class WorkflowTests(unittest.TestCase):
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 13)
+        self.assertEqual(len(inputs), 14)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)
