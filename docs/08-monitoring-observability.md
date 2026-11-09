@@ -78,6 +78,19 @@ Timing starts immediately before the coordinated send-boundary invocation, after
 
 Routed occupancy keeps the parent's originally recorded `destination`. Provider request metrics use the actual sending worker's `provider` identity, including when routing chooses a different worker for a replacement attempt. A retry does not transfer the parent record or create another Pending source.
 
+For one single-source assigned selection, interrupted completion has these occupancies. These are overlapping ownership counts, not separate messages:
+
+| Completion waiting/failure boundary | Pending sources | Selected retained | Routed active | Routed terminal |
+| :--- | ---: | ---: | ---: | ---: |
+| Required handoff pending, failed or cancelled | 1 | 1 | 1 | 0 |
+| Handoff accepted, Routed completion fails | 1 | 1 | 1 | 0 |
+| Routed completed, Pending deletion fails | 1 | 1 | 0 | 1 |
+| Pending deleted, Selected cleanup fails | 0 | 1 | 0 | 1 |
+| Selected removed, Routed forget fails | 0 | 0 | 0 | 1 |
+| All cleanup succeeds | 0 | 0 | 0 | 0 |
+
+Thus zero Pending does not prove all cleanup is finished. Persistent Selected bookkeeping or terminal Routed occupancy warrants checking retained cleanup failures. Cleanup-only retry finishes remaining steps without sending again or increasing provider attempt/response counts. Terminal routing discards have no Routed record; they remain in Selected `routing` until Selected completion, including during a failed handoff or cleanup retry.
+
 The existing per-part response claim prevents repeated callbacks from decrementing in-flight or counting/timing an outcome twice. Release and timing happen before tracking/storage handoffs. Retrying a failed handoff adds neither a provider request nor another response measurement. A transport send failure counts an attempt even when it is uncertain whether any bytes reached the provider. Provider acceptance is still not handset delivery.
 
 Provider series are created on first send. CDI-managed workers share a meter holder by configured full worker name, preserving in-flight state across worker replacement in the same application. Programmatic workers opt in before startup with `bindProviderMetrics(ProviderRequestMetrics)` and share one holder per registry. The existing overloads treat direct embedded submissions as initial attempts; callers scheduling replacements can use the overload with the explicit retry flag. There are no per-message metrics indexes. These request metrics currently cover the coordinated standalone provider path, not the legacy worker `doMessage` path. They remain active when storage-state metrics are disabled.
