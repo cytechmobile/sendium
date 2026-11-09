@@ -161,6 +161,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     private volatile boolean ingressStarted;
     private Counter acceptedSubmissions;
     private Counter rejectedSubmissions;
+    private MeterRegistry receiptMetrics;
 
     public SmppServerWorker() {
         this.authProvider = new BasicSmppAuthenticationProvider(this);
@@ -181,6 +182,11 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     public void bindSubmissionMetrics(MeterRegistry metrics) {
         acceptedSubmissions = metrics.counter("sendium.sms.submissions", "ingress", "smpp", "result", "accepted");
         rejectedSubmissions = metrics.counter("sendium.sms.submissions", "ingress", "smpp", "result", "rejected");
+    }
+
+    @Inject
+    public void bindReceiptMetrics(MeterRegistry metrics) {
+        receiptMetrics = metrics;
     }
 
     public void setupInstance(SendiumConfigurationProvider cp, String instName, Queue<M> routerQueue) {
@@ -806,7 +812,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             expectedParts.add(i);
         }
         DlrDeliveryBatch<M> batch = new DlrDeliveryBatch<>(
-                message, started.getAsInt(), expectedParts, messageStore, handler);
+                message, started.getAsInt(), expectedParts, messageStore, handler, receiptMetrics);
         for (int i = 0; i < requests.size(); i++) {
             DeliverSm deliverSm = requests.get(i);
             String receiptMessageId = (String) deliverSm.getReferenceObject();

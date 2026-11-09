@@ -22,7 +22,7 @@ The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. 
 
 ## Planned SMS Operations Metrics Contract
 
-> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP/SMPP admission counters, Pending/Selected/Routed gauges and coordinated provider request metrics are implemented as described below; receipt metrics and collection metadata remain planned. Existing runtime and DLR storage-operation metrics remain available.
+> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP/SMPP admission counters, Pending/Selected/Routed gauges, coordinated provider request metrics and receipt event counters are implemented as described below; receipt storage snapshots and collection metadata remain planned. Existing runtime and DLR storage-operation metrics remain available.
 
 ### Implemented HTTP Admission Counter
 
@@ -109,6 +109,29 @@ sum by (provider) (rate(sendium_sms_provider_response_seconds_count{result="reje
 sum by (provider) (rate(sendium_sms_provider_response_seconds_sum[5m]))
 /
 sum by (provider) (rate(sendium_sms_provider_response_seconds_count[5m]))
+```
+
+### Implemented Receipt Event Counters
+
+`sendium_dlr_outcomes_total{provider,outcome="delivered|failed|expired"}` counts tracked final provider receipts only when the managed PostgreSQL storage boundary returns a newly committed transition. This covers synchronous resolution and batched processing. A duplicate/unknown receipt returning no transition, failed transaction, admission of a correlation, or provider submission rejection does not increment it. Provider-reported expiry is `expired`; local retention deletion is not a receipt outcome. Delivered includes the existing delivered/seen mappings; other terminal failures use `failed`. The unit is a resolved correlation message record, following existing multipart aggregation, not necessarily one unique customer SMS.
+
+`sendium_dlr_return_attempts_total{channel="http|smpp",result="success|failure"}` measures external receipt-return attempts separately:
+
+| Channel | Attempt / success boundary | Failure boundary | Excluded |
+| :--- | :--- | :--- | :--- |
+| HTTP | Invocation of the callback HTTP client; a 2xx response is success | Non-2xx response, timeout, transport exception or interruption after the send invocation starts | Mask-suppressed callbacks, invalid callback metadata, claim failures and interruption before invoking the client |
+| SMPP | First `deliver_sm` send invocation for a logical receipt batch; success requires successful acknowledgements of all distinct parts | First failed send, timeout, negative/malformed response or closed session ending a started batch | Batches abandoned before any send, duplicate callbacks, late callbacks from a terminal batch and non-receipt traffic |
+
+An SMPP multipart receipt return counts once per logical batch attempt, not once per part. A partially sent batch that fails counts one failure. Generating or queueing parts alone does not establish a send attempt. HTTP and SMPP successes are counted before persistent completion cleanup: a successful external delivery followed by a storage failure remains a success measurement, not a failed return. A later actual resend is another attempt, potentially another success. These are process-local activity counters, not exactly-once customer totals or evidence that pending state was successfully removed.
+
+Receipt counters are independent of `sendium.metrics.storage.enabled`. They cover the existing managed PostgreSQL receipt lifecycle and HTTP/SMPP return paths; raw storage implementations used directly outside the managed boundary do not automatically emit outcome counters. CDI binds transport meters automatically. Programmatic HTTP forwarders opt in with `bindMetrics(MeterRegistry)` and SMPP server workers with `bindReceiptMetrics(MeterRegistry)` before startup. New backends must preserve the committed-transition boundary rather than count incoming receipt packets.
+
+```promql
+# Final tracked receipt results per second by provider and outcome.
+sum by (provider, outcome) (rate(sendium_dlr_outcomes_total[5m]))
+
+# Failed client receipt-return attempts per second by transport.
+sum by (channel) (rate(sendium_dlr_return_attempts_total{result="failure"}[5m]))
 ```
 
 ### Units And Counting Boundaries

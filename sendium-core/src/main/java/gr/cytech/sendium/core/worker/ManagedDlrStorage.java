@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.worker;
 
+import gr.cytech.sendium.core.message.StandardMessage;
 import io.agroal.api.AgroalDataSource;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -97,7 +98,18 @@ public class ManagedDlrStorage implements DlrStorage {
     }
 
     public List<ProviderDlrEvent.Result> applyProviderBatch(List<ProviderDlrEvent> events) {
-        return timed("provider_batch", () -> delegate.applyProviderBatch(events));
+        List<ProviderDlrEvent> batch = List.copyOf(events);
+        List<ProviderDlrEvent.Result> results = timed("provider_batch", () -> delegate.applyProviderBatch(batch));
+        if (results.size() != batch.size()) {
+            throw new IllegalStateException("Provider batch result count mismatch");
+        }
+        for (int index = 0; index < batch.size(); index++) {
+            if (batch.get(index) instanceof ProviderDlrEvent.Receipt receipt &&
+                    results.get(index).failure() == null && results.get(index).state().isPresent()) {
+                recordOutcome(receipt.providerName(), receipt.dlrState());
+            }
+        }
+        return results;
     }
 
     @Override
@@ -111,8 +123,21 @@ public class ManagedDlrStorage implements DlrStorage {
     @Override
     public Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
                                              MessageState.MessageStatus status, int dlrState, String errorCode) {
-        return timed("resolve", () -> delegate.resolveDlr(
+        Optional<MessageState> resolved = timed("resolve", () -> delegate.resolveDlr(
                 providerName, providerMessageId, status, dlrState, errorCode));
+        if (resolved.isPresent()) {
+            recordOutcome(providerName, dlrState);
+        }
+        return resolved;
+    }
+
+    private void recordOutcome(String provider, int dlrState) {
+        String outcome = switch (dlrState) {
+            case StandardMessage.DLR_STAT_DELIVRD, StandardMessage.DLR_STAT_SEEN -> "delivered";
+            case StandardMessage.DLR_STAT_EXPIRED -> "expired";
+            default -> "failed";
+        };
+        meterRegistry.counter("sendium.dlr.outcomes", "provider", provider, "outcome", outcome).increment();
     }
 
     @Override

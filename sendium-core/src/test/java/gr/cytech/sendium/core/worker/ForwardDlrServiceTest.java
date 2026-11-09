@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.worker;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,10 +57,12 @@ class ForwardDlrServiceTest {
 
     private ForwardDlrService service;
     private HttpServer server;
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUp() {
         service = new ForwardDlrService(dlrService, httpClient);
+        service.bindMetrics(metrics);
     }
 
     @AfterEach
@@ -67,6 +70,7 @@ class ForwardDlrServiceTest {
         if (server != null) {
             server.stop(0);
         }
+        metrics.close();
     }
 
     @Test
@@ -138,6 +142,8 @@ class ForwardDlrServiceTest {
                 deliveries.stream().map(MessageState::getGatewayMsgId).filter(id -> !id.equals("message-42")).toList());
         verify(dlrService).retryDelivery(eq("message-42"), eq(1), eq("http_failure"), anyLong());
         verify(dlrService, never()).failDelivery(anyString(), anyInt(), anyString());
+        assertThat(returns("success")).isEqualTo(499);
+        assertThat(returns("failure")).isEqualTo(1);
     }
 
     @Test
@@ -160,6 +166,8 @@ class ForwardDlrServiceTest {
         var order = inOrder(dlrService, httpClient);
         order.verify(dlrService).claimDueHttpDeliveries(500);
         order.verify(httpClient).send(any(HttpRequest.class), anyBodyHandler());
+        assertThat(returns("success")).isEqualTo(1);
+        assertThat(returns("failure")).isZero();
     }
 
     @Test
@@ -173,6 +181,8 @@ class ForwardDlrServiceTest {
         }
         verify(dlrService, times(2)).completeDelivery(GATEWAY_ID, 1);
         verifyNoInteractions(httpClient);
+        assertThat(returns("success")).isZero();
+        assertThat(returns("failure")).isZero();
     }
 
     @Test
@@ -242,6 +252,7 @@ class ForwardDlrServiceTest {
         when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(1), eq("http_failure"), anyLong()))
                 .thenReturn(true);
         service = new ForwardDlrService(dlrService, ForwardDlrService.newHttpClient());
+        service.bindMetrics(metrics);
 
         service.dispatchDueDeliveries();
 
@@ -280,6 +291,7 @@ class ForwardDlrServiceTest {
         dueAttempt(due, 1);
         when(dlrService.completeDelivery(GATEWAY_ID, 1)).thenReturn(true);
         service = new ForwardDlrService(dlrService, ForwardDlrService.newHttpClient());
+        service.bindMetrics(metrics);
 
         service.dispatchDueDeliveries();
 
@@ -351,6 +363,8 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(2), eq("timeout"), anyLong());
+        assertThat(returns("failure")).isEqualTo(1);
+        assertThat(returns("success")).isZero();
         assertThat(deliveryResult().getValue()).doesNotContain("secret", "token", "http");
     }
 
@@ -366,6 +380,7 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(3), eq("transport_failure"), anyLong());
+        assertThat(returns("failure")).isEqualTo(1);
     }
 
     @Test
@@ -380,6 +395,7 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(4), eq("transport_failure"), anyLong());
+        assertThat(returns("failure")).isEqualTo(1);
     }
 
     @Test
@@ -395,6 +411,7 @@ class ForwardDlrServiceTest {
 
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(5), eq("interrupted"), anyLong());
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
+        assertThat(returns("failure")).isEqualTo(1);
     }
 
     @Test
@@ -407,6 +424,8 @@ class ForwardDlrServiceTest {
 
         verify(dlrService).failInvalidDelivery(GATEWAY_ID, 1, "invalid_uri");
         verifyNoInteractions(httpClient);
+        assertThat(returns("success")).isZero();
+        assertThat(returns("failure")).isZero();
     }
 
     @Test
@@ -420,6 +439,8 @@ class ForwardDlrServiceTest {
         service.dispatchDueDeliveries();
 
         verify(dlrService).completeDelivery(GATEWAY_ID, 1);
+        assertThat(returns("success")).isEqualTo(1);
+        assertThat(returns("failure")).isZero();
     }
 
     @Test
@@ -485,6 +506,10 @@ class ForwardDlrServiceTest {
         ArgumentCaptor<String> result = ArgumentCaptor.forClass(String.class);
         verify(dlrService).retryDelivery(eq(GATEWAY_ID), anyInt(), result.capture(), anyLong());
         return result;
+    }
+
+    private double returns(String result) {
+        return metrics.get("sendium.dlr.return.attempts").tag("channel", "http").tag("result", result).counter().count();
     }
 
     private void dueAttempt(MessageState due, int attempt) {

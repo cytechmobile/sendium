@@ -7,6 +7,8 @@ import gr.cytech.sendium.core.smpp.server.DlrDeliveryBatch;
 import gr.cytech.sendium.core.smpp.server.SmppServerMessageStore;
 import gr.cytech.sendium.core.smpp.server.SmppServerSessionHandler;
 import gr.cytech.sendium.core.smpp.server.SmppServerWorker;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,6 +22,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @ExtendWith(MockitoExtension.class)
 class OutTaskTest {
@@ -28,6 +31,12 @@ class OutTaskTest {
     @Mock private SmppServerMessageStore<StandardMessage> store;
 
     private StandardMessage message;
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+
+    @AfterEach
+    void closeMetrics() {
+        metrics.close();
+    }
 
     @BeforeEach
     void setUp() {
@@ -47,6 +56,10 @@ class OutTaskTest {
         verify(handler).sendPduRequest(request);
         verify(store, never()).completeDlrDeliveryAttempt(any(), eq(1));
         verify(store, never()).releaseDlrDeliveryAttempt(any(), eq(1), any());
+        assertThat(returns("success")).isZero();
+        when(store.completeDlrDeliveryAttempt(message, 1)).thenReturn(true);
+        batch.partSucceeded(0);
+        assertThat(returns("success")).isEqualTo(1);
     }
 
     @Test
@@ -60,6 +73,7 @@ class OutTaskTest {
 
         verify(store).releaseDlrDeliveryAttempt(message, 2, "send_failed");
         verify(worker, never()).outTaskFailed(any(), any());
+        assertThat(returns("failure")).isEqualTo(1);
     }
 
     @Test
@@ -72,10 +86,15 @@ class OutTaskTest {
         new OutTask<>(worker, request).run();
 
         verify(handler, never()).sendPduRequest(any());
+        assertThat(returns("failure")).isZero();
     }
 
     private DlrDeliveryBatch<StandardMessage> batch(int attempt) {
-        return new DlrDeliveryBatch<>(message, attempt, Set.of(0), store, handler);
+        return new DlrDeliveryBatch<>(message, attempt, Set.of(0), store, handler, metrics);
+    }
+
+    private double returns(String result) {
+        return metrics.get("sendium.dlr.return.attempts").tag("channel", "smpp").tag("result", result).counter().count();
     }
 
     private DeliverSm request(DlrDeliveryBatch<StandardMessage> batch) {

@@ -15,6 +15,8 @@ import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.queue.Queue;
+import gr.cytech.sendium.core.smpp.server.tasks.OutTask;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import utils.OutboundIngressFixture;
 
@@ -182,6 +184,40 @@ class SmppServerWorkerReassemblyTest {
         assertThat(bodies).anySatisfy(body -> assertThat(body).contains("id:part-1"));
         assertThat(bodies).anySatisfy(body -> assertThat(body).contains("id:part-2"));
         assertThat(bodies).anySatisfy(body -> assertThat(body).contains("id:part-3"));
+    }
+
+    @Test
+    void multipartReceiptMetricsFollowActualSendsAndOneLogicalAcknowledgement() throws Exception {
+        var metrics = new SimpleMeterRegistry();
+        var worker = new TestSmppServerWorker(new TestConfigurationProvider(), new Queue<>());
+        try {
+            worker.bindReceiptMetrics(metrics);
+            var store = mock(SmppServerMessageStore.class);
+            var handler = reachableHandler(worker);
+            worker.setMessageStore(store);
+            when(store.tracksDlrDeliveryAttempts()).thenReturn(true);
+            when(store.startDlrDeliveryAttempt(any())).thenReturn(OptionalInt.of(9));
+            when(store.completeDlrDeliveryAttempt(any(), eq(9))).thenReturn(true);
+            when(handler.sendPduRequest(any())).thenReturn(true);
+            var dlr = dlrMessage();
+            dlr.reassembledParts = new ArrayList<>(List.of("part-1", "part-2", "part-3"));
+            worker.doMessage(0, dlr);
+            var success = metrics.get("sendium.dlr.return.attempts").tag("channel", "smpp").tag("result", "success").counter();
+            assertThat(success.count()).isZero();
+            for (var pdu : worker.outgoingPdus) {
+                new OutTask<>(worker, pdu).run();
+                var reference = (DlrDeliverSmReference<?>) pdu.getReferenceObject();
+                reference.batch().partSucceeded(reference.partOrdinal());
+                reference.batch().partSucceeded(reference.partOrdinal());
+            }
+            assertThat(success.count()).isEqualTo(1);
+            assertThat(metrics.get("sendium.dlr.return.attempts").tag("channel", "smpp")
+                    .tag("result", "failure").counter().count()).isZero();
+            verify(store, times(1)).completeDlrDeliveryAttempt(any(), eq(9));
+        } finally {
+            worker.messagePartsHandler.stop();
+            metrics.close();
+        }
     }
 
     @Test
