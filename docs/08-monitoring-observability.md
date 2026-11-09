@@ -374,6 +374,14 @@ The collection alert intentionally excludes disabled collection. An unconfigured
 - **Bounded snapshots:** database collection may be unavailable above the configured row budget, during failures or after staleness. Disabling it leaves event counters and memory store gauges working. No unsupported or unavailable backend is represented as a zero backlog.
 - **No new backends or reporting platform:** file/memory DLR and durable outbound implementations belong to #337. They must preserve the shared meanings and add backend-specific collection/recovery tests. Per-account accepted ingress traffic is available, but not per-account provider/receipt tracking. Optional Grafana dashboard provisioning is supplied under `monitoring/`; it does not add per-message lookup, billing reports, replicas or persisted metric summaries.
 
+## File Pending Storage Diagnostics
+
+File pending adds `sendium.sms.storage.operation` timers with bounded operation/outcome/reason labels;
+error counts are the timer counts for `outcome=error`. `/q/health/ready` includes `sendium-sms-storage`,
+which goes DOWN when selected stores or shared recovery are unsafe. See the
+[exact readiness/metrics contract](14-outbound-storage.md#storage-readiness-and-metrics) and
+[file recovery operations](16-filesystem-pending-storage.md). Neither probe nor metric scrape scans the spool.
+
 ## Prometheus Configuration
 
 Create a `prometheus.yml` file in your monitoring deployment directory.

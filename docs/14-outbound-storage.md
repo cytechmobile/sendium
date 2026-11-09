@@ -7,6 +7,8 @@ Accepted sources remain owned until provider processing and every required track
 **`memory/memory/memory`** remains the non-durable default. Opt-in **`file/memory/memory`** retains
 accepted sources across process/container restarts using an explicitly configured local spool path.
 Selection and routing repeat after restart; power-loss durability and exactly-once delivery are not guaranteed.
+See [Filesystem Pending Storage](16-filesystem-pending-storage.md) for the as-built file architecture,
+deployment, stopped-instance backup/restore and rollback procedures.
 The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
 The working lifecycle comes from [#338](https://github.com/cytechmobile/sendium/issues/338), with pending-source
 contracts, multipart admission and the [versioned CBOR representation](15-pending-record-schema.md) refined by
@@ -96,10 +98,10 @@ flowchart LR
 
 | Component | Responsibility |
 |---|---|
-| `MessageStorageProfile` / `StandaloneMessageStorage` | Validate startup selectors, produce the profile and report its non-durable guarantee. |
+| `MessageStorageProfile` / `StandaloneMessageStorage` | Validate startup selectors, produce the profile and report its durability limits. |
 | `StandaloneOutboundPipeline` | Start one shared coordinator; drive bounded selection, routing, dispatch, retries and drain-first shutdown. |
 | `KannelResource` / `SmppServerWorker` | Admit before HTTP 202 / SMPP success; retain original source identities through multipart preparation. |
-| `PendingMessageStore` / `MemoryPendingMessageStore` | Retain accepted sources, held parts and ready work through source completion. |
+| `PendingMessageStore` / memory and file implementations | Retain accepted sources, held parts and ready work through source completion. |
 | `MultipartKey` / `MultipartMembership` | Match compatible parts and retain each source's assigned group, ordinal, absolute deadline and group creation order. |
 | `PendingSourceRecord` / `PendingMessageData` / `PendingRecordCodec` | Explicit accepted-source representation and versioned Jackson CBOR codec; not a physical backend or automatic memory-store encoding. |
 | `PendingMultipartRecovery` | Shared record-driven assembly/expiry entrypoint using bounded reads; backend/application startup integration is explicit. |
@@ -216,11 +218,16 @@ Complete retained groups assemble in ordinal order; expired incomplete groups re
 unexpired incomplete groups schedule only the time remaining. A restart at 12:00:50 with a saved
 12:01:00 deadline leaves ten seconds, not another full timeout.
 
-Waiting groups retain handles/metadata, not a second payload backlog. `multipartSources(groupId)` reads
+The memory recovery path retains waiting handles/metadata, not a second payload backlog. `multipartSources(groupId)` reads
 one group's retained handles, including duplicates and parts still awaiting ingress notification,
 bounded by pending source capacity. There are at most 255 distinct ordinals.
 Payloads are fetched for assembly or expiry. Closing recovery cancels its timers; source completion
 still belongs to the coordinator after terminal processing and required DLR handoff.
+
+The file path instead uses rebuilt disk group/deadline references and one batch-bounded poller. Backend
+opening validates every committed source/membership before coordinator recovery becomes ready; later
+publication/expiry visits one group's original payloads at a time. It does not create a heap map or timer
+for every retained group. See the [file architecture and bounds](16-filesystem-pending-storage.md#bounds-and-capacity).
 
 There is **no new durable checkpoint of a runtime assembly, release or publication decision**.
 Pending-only recovery may repeat processing. Selection/destination decisions survive only under
@@ -228,11 +235,11 @@ their own configured stage guarantees. Within a running process, `makeHeldReady`
 source-to-projection binding and prepared payload, making publication retries idempotent.
 
 `SmppServerWorker.reconstructPendingParts(pending, pageSize)` is an explicit pre-ingress startup hook
-using its selected coordinator's publication boundary. It prevents worker startup/admission success
-after failed reconstruction. It is **not** automatic restart recovery in the current standalone memory
-profile. Opening/indexing a physical durable backend, invoking reconstruction before ingress/dispatch,
-reconciling later stages and enabling a supported durable profile remain backend/application work in
-#339 and later issues. The current coordinator still rejects durable stages.
+using its selected coordinator's publication boundary for handler-owned recovery. It prevents worker
+startup/admission success after failed reconstruction. Standalone file-profile workers instead attach
+to the coordinator's automatically initialized shared recovery; they cannot reconstruct or close that
+borrowed component. Memory remains the non-durable default. Durable selected/routed stages remain
+separate future work, not an implied guarantee of pending recovery.
 
 ## Ownership and Capacity
 
@@ -429,17 +436,17 @@ content, required source cleanup and HTTP/SMPP DLR delivery. Test containers/vol
 the end; this is not a production backup/restore command. Without the flag the existing memory-profile
 PostgreSQL correlation/restart smoke remains unchanged. The fixture uses ports 18080, 27777 and 27779.
 
-#343 adds pending contracts, source representation, shared runtime reconstruction and behavioral proofs.
-It adds no spool directory/publication scheme, PostgreSQL outbound schema, durable profile or durable-data
-migration. Its dependent commits can be reverted together, in reverse order, to the working #338 memory
-baseline while retaining that baseline's performance fixes. This code-only rollback does not recover
-unfinished memory work across a restart. Existing PostgreSQL DLR storage remains independently owned.
+Rollback from file pending is not code-only: drain accepted sources first or stop and preserve the entire
+spool for later compatible recovery. Switching to memory does not migrate retained work. PostgreSQL DLR
+storage remains independently owned. Follow the [file-profile rollback procedure](16-filesystem-pending-storage.md#rollback-or-switching-back-to-memory).
 
 ## Embedding and API Reference
 
 Embedding applications supply compatible `M extends StandardMessage` stores, selection/preparation,
 snapshot policy, tracking handoffs and lifecycle orchestration. Constructors are passive; the default
-coordinator requires fresh non-durable stages and does not implement durable startup recovery.
+coordinator requires fresh stages and supports indexed durable pending recovery with memory selected/routed
+stores. Durable selected/routed stages remain unsupported. `FilePendingMessageStore` uses the explicit
+`StandardMessage` representation, not arbitrary custom-subtype serialization.
 
 Custom subtype fields and runtime mutations must survive transitions/returns without changing retained
 earlier-stage payloads. `StandaloneMessageSnapshot` handles standard protocol payloads and supported

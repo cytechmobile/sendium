@@ -2,6 +2,10 @@
 
 This guide explains how to run Sendium with Docker for local testing or simple deployments.
 
+Outbound message storage defaults to non-durable memory. For opt-in accepted-source recovery across
+container replacement, use the [filesystem pending deployment guide](16-filesystem-pending-storage.md#deployment)
+and retain a separate writable spool volume. The PostgreSQL DLR volume alone does not retain pending messages.
+
 ## Generated Quick Start
 
 The recommended evaluation path generates random local credentials, Docker Compose, PostgreSQL 17 with a persistent named volume, and the three required configuration files:
