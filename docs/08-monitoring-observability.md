@@ -22,7 +22,7 @@ The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. 
 
 ## Planned SMS Operations Metrics Contract
 
-> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP admission counters and Pending/Selected gauges are implemented as described below; the remaining catalog and collection metadata are planned. Existing runtime and DLR storage-operation metrics remain available.
+> Design contract for [#383](https://github.com/cytechmobile/sendium/issues/383). HTTP/SMPP admission counters and Pending/Selected gauges are implemented as described below; the remaining catalog and collection metadata are planned. Existing runtime and DLR storage-operation metrics remain available.
 
 ### Implemented HTTP Admission Counter
 
@@ -30,7 +30,7 @@ The endpoint exposes Quarkus, JVM, HTTP server, and Micrometer runtime metrics. 
 
 Counting happens once in a response filter, not in each authentication/resource/error path. It measures HTTP submission decisions, not delivery or a durable count of source records. It includes the existing legacy Kannel enqueue path when embedded without an outbound coordinator. Other routes, unsupported methods (including native GET), OPTIONS and metrics scrapes are excluded. Requests rejected before reaching the REST layer, such as HTTP-server-level limits or connection failures, are not observable here. An accepted source whose HTTP response is never processed by the filter can be missing from this counter; it is not a message ledger.
 
-The counter remains active when `sendium.metrics.storage.enabled=false`. SMPP admission counting is a separate pending implementation task.
+The counter remains active when `sendium.metrics.storage.enabled=false`.
 
 ```promql
 # Accepted HTTP submissions per second.
@@ -38,6 +38,22 @@ rate(sendium_sms_submissions_total{ingress="http",result="accepted"}[5m])
 
 # Rejected HTTP submissions per second.
 rate(sendium_sms_submissions_total{ingress="http",result="rejected"}[5m])
+```
+
+### Implemented SMPP Admission Counter
+
+`sendium_sms_submissions_total{ingress="smpp",result="accepted|rejected"}` counts `submit_sm_resp` decisions after successful enqueue to the worker's response executor. `STATUS_OK` is accepted; all other statuses are rejected. This shared boundary includes validation/processor failures, before-insert filter drops, stopped-worker rejection and Pending admission failure. It also includes legacy embedded admission without the coordinator. A newly admitted duplicate multipart ordinal counts as another accepted submission/source; reassembly, publication, cleanup and provider retries do not create new admission responses.
+
+Bind/authentication exchanges, enquire-link, unbind, deliver_sm receipts and generic nacks are not SMS admission decisions. Frames that cannot be decoded into handled submissions, and response-enqueue failures, are not counted. A counted response can subsequently fail transmission: the metric measures the server decision, not receipt of the acknowledgement by the client. Like the HTTP counter, it is not an exact durable ledger of source records.
+
+CDI-managed workers automatically bind to the application registry, independent of the storage metrics switch. Programmatic workers opt in with `bindSubmissionMetrics(MeterRegistry)` before startup. Workers sharing a registry contribute to the same two SMPP series; there is no worker/account/message label.
+
+```promql
+# Accepted SMPP submissions per second.
+rate(sendium_sms_submissions_total{ingress="smpp",result="accepted"}[5m])
+
+# Combined accepted submission rate across HTTP and SMPP instances.
+sum(rate(sendium_sms_submissions_total{result="accepted"}[5m]))
 ```
 
 ### Implemented Pending And Selected Gauges
