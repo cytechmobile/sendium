@@ -7,6 +7,8 @@ import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.util.MessageUtil;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -75,6 +77,23 @@ public final class MemoryPendingMessageStore<M extends StandardMessage> implemen
         this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
         this.eligibleAt = Objects.requireNonNull(eligibleAt, "eligibleAt");
         this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    /** Explicit registration for the owning application; construction does not publish metrics. */
+    public void bindMetrics(MeterRegistry registry) {
+        Gauge.builder("sendium.sms.pending.sources", this, store -> store.metricSourceCount())
+                .description("Retained accepted sources, including sources owned by later stages")
+                .tag("backend", "memory")
+                .register(registry);
+    }
+
+    private double metricSourceCount() {
+        lock.lock();
+        try {
+            return state == State.READY ? records.size() : Double.NaN;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

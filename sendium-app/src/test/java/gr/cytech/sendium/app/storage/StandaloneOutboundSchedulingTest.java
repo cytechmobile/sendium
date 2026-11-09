@@ -195,7 +195,8 @@ class StandaloneOutboundSchedulingTest {
             when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
             when(config.getOptionalValue("sendium.message.selection-batch-size", Integer.class)).thenReturn(Optional.of(2));
             pipeline.coordinator = spy(StandaloneOutboundPipeline.coordinator(
-                    new MessageStorageProfile("memory", "memory", "memory"), config));
+                    new MessageStorageProfile("memory", "memory", "memory"), config,
+                    new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
             pipeline.config = config;
             pipeline.routing = routing;
             pipeline.workers = mock(OutgoingWorkerManager.class);

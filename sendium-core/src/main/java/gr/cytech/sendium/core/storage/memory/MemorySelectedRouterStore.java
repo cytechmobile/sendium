@@ -6,6 +6,8 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -46,6 +48,33 @@ public final class MemorySelectedRouterStore<M extends StandardMessage> implemen
         this.pending = Objects.requireNonNull(pending, "pending");
         this.capacity = capacity;
         this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    /** Counts derive from maintained queue/slot sizes; scrapes never enumerate records. */
+    public void bindMetrics(MeterRegistry registry) {
+        for (String phase : new String[]{"waiting", "routing", "retained"}) {
+            Gauge.builder("sendium.sms.selected.work", this, store -> store.metricWorkCount(phase))
+                    .description("Retained selected work by scheduling or bookkeeping state")
+                    .tag("state", phase)
+                    .register(registry);
+        }
+    }
+
+    private double metricWorkCount(String phase) {
+        pending.lock.lock();
+        try {
+            if (state != State.READY || pending.status().state() != State.READY) {
+                return Double.NaN;
+            }
+            return switch (phase) {
+                case "waiting" -> ready.size();
+                case "routing" -> routingSlots - ready.size();
+                case "retained" -> records.size() - routingSlots;
+                default -> throw new IllegalArgumentException("Unknown Selected metric state");
+            };
+        } finally {
+            pending.lock.unlock();
+        }
     }
 
     @Override
