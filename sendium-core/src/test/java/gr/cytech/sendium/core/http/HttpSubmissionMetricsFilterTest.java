@@ -1,11 +1,13 @@
 package gr.cytech.sendium.core.http;
 
+import gr.cytech.sendium.core.AccountSubmissionMetrics;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 
@@ -17,6 +19,45 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class HttpSubmissionMetricsFilterTest {
+    @Test
+    void acceptedApisAggregateTheSameAuthenticatedAccountWithoutCountingTwice() {
+        var metrics = new SimpleMeterRegistry();
+        try {
+            var filter = new HttpSubmissionMetricsFilter();
+            filter.metrics = metrics;
+            var response = mock(ContainerResponseContext.class);
+            when(response.getStatus()).thenReturn(202);
+            for (var request : new ContainerRequestContext[]{request("GET", "sendsms"), request("POST", "api/v1/messages")}) {
+                request.setProperty(AccountSubmissionMetrics.HTTP_ACCOUNT, "shared-account");
+                filter.filter(request, response);
+                filter.filter(request, response);
+            }
+            assertThat(metrics.get("sendium.sms.account.submissions").tags("accountId", "shared-account", "ingress", "http")
+                    .counter().count()).isEqualTo(2);
+            assertThat(metrics.get("sendium.sms.submissions").tag("result", "accepted").counter().count()).isEqualTo(2);
+        } finally {
+            metrics.close();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"202,", "202,' '", "400,account", "401,account", "503,account"})
+    void excludesMissingAccountsAndRejectedRequests(int status, String account) {
+        var metrics = new SimpleMeterRegistry();
+        try {
+            var filter = new HttpSubmissionMetricsFilter();
+            filter.metrics = metrics;
+            var request = request("GET", "sendsms");
+            request.setProperty(AccountSubmissionMetrics.HTTP_ACCOUNT, account);
+            var response = mock(ContainerResponseContext.class);
+            when(response.getStatus()).thenReturn(status);
+            filter.filter(request, response);
+            assertThat(metrics.find("sendium.sms.account.submissions").counters()).isEmpty();
+        } finally {
+            metrics.close();
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"GET,sendsms,202", "GET,/sendsms/,400", "POST,api/v1/messages,202",
             "POST,/api/v1/messages/,401", "POST,api/v1/messages,403", "POST,api/v1/messages,415",

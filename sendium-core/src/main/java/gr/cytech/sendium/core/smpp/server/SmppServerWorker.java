@@ -20,6 +20,7 @@ import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.AbstractOutWorker;
+import gr.cytech.sendium.core.AccountSubmissionMetrics;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
@@ -161,6 +162,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     private volatile boolean ingressStarted;
     private Counter acceptedSubmissions;
     private Counter rejectedSubmissions;
+    private MeterRegistry submissionMetrics;
     private MeterRegistry receiptMetrics;
 
     public SmppServerWorker() {
@@ -180,6 +182,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     /** CDI binds automatically; programmatic workers can opt in before startup. */
     @Inject
     public void bindSubmissionMetrics(MeterRegistry metrics) {
+        submissionMetrics = metrics;
         acceptedSubmissions = metrics.counter("sendium.sms.submissions", "ingress", "smpp", "result", "accepted");
         rejectedSubmissions = metrics.counter("sendium.sms.submissions", "ingress", "smpp", "result", "rejected");
     }
@@ -1234,6 +1237,10 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         outExecutor.execute(new OutTask<M>(this, event));
         if (event instanceof SubmitSmResp && acceptedSubmissions != null) {
             (event.getCommandStatus() == SmppConstants.STATUS_OK ? acceptedSubmissions : rejectedSubmissions).increment();
+            if (event.getCommandStatus() == SmppConstants.STATUS_OK && event.getReferenceObject() instanceof Object[] reference &&
+                    reference.length > 0 && reference[0] instanceof SmppServerSessionHandler<?> handler) {
+                AccountSubmissionMetrics.accepted(submissionMetrics, "smpp", handler.getAuthenticatedAccountId());
+            }
         }
     }
 

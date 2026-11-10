@@ -51,6 +51,41 @@ import static org.mockito.Mockito.when;
 @TestProfile(NativeMessageResourceIT.Profile.class)
 @QuarkusTestResource(value = NativeMessageResourceIT.Resource.class, restrictToAnnotatedClass = true)
 class NativeMessageResourceIT {
+    @Inject io.micrometer.core.instrument.MeterRegistry metrics;
+
+    @Test
+    void bothHttpApisAttributeAcceptedSubmissionsToTheAuthenticatedAccount() throws Exception {
+        String account = "metrics-shared-account";
+        double before = accountAdmissions(account);
+        TimeUnit.MILLISECONDS.sleep(250);
+        Files.writeString(Path.of(credentialsPath), "credentials:\n  - type: HTTP\n    apiKey: " + key +
+                "\n    accountId: " + account +
+                "\n  - type: HTTP\n    systemId: metrics-user\n    password: metrics-password\n    accountId: " + account +
+                "\n  - type: HTTP\n    systemId: metrics-second-user\n    password: second-password\n    accountId: " + account + "\n");
+        await(() -> credentials.getValidCredentials().containsKey("metrics-user"));
+        given().auth().oauth2(key).contentType("application/json")
+                .body("{\"from\":\"Brand\",\"to\":\"123\",\"text\":\"Hello\"}")
+                .post("/api/v1/messages").then().statusCode(202);
+        given().queryParam("username", "metrics-user").queryParam("password", "metrics-password")
+                .queryParam("account", "spoofed-owner").queryParam("from", "Brand").queryParam("to", "123")
+                .queryParam("text", "Hello").get("/sendsms").then().statusCode(202);
+        given().queryParam("username", "metrics-user").queryParam("password", "wrong")
+                .queryParam("from", "Brand").queryParam("to", "123").queryParam("text", "Hello")
+                .get("/sendsms").then().statusCode(401);
+        given().queryParam("username", "metrics-second-user").queryParam("password", "second-password")
+                .queryParam("from", "Brand").queryParam("to", "123").queryParam("text", "Hello")
+                .get("/sendsms").then().statusCode(202);
+        given().auth().oauth2(key).contentType("application/json").body("{}")
+                .post("/api/v1/messages").then().statusCode(400);
+        assertThat(accountAdmissions(account) - before).isEqualTo(3);
+        assertThat(accountAdmissions("spoofed-owner")).isZero();
+    }
+
+    private double accountAdmissions(String account) {
+        var counter = metrics.find("sendium.sms.account.submissions").tags("accountId", account, "ingress", "http").counter();
+        return counter == null ? 0 : counter.count();
+    }
+
     @Inject CredentialFileWatcher credentials;
     @Inject OutboundCoordinator<StandardMessage> coordinator;
     @Inject DlrService dlrs;

@@ -59,7 +59,7 @@ public class DlrStorageMetrics {
         register("sendium.storage.collection.available", "Whether a complete fresh receipt snapshot is available", ignored -> available(snapshot) ? 1 : 0);
         register("sendium.storage.collection.last.success.timestamp.seconds", "Unix timestamp of last complete receipt snapshot",
                 ignored -> snapshot.timestamp());
-        for (String state : new String[]{"waiting_provider", "pending_return", "failed_return"}) {
+        for (String state : new String[]{"waiting_provider", "pending_forward", "failed_forward"}) {
             ownedMeters.add(Gauge.builder("sendium.dlr.storage.messages", this, collector -> collector.occupancy(state))
                     .description("Complete receipt storage snapshot; NaN when unavailable")
                     .tags("backend", "postgresql", "state", state).register(metrics));
@@ -110,8 +110,8 @@ public class DlrStorageMetrics {
         }
         return switch (state) {
             case "waiting_provider" -> value.counts().waitingProvider();
-            case "pending_return" -> value.counts().pendingReturn();
-            case "failed_return" -> value.counts().failedReturn();
+            case "pending_forward" -> value.counts().pendingReturn();
+            case "failed_forward" -> value.counts().failedReturn();
             default -> throw new IllegalArgumentException("Unknown receipt metric state");
         };
     }

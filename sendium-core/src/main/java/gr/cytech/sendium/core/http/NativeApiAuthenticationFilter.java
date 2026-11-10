@@ -2,6 +2,7 @@ package gr.cytech.sendium.core.http;
 
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.auth.CredentialFileWatcher.CredentialType;
+import gr.cytech.sendium.core.AccountSubmissionMetrics;
 import io.vertx.core.http.HttpServerRequest;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -59,6 +60,7 @@ public class NativeApiAuthenticationFilter implements ContainerRequestFilter {
             return;
         }
         var principal = new NativeApiPrincipal(credential.accountId(), credential.product());
+        request.setProperty(AccountSubmissionMetrics.HTTP_ACCOUNT, credential.accountId());
         boolean secure = request.getSecurityContext().isSecure();
         request.setSecurityContext(new SecurityContext() {
             @Override

@@ -48,8 +48,8 @@ class DlrStorageMetricsTest {
         for (int scrape = 0; scrape < 10; scrape++) {
             assertThat(metadata("available")).isEqualTo(1);
             assertThat(occupancy("waiting_provider")).isEqualTo(12);
-            assertThat(occupancy("pending_return")).isEqualTo(3);
-            assertThat(occupancy("failed_return")).isEqualTo(1);
+            assertThat(occupancy("pending_forward")).isEqualTo(3);
+            assertThat(occupancy("failed_forward")).isEqualTo(1);
         }
         verifyNoInteractions(storage);
     }
@@ -60,7 +60,7 @@ class DlrStorageMetricsTest {
         collector.collect();
         assertThat(metadata("enabled")).isZero();
         assertThat(metadata("available")).isZero();
-        assertThat(occupancy("pending_return")).isNaN();
+        assertThat(occupancy("pending_forward")).isNaN();
         verifyNoInteractions(storage);
         // Clear meter identities before binding an independent collector to this test registry.
         registry.clear();
@@ -68,7 +68,7 @@ class DlrStorageMetricsTest {
         when(storage.readMetricSnapshot(anyInt(), any())).thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(0, 0, 0)));
         collector.collect();
         assertThat(metadata("available")).isEqualTo(1);
-        assertThat(occupancy("pending_return")).isZero();
+        assertThat(occupancy("pending_forward")).isZero();
     }
 
     @Test

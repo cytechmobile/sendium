@@ -8,6 +8,7 @@ import com.cloudhopper.smpp.pdu.EnquireLink;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.type.SmppProcessingException;
 import gr.cytech.sendium.core.AbstractOutWorker;
+import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.external.filter.FilterException;
@@ -32,6 +33,52 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class SmppSubmissionMetricsTest {
+    @Test
+    void acceptedResponsesUseAuthenticatedAccountAcrossSessionsAndWorkers() {
+        var other = new MetricsWorker();
+        try {
+            other.bindSubmissionMetrics(metrics);
+            for (var target : List.of(worker, other)) {
+                var context = mock(SmppSessionContext.class);
+                when(context.getAccountId()).thenReturn("shared-account");
+                var session = mock(SmppSession.class);
+                when(session.getConfiguration()).thenReturn(new SmppSessionConfiguration());
+                var handler = new SmppServerSessionHandler<>(target, 1L, session, context, mock(SubmitSmProcessor.class));
+                var response = new SubmitSm().createResponse();
+                response.setReferenceObject(new Object[]{handler, System.currentTimeMillis()});
+                target.enqueueOut(response);
+                var rejected = new SubmitSm().createResponse();
+                rejected.setCommandStatus(SmppConstants.STATUS_SUBMITFAIL);
+                rejected.setReferenceObject(response.getReferenceObject());
+                target.enqueueOut(rejected);
+            }
+            assertThat(metrics.get("sendium.sms.account.submissions").tags("accountId", "shared-account", "ingress", "smpp")
+                    .counter().count()).isEqualTo(2);
+            assertThat(count("accepted")).isEqualTo(2);
+            assertThat(count("rejected")).isEqualTo(2);
+        } finally {
+            other.messagePartsHandler.stop();
+        }
+    }
+
+    @Test
+    void configuredAccountIsUsedWithoutInventingOneFromLegacySystemId() {
+        for (String account : new String[]{"configured-account", null}) {
+            var credential = new CredentialFileWatcher.Credential(CredentialFileWatcher.CredentialType.SMPP,
+                    account, null, "legacy-system", "secret", null, null);
+            var context = new BasicSmppSessionContext(mock(SmppServerWorker.class), credential);
+            var session = mock(SmppSession.class);
+            when(session.getConfiguration()).thenReturn(new SmppSessionConfiguration());
+            var handler = new SmppServerSessionHandler<>(worker, 1L, session, context, mock(SubmitSmProcessor.class));
+            var response = new SubmitSm().createResponse();
+            response.setReferenceObject(new Object[]{handler, System.currentTimeMillis()});
+            worker.enqueueOut(response);
+        }
+        assertThat(metrics.get("sendium.sms.account.submissions").tag("accountId", "configured-account").counter().count()).isEqualTo(1);
+        assertThat(metrics.find("sendium.sms.account.submissions").tag("accountId", "legacy-system").counter()).isNull();
+        assertThat(count("accepted")).isEqualTo(2);
+    }
+
     private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
     private final MetricsWorker worker = new MetricsWorker();
 
@@ -53,6 +100,7 @@ class SmppSubmissionMetricsTest {
             worker.enqueueIn(event(null));
             assertThat(count("accepted")).isEqualTo(1);
             assertThat(count("rejected")).isEqualTo(1);
+            assertThat(metrics.get("sendium.sms.account.submissions").tag("accountId", "account").counter().count()).isEqualTo(1);
             assertThat(lifecycle.coordinator.selectToRouter(1)).isEqualTo(1);
             var selected = lifecycle.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             lifecycle.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
@@ -76,6 +124,7 @@ class SmppSubmissionMetricsTest {
             worker.handleIngressMessages(events);
             assertThat(count("accepted")).isEqualTo(3);
             assertThat(count("rejected")).isZero();
+            assertThat(metrics.get("sendium.sms.account.submissions").tag("accountId", "account").counter().count()).isEqualTo(3);
             assertThat(lifecycle.pending.sourcesAfter(null, 4)).hasSize(3);
             assertThat(lifecycle.coordinator.selectToRouter(3)).isEqualTo(1);
         }
@@ -164,10 +213,12 @@ class SmppSubmissionMetricsTest {
         var configuration = new SmppSessionConfiguration();
         configuration.setName("account");
         when(session.getConfiguration()).thenReturn(configuration);
-        return new SmppServerSessionHandler<>(worker, 1L, session, mock(SmppSessionContext.class), processor);
+        var context = mock(SmppSessionContext.class);
+        when(context.getAccountId()).thenReturn("account");
+        return new SmppServerSessionHandler<>(worker, 1L, session, context, processor);
     }
 
-    private static InEvent<StandardMessage> event(String udh) {
+    private InEvent<StandardMessage> event(String udh) {
         var message = new StandardMessage();
         message.owner_id = "account";
         message.systemId = "system";
@@ -175,7 +226,9 @@ class SmppSubmissionMetricsTest {
         message.to = "recipient";
         message.body = "part";
         message.binheader = udh;
-        return new InEvent<>(message, new SubmitSm(), 1, new Timestamp(System.currentTimeMillis()));
+        var request = new SubmitSm();
+        request.setReferenceObject(new Object[]{handler(mock(SubmitSmProcessor.class)), System.currentTimeMillis()});
+        return new InEvent<>(message, request, 1, new Timestamp(System.currentTimeMillis()));
     }
 
     private static final class MetricsWorker extends SmppServerWorker<StandardMessage> {

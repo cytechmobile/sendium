@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.http;
 import com.google.common.base.Strings;
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
+import gr.cytech.sendium.core.AccountSubmissionMetrics;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.openapi.annotations.Operation;
@@ -51,6 +53,9 @@ public class KannelResource {
 
     @Inject
     SendiumConfigurationHandler configurationHandler;
+
+    @Inject
+    ContainerRequestContext requestContext;
 
     @Operation(
             operationId = "sendSms",
@@ -116,7 +121,10 @@ public class KannelResource {
 
         String usr = Strings.isNullOrEmpty(user) ? username : user;
         String passwrd = Strings.isNullOrEmpty(pass) ? password : pass;
-        validateKannelAuth(usr, passwrd);
+        var credential = authenticateKannel(usr, passwrd);
+        if (requestContext != null && credential.accountId() != null) {
+            requestContext.setProperty(AccountSubmissionMetrics.HTTP_ACCOUNT, credential.accountId());
+        }
         int requestedMask;
         try {
             requestedMask = dlrMask == null ? 0 : Integer.parseInt(dlrMask);
@@ -270,6 +278,10 @@ public class KannelResource {
     }
 
     public void validateKannelAuth(String username, String password) {
+        authenticateKannel(username, password);
+    }
+
+    private CredentialFileWatcher.Credential authenticateKannel(String username, String password) {
         if (Strings.isNullOrEmpty(username) || Strings.isNullOrEmpty(password)) {
             throw new WebApplicationException(Response.status(Response.Status.UNAUTHORIZED)
                     .entity("Invalid credentials")
@@ -289,6 +301,7 @@ public class KannelResource {
                     .entity("Invalid credentials")
                     .build());
         }
+        return cred;
     }
 
     /**

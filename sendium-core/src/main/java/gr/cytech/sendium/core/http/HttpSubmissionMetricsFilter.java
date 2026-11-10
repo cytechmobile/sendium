@@ -1,5 +1,6 @@
 package gr.cytech.sendium.core.http;
 
+import gr.cytech.sendium.core.AccountSubmissionMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -30,5 +31,8 @@ public class HttpSubmissionMetricsFilter implements ContainerResponseFilter {
         request.setProperty(COUNTED, true);
         metrics.counter("sendium.sms.submissions", "ingress", "http",
                 "result", response.getStatus() == 202 ? "accepted" : "rejected").increment();
+        if (response.getStatus() == 202 && request.getProperty(AccountSubmissionMetrics.HTTP_ACCOUNT) instanceof String accountId) {
+            AccountSubmissionMetrics.accepted(metrics, "http", accountId);
+        }
     }
 }
