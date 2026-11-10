@@ -338,7 +338,7 @@ class FilePendingMultipartTest {
 
     private Path path(SourceId source) {
         String id = source.value().toString();
-        return root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+        return root.resolve("accepted/2").resolve(id.substring(0, 2)).resolve(id + ".cbor");
     }
 
     private static MultipartMembership accept(FilePendingMessageStore store, StandardMessage message) {

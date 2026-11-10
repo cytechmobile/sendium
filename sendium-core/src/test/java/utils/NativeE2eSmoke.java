@@ -267,7 +267,7 @@ public class NativeE2eSmoke {
     private static boolean sourceExists(String container, String gatewayId) throws Exception {
         UUID id = UUID.fromString(gatewayId);
         Process check = run(List.of("docker", "exec", container, "sh", "-c", "test -s \"$1\"", "sh",
-                "/work/spool/sources/" + id.toString().substring(0, 2) + "/" + id + ".cbor"), false);
+                "/work/spool/accepted/2/" + id.toString().substring(0, 2) + "/" + id + ".cbor"), false);
         require(check.waitFor(10, TimeUnit.SECONDS), "Timed out checking retained source");
         require(check.exitValue() == 0 || check.exitValue() == 1, "Cannot inspect retained spool");
         return check.exitValue() == 0;

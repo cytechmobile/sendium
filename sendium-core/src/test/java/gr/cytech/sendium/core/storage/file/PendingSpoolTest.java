@@ -68,7 +68,7 @@ class PendingSpoolTest {
     @Test
     void cleansOnlyRecognizedIncompleteFiles() throws Exception {
         initialize();
-        Path bucket = Files.createDirectory(root.resolve("sources/00"));
+        Path bucket = Files.createDirectory(root.resolve("accepted/2/00"));
         Files.write(root.resolve(".tmp-interrupted.part"), new byte[]{1});
         Files.write(bucket.resolve(".tmp-interrupted.part"), new byte[]{1});
         try (var spool = new PendingSpool(root)) {
@@ -117,7 +117,7 @@ class PendingSpoolTest {
         assertOpenFails();
         Files.write(path(record), new PendingRecordCodec().encode(record));
         String wrong = path(record).getParent().getFileName().toString().equals("00") ? "01" : "00";
-        Path wrongBucket = Files.createDirectories(root.resolve("sources").resolve(wrong));
+        Path wrongBucket = Files.createDirectories(root.resolve("accepted/2").resolve(wrong));
         Files.move(path(record), wrongBucket.resolve(path(record).getFileName()));
         assertOpenFails();
     }
@@ -188,7 +188,7 @@ class PendingSpoolTest {
     @Test
     void rejectsInvalidBucketWithoutRemovingItsContents() throws Exception {
         initialize();
-        Path bucket = Files.createDirectory(root.resolve("sources/zz"));
+        Path bucket = Files.createDirectory(root.resolve("accepted/2/zz"));
         Files.writeString(bucket.resolve("keep"), "content");
         assertOpenFails();
         assertThat(Files.readString(bucket.resolve("keep"))).isEqualTo("content");
@@ -226,7 +226,7 @@ class PendingSpoolTest {
 
     private Path path(PendingSourceRecord record) {
         String id = record.source().value().toString();
-        return root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+        return root.resolve("accepted").resolve(Integer.toString(record.message().priority())).resolve(id.substring(0, 2)).resolve(id + ".cbor");
     }
 
     private static PendingSourceRecord record(UUID id, String body) {

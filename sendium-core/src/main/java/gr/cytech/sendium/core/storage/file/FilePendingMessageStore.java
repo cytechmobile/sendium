@@ -19,6 +19,7 @@ import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.DateTimeException;
@@ -64,6 +65,11 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     private long retained;
     private Object selectorOwner;
     private long lastGroupOrder = -1;
+    private final Set<SourceId> activeSources = new HashSet<>();
+    private final int[] ordinaryWaiting = new int[4];
+    private final PendingSourceRecord[] reservedOrdinary = new PendingSourceRecord[4];
+    private int preparedWaiting;
+    private AcceptedSourceTraversal traversal;
 
     public FilePendingMessageStore(Path root, int capacity) {
         this(root, capacity, Clock.systemUTC());
@@ -105,21 +111,17 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             spool.open();
             retained = spool.recoveredSources();
             // Validate cross-record membership before exposing recovered sources to ingress/selection.
-            SourceId cursor = null;
-            while (true) {
-                List<SourceId> page = spool.sourcesAfter(cursor, 128);
-                if (page.isEmpty()) {
-                    break;
+            spool.forEachRecord(record -> {
+                MultipartMembership membership = record.multipart();
+                if (membership != null) {
+                    validateMembership(membership);
+                    lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
                 }
-                for (SourceId source : page) {
-                    MultipartMembership membership = spool.find(source).orElseThrow().multipart();
-                    if (membership != null) {
-                        validateMembership(membership);
-                        lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
-                    }
+                if (record.disposition() == PendingSourceRecord.Disposition.READY) {
+                    ordinaryWaiting[record.message().priority()]++;
                 }
-                cursor = page.getLast();
-            }
+            });
+            traversal = spool.traversal();
             state = State.READY;
             LOGGER.info("pendingRecovery|success|backend:file|retainedSources:{}|durationMs:{}", retained,
                     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
@@ -159,6 +161,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         if (spool.find(source).isPresent()) {
             return source;
         }
+        final int priority = PendingSpool.requirePriority(message.priority);
         checkCapacity(source);
         PendingSourceRecord record;
         try {
@@ -168,6 +171,14 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         }
         spool.publish(record);
         retained++;
+        if (disposition == PendingSourceRecord.Disposition.READY && ordinaryWaiting[priority]++ == 0) {
+            try {
+                traversal.restartPriority(priority);
+            } catch (IOException failure) {
+                state = State.FAILED;
+                throw new OutboundStorageException(PENDING, UNAVAILABLE, "pendingAdmission|error|reason:cursorRestartFailed", failure);
+            }
+        }
         return source;
     }
 
@@ -194,7 +205,28 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             requireReady();
             Set<SourceId> checked = Set.copyOf(sources);
             validateCompletion(checked);
+            int[] ordinaryRemoved = new int[4];
+            Set<UUID> preparedRemoved = new HashSet<>();
+            for (SourceId source : checked) {
+                if (!activeSources.contains(source)) {
+                    spool.find(source).ifPresent(record -> {
+                        if (record.disposition() == PendingSourceRecord.Disposition.READY) {
+                            ordinaryRemoved[record.message().priority()]++;
+                        } else {
+                            spool.publicationId(source).ifPresent(preparedRemoved::add);
+                        }
+                    });
+                }
+            }
             retained -= spool.completeSources(checked);
+            activeSources.removeAll(checked);
+            preparedWaiting -= preparedRemoved.size();
+            for (int priority = 1; priority <= 3; priority++) {
+                ordinaryWaiting[priority] -= ordinaryRemoved[priority];
+                if (reservedOrdinary[priority] != null && checked.contains(reservedOrdinary[priority].source())) {
+                    reservedOrdinary[priority] = null;
+                }
+            }
             return null;
         });
     }
@@ -473,6 +505,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     private void publishHeld(Set<SourceId> sources, StandardMessage message) {
         var checked = new HashSet<>(Set.copyOf(sources));
         Objects.requireNonNull(message, "message");
+        PendingSpool.requirePriority(message.priority);
         if (checked.isEmpty()) {
             throw new IllegalArgumentException("pendingPublication|error|reason:emptySources");
         }
@@ -539,6 +572,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         if (assigned != null) {
             spool.closeGroup(assigned);
         }
+        preparedWaiting++;
         changed.signalAll();
     }
 
@@ -570,6 +604,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                     spool.close();
                 } finally {
                     state = State.CLOSED;
+                    activeSources.clear();
                     changed.signalAll();
                 }
             }
@@ -601,38 +636,70 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     @Override
     public boolean stageNext(Instant now, Consumer<Selected<StandardMessage>> publication) {
         requireReady(Role.ROUTER_QUEUE);
-        List<SourceId> candidates = spool.readyCandidates(1);
-        if (candidates.isEmpty()) {
+        int ordinaryPriority = 3;
+        while (ordinaryPriority > 0 && ordinaryWaiting[ordinaryPriority] == 0) {
+            ordinaryPriority--;
+        }
+        Publication prepared = null;
+        if (preparedWaiting > 0) {
+            List<SourceId> candidates = spool.readyCandidates(1);
+            if (candidates.isEmpty()) {
+                throw unsafeSelection("missingPreparedReference");
+            }
+            prepared = spool.findPublication(candidates.getFirst()).orElseThrow(() -> unsafeSelection("missingPublication"));
+        }
+        if (prepared != null && prepared.message().priority() >= ordinaryPriority) {
+            StandardMessage message = prepared.message().restore();
+            int priority = message.priority;
+            publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), prepared.sources(), message));
+            spool.removeReady(prepared.representative(), priority);
+            activeSources.addAll(prepared.sources());
+            preparedWaiting--;
+            return true;
+        }
+        if (ordinaryPriority == 0) {
             return false;
         }
-        SourceId source = candidates.getFirst();
-        Optional<PendingSourceRecord> found = spool.find(source);
-        if (found.isEmpty()) {
-            state = State.FAILED;
-            throw new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE,
-                    "pendingSelection|error|sourceId:" + source.value() + "|reason:missingSource");
-        }
-        PendingSourceRecord record = found.orElseThrow();
-        StandardMessage message;
-        Set<SourceId> sources;
-        if (record.disposition() == PendingSourceRecord.Disposition.HELD) {
-            Optional<Publication> binding = spool.findPublication(source);
-            if (binding.isEmpty()) {
-                state = State.FAILED;
-                throw new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE,
-                        "pendingSelection|error|sourceId:" + source.value() + "|reason:missingPublication");
+        PendingSourceRecord record = reservedOrdinary[ordinaryPriority];
+        try {
+            if (record == null) {
+                // Bound both empty probes and held/active entries; no whole-backlog payload cache.
+                int remaining = 1024;
+                while (remaining > 0 && record == null) {
+                    var page = traversal.pollPriority(ordinaryPriority, 1, remaining, source -> !activeSources.contains(source));
+                    remaining -= page.steps();
+                    for (var candidate : page.candidates()) {
+                        Optional<PendingSourceRecord> found = spool.findCandidate(candidate);
+                        if (found.isPresent() && found.orElseThrow().disposition() == PendingSourceRecord.Disposition.READY) {
+                            record = found.orElseThrow();
+                        }
+                    }
+                    if (page.roundComplete() || page.steps() == 0) {
+                        break;
+                    }
+                }
+                if (record == null) {
+                    return false;
+                }
+                reservedOrdinary[ordinaryPriority] = record;
             }
-            Publication work = binding.orElseThrow();
-            message = work.message().restore();
-            sources = work.sources();
-        } else {
-            message = record.message().restore();
-            sources = Set.of(source);
+        } catch (IOException | RuntimeException failure) {
+            throw unsafeSelection("acceptedTraversalFailed", failure);
         }
-        int priority = message.priority;
-        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), sources, message));
-        spool.removeReady(source, priority);
+        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), Set.of(record.source()), record.message().restore()));
+        activeSources.add(record.source());
+        ordinaryWaiting[ordinaryPriority]--;
+        reservedOrdinary[ordinaryPriority] = null;
         return true;
+    }
+
+    private OutboundStorageException unsafeSelection(String reason) {
+        return unsafeSelection(reason, null);
+    }
+
+    private OutboundStorageException unsafeSelection(String reason, Throwable cause) {
+        state = State.FAILED;
+        return new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE, "pendingSelection|error|reason:" + reason, cause);
     }
 
     @Override

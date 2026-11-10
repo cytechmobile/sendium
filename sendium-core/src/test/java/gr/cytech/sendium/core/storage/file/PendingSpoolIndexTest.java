@@ -6,11 +6,14 @@ import gr.cytech.sendium.core.storage.pending.PendingMessageData;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -21,14 +24,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PendingSpoolIndexTest {
-    @TempDir
-    Path root;
+    @TempDir Path root;
 
     @Test
-    void pagesInJavaUuidOrderIncludingBothSignedLongBoundaries() {
+    void pagesInJavaUuidOrderAcrossPrioritiesIncludingBothSignedLongBoundaries() {
         var ids = new ArrayList<SourceId>();
         var random = new Random(339);
-        for (int i = 0; i < 300; i++) {
+        for (int i = 0; i < 140; i++) {
             ids.add(new SourceId(new UUID(random.nextLong(), random.nextLong())));
         }
         for (long most : new long[]{Long.MIN_VALUE, -1, 0, Long.MAX_VALUE}) {
@@ -38,8 +40,8 @@ class PendingSpoolIndexTest {
         }
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            for (SourceId id : ids) {
-                spool.publish(record(id, 0, READY));
+            for (int i = 0; i < ids.size(); i++) {
+                spool.publish(record(ids.get(i), i % 3 + 1, READY));
             }
             assertPages(spool, ids);
         }
@@ -51,57 +53,52 @@ class PendingSpoolIndexTest {
     }
 
     @Test
-    void selectsHighestSignedPriorityAndExcludesHeldSources() {
-        var records = new ArrayList<PendingSourceRecord>();
+    void directTraversalStreamsLargeBucketWithoutOrdinaryDiskReferences() throws Exception {
+        var expected = new HashSet<SourceId>();
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            for (int priority : new int[]{0, Integer.MIN_VALUE, -1, Integer.MAX_VALUE, 1}) {
-                PendingSourceRecord record = record(new SourceId(UUID.randomUUID()), priority, READY);
-                records.add(record);
-                spool.publish(record);
+            for (int i = 0; i < 140; i++) {
+                SourceId source = new SourceId(new UUID(0, i));
+                expected.add(source);
+                spool.publish(record(source, 2, READY));
             }
-            spool.publish(record(new SourceId(UUID.randomUUID()), Integer.MAX_VALUE, HELD));
-            List<SourceId> expected = records.stream()
-                    .sorted(Comparator.comparingInt((PendingSourceRecord r) -> r.message().restore().priority).reversed())
-                    .map(PendingSourceRecord::source).toList();
-            assertThat(spool.readyCandidates(2)).containsExactlyElementsOf(expected.subList(0, 2));
-            assertThat(spool.readyCandidates(20)).containsExactlyElementsOf(expected);
-            for (PendingSourceRecord record : records) {
-                spool.removeReady(record.source(), record.message().restore().priority);
+            var active = new HashSet<SourceId>();
+            boolean complete = false;
+            while (!complete) {
+                var page = spool.traversal().pollPriority(2, 9, 32, source -> !active.contains(source));
+                for (var candidate : page.candidates()) {
+                    assertThat(active.add(candidate.source())).isTrue();
+                }
+                complete = page.roundComplete();
             }
-            assertThat(spool.readyCandidates(20)).isEmpty();
-            assertThat(spool.sourcesAfter(null, 20)).hasSize(6);
-            // Idempotent admission must not requeue a source already selected in this process.
-            spool.publish(records.getFirst());
-            assertThat(spool.readyCandidates(1)).isEmpty();
-        }
-        try (var spool = new PendingSpool(root)) {
-            spool.open();
-            assertThat(spool.readyCandidates(20)).hasSize(5);
+            assertThat(active).containsExactlyInAnyOrderElementsOf(expected);
+            assertThat(spool.sourcesAfter(null, 200)).hasSize(140);
+            assertThat(spool.readyCandidates(1)).isEmpty(); // Reserved for prepared multipart work only.
+            assertThat(root.resolve("derived/sources")).doesNotExist();
+            assertThat(root.resolve("derived/priorities")).doesNotExist();
+            assertThat(root.resolve("derived/ready")).doesNotExist();
+            try (var files = Files.walk(root.resolve("derived"))) {
+                assertThat(files.filter(Files::isRegularFile).toList()).isEmpty();
+            }
         }
     }
 
     @Test
-    void refillsWithoutReadingSourcePayloadsAndObservesNewHigherPriorityWork() throws Exception {
+    void candidateTraversalAndAdministrativePagingDoNotReadPayloads() throws Exception {
+        SourceId source = new SourceId(UUID.randomUUID());
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            var low = record(new SourceId(UUID.randomUUID()), 1, READY);
-            spool.publish(low);
-            String id = low.source().value().toString();
-            // Proves candidate traversal uses references, not repeated payload scans.
-            Files.write(root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor"), new byte[0]);
-            assertThat(spool.readyCandidates(1)).containsExactly(low.source());
-            var high = record(new SourceId(UUID.randomUUID()), 10, READY);
-            spool.publish(high);
-            assertThat(spool.readyCandidates(1)).containsExactly(high.source());
-            spool.removeReady(high.source(), 10);
-            assertThat(spool.readyCandidates(1)).containsExactly(low.source());
+            spool.publish(record(source, 1, READY));
+            Files.write(path(1, source), new byte[0]);
+            assertThat(spool.sourcesAfter(null, 10)).containsExactly(source);
+            assertThat(spool.traversal().pollPriority(1, 1, 1024, candidate -> true).candidates())
+                    .extracting(AcceptedSourceTraversal.Candidate::source).containsExactly(source);
         }
         assertThatThrownBy(() -> new PendingSpool(root).open()).hasMessageContaining("invalidCommittedRecord");
     }
 
     @Test
-    void rebuildsDiscardedOrInterruptedDerivedStateWithoutLosingSources() throws Exception {
+    void rebuildsDiscardedDerivedStateWithoutLosingAcceptedSources() throws Exception {
         SourceId source = new SourceId(UUID.randomUUID());
         try (var spool = new PendingSpool(root)) {
             spool.open();
@@ -113,77 +110,108 @@ class PendingSpoolIndexTest {
         try (var spool = new PendingSpool(root)) {
             spool.open();
             assertThat(spool.sourcesAfter(null, 10)).containsExactly(source);
-            assertThat(spool.readyCandidates(10)).containsExactly(source);
-            assertThat(Files.exists(root.resolve("derived/interrupted"))).isFalse();
+            assertThat(spool.find(source)).isPresent();
+            assertThat(root.resolve("derived/interrupted")).doesNotExist();
         }
     }
 
     @Test
-    void drainsSplitLeavesWithoutDuplicateCandidatesOrSourceRemoval() {
-        var remaining = new ArrayList<SourceId>();
+    void lookupAndIdempotentAdmissionFindSourcesAcrossAllThreePriorities() {
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            for (int i = 0; i < 140; i++) {
-                SourceId source = new SourceId(new UUID(0, i));
-                remaining.add(source);
-                spool.publish(record(source, 1, READY));
-            }
-            while (!remaining.isEmpty()) {
-                List<SourceId> batch = spool.readyCandidates(9);
-                assertThat(batch).isNotEmpty().hasSizeLessThanOrEqualTo(9);
-                for (SourceId source : batch) {
-                    assertThat(remaining.remove(source)).isTrue();
-                    spool.removeReady(source, 1);
-                }
-            }
-            assertThat(spool.readyCandidates(1)).isEmpty();
-            assertThat(spool.sourcesAfter(null, 200)).hasSize(140);
-        }
-    }
-
-    @Test
-    void traversesMoreDistinctPrioritiesThanALeafCanHold() {
-        var expected = new ArrayList<SourceId>();
-        try (var spool = new PendingSpool(root)) {
-            spool.open();
-            for (int priority = -70; priority < 70; priority++) {
+            for (int priority : new int[]{3, 2, 1}) {
                 SourceId source = new SourceId(UUID.randomUUID());
-                expected.addFirst(source);
-                spool.publish(record(source, priority, READY));
+                spool.publish(record(source, priority, HELD));
+                assertThat(spool.find(source).orElseThrow().message().priority()).isEqualTo(priority);
+                assertThat(spool.publish(record(source, priority % 3 + 1, READY)).disposition()).isEqualTo(HELD);
             }
-            assertThat(spool.readyCandidates(150)).containsExactlyElementsOf(expected);
+            assertThat(spool.sourcesAfter(null, 10)).hasSize(3);
         }
     }
 
-    @Test
-    void interruptedIndexUpdateRetainsCommittedSourceAndFailsClosed() throws Exception {
+    @ParameterizedTest
+    @ValueSource(ints = {Integer.MIN_VALUE, -1, 0, 4, Integer.MAX_VALUE})
+    void unsupportedPriorityDoesNotCommitOrInvalidateSpool(int priority) {
         SourceId source = new SourceId(UUID.randomUUID());
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            Files.delete(root.resolve("derived/sources"));
-            Files.writeString(root.resolve("derived/sources"), "broken index");
-            assertThatThrownBy(() -> spool.publish(record(source, 2, READY)))
-                    .hasMessageContaining("reason:publicationFailed");
-            assertThatThrownBy(() -> spool.sourcesAfter(null, 1)).hasMessageContaining("reason:notReady");
-            String id = source.value().toString();
-            assertThat(Files.exists(root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor"))).isTrue();
+            assertThatThrownBy(() -> spool.publish(record(source, priority, READY))).hasMessageContaining("unsupportedPriority");
+            assertThat(spool.find(source)).isEmpty();
+            spool.publish(record(source, 2, READY));
+            assertThat(spool.find(source)).isPresent();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void oldFormatIsRejectedBeforeCleaningOrRebuildingItsFiles(boolean marker) throws Exception {
+        if (marker) {
+            Files.writeString(root.resolve("format"), "sendium-pending-spool:1\n");
+        }
+        Files.createDirectories(root.resolve("sources/00"));
+        Path source = root.resolve("sources/00/00000000-0000-0000-0000-000000000001.cbor");
+        Files.writeString(source, "old accepted payload");
+        Path temporary = root.resolve(".tmp-interrupted.part");
+        Files.writeString(temporary, "old temporary payload");
+        Files.createDirectory(root.resolve("derived"));
+        Files.writeString(root.resolve("derived/retained"), "old reference");
+        assertThatThrownBy(() -> new PendingSpool(root).open()).hasMessageContaining("unsupportedSpoolFormat");
+        if (marker) {
+            assertThat(Files.readString(root.resolve("format"))).isEqualTo("sendium-pending-spool:1\n");
+        } else {
+            assertThat(root.resolve("format")).doesNotExist();
+        }
+        assertThat(Files.readString(source)).isEqualTo("old accepted payload");
+        assertThat(Files.readString(temporary)).isEqualTo("old temporary payload");
+        assertThat(Files.readString(root.resolve("derived/retained"))).isEqualTo("old reference");
+        assertThat(root.resolve("accepted")).doesNotExist();
+    }
+
+    @Test
+    void duplicateUuidAcrossPrioritiesFailsLookupAndRecoveryWithoutRemovingEitherFile() throws Exception {
+        SourceId source = new SourceId(UUID.randomUUID());
+        try (var spool = new PendingSpool(root)) {
+            spool.open();
+            spool.publish(record(source, 2, READY));
+            Files.createDirectories(path(3, source).getParent());
+            Files.copy(path(2, source), path(3, source));
+            assertThatThrownBy(() -> spool.find(source)).hasMessageContaining("duplicateSource");
+            assertThat(spool.isReady()).isFalse();
+        }
+        assertThatThrownBy(() -> new PendingSpool(root).open()).isInstanceOf(gr.cytech.sendium.core.storage.OutboundStorageException.class);
+        assertThat(path(2, source)).isRegularFile();
+        assertThat(path(3, source)).isRegularFile();
+    }
+
+    @Test
+    void missingPriorityAndMalformedEntriesInvalidateAdministrativePaging() throws Exception {
+        try (var spool = new PendingSpool(root)) {
+            spool.open();
+            Files.delete(root.resolve("accepted/3"));
+            assertThatThrownBy(() -> spool.sourcesAfter(null, 1)).isInstanceOf(gr.cytech.sendium.core.storage.OutboundStorageException.class);
+            assertThat(spool.isReady()).isFalse();
         }
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            assertThat(spool.sourcesAfter(null, 1)).containsExactly(source);
-            assertThat(spool.readyCandidates(1)).containsExactly(source);
+            Files.createDirectory(root.resolve("accepted/2/zz"));
+            assertThatThrownBy(() -> spool.sourcesAfter(null, 1)).hasMessageContaining("invalidSourceBucket");
+            assertThat(spool.isReady()).isFalse();
         }
     }
 
     @Test
-    void missingReadyDirectoryFailsClosedInsteadOfReturningFalseAbsence() throws Exception {
+    void missingPreparedReadyDirectoryFailsClosed() throws Exception {
         try (var spool = new PendingSpool(root)) {
             spool.open();
-            spool.publish(record(new SourceId(UUID.randomUUID()), 2, READY));
-            FolderPendingIndex.discard(root.resolve("derived/ready/2"));
+            FolderPendingIndex.discard(root.resolve("derived/multipart/ready/2"));
             assertThatThrownBy(() -> spool.readyCandidates(1)).hasMessageContaining("reason:readyPageFailed");
             assertThatThrownBy(() -> spool.sourcesAfter(null, 1)).hasMessageContaining("reason:notReady");
         }
+    }
+
+    private Path path(int priority, SourceId source) {
+        String id = source.value().toString();
+        return root.resolve("accepted").resolve(Integer.toString(priority)).resolve(id.substring(0, 2)).resolve(id + ".cbor");
     }
 
     private static void assertPages(PendingSpool spool, List<SourceId> ids) {

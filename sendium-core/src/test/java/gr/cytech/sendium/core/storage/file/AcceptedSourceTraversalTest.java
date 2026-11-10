@@ -199,6 +199,41 @@ class AcceptedSourceTraversalTest {
         assertThatThrownBy(() -> traversal.poll(1, 16, source -> true)).hasMessageContaining("invalidPollState");
     }
 
+    @Test
+    void restrictedPollingBudgetsOnlyTheRequestedPriorityAndResumesAcrossPages() throws Exception {
+        publish(3, 0, 1);
+        SourceId wanted = publish(2, 255, 2);
+        publish(1, 0, 3);
+        Set<SourceId> active = new HashSet<>();
+        try (var traversal = new AcceptedSourceTraversal(accepted)) {
+            boolean complete = false;
+            int steps = 0;
+            for (int polls = 0; polls < 100 && !complete; polls++) {
+                var page = traversal.pollPriority(2, 1, 7, source -> !active.contains(source));
+                steps += page.steps();
+                page.candidates().forEach(candidate -> active.add(candidate.source()));
+                complete = page.roundComplete();
+            }
+            assertThat(complete).isTrue();
+            assertThat(active).containsExactly(wanted);
+            assertThat(steps).isEqualTo(257);
+        }
+    }
+
+    @Test
+    void restartingAnIdlePriorityDiscoversAdmissionsBehindItsCursor() throws Exception {
+        publish(2, 255, 1);
+        try (var traversal = new AcceptedSourceTraversal(accepted)) {
+            assertThat(traversal.pollPriority(2, 1, 1024, source -> true).candidates()).hasSize(1);
+            SourceId later = publish(2, 0, 2);
+            traversal.restartPriority(2);
+            assertThat(traversal.pollPriority(2, 1, 2, source -> true).candidates())
+                    .extracting(AcceptedSourceTraversal.Candidate::source).containsExactly(later);
+            assertThatThrownBy(() -> traversal.pollPriority(4, 1, 1, source -> true)).hasMessageContaining("unsupportedPriority");
+            assertThatThrownBy(() -> traversal.restartPriority(0)).hasMessageContaining("invalidRestartState");
+        }
+    }
+
     private SourceId publish(int priority, int bucket, long number) throws IOException {
         UUID id = UUID.fromString("%02x000000-0000-4000-8000-%012x".formatted(bucket, number));
         SourceId source = new SourceId(id);

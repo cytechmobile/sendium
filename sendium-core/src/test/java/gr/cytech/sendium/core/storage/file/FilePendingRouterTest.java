@@ -36,8 +36,8 @@ class FilePendingRouterTest {
         try (var pending = pending(); var router = new MemorySelectedRouterStore<>(pending, 1)) {
             pending.open();
             router.open();
-            pending.admit(source(1), message(source(1), "first", 1));
-            pending.admit(source(2), message(source(2), "second", 0));
+            pending.admit(source(1), message(source(1), "first", 2));
+            pending.admit(source(2), message(source(2), "second", 1));
             assertThat(router.selectToRouter(10)).isEqualTo(1);
             Selected<StandardMessage> selected = router.take(Duration.ZERO).orElseThrow();
             assertThat(selected.sources()).containsExactly(source(1));
@@ -65,7 +65,7 @@ class FilePendingRouterTest {
         try (var pending = pending(); var router = new MemorySelectedRouterStore<>(pending, 1)) {
             pending.open();
             router.open();
-            pending.admit(source(1), message(source(1), "accepted", 0));
+            pending.admit(source(1), message(source(1), "accepted", 2));
             router.selectToRouter(1);
             var selected = router.take(Duration.ZERO).orElseThrow();
             selected.message().body = "execution mutation";
@@ -89,7 +89,7 @@ class FilePendingRouterTest {
         try (var pending = pending(); var router = new MemorySelectedRouterStore<>(pending, 1)) {
             pending.open();
             router.open();
-            pending.admit(source(1), message(source(1), "accepted", 0));
+            pending.admit(source(1), message(source(1), "accepted", 2));
             router.selectToRouter(1);
             var selected = router.take(Duration.ZERO).orElseThrow();
             previous = selected.id();
@@ -119,7 +119,7 @@ class FilePendingRouterTest {
             router.open();
             assertThatThrownBy(other::open).isInstanceOfSatisfying(OutboundStorageException.class,
                     failure -> assertThat(failure.reason()).isEqualTo(OWNERSHIP_CONFLICT));
-            pending.admitHeld(source(1), message(source(1), "held", 100));
+            pending.admitHeld(source(1), message(source(1), "held", 3));
             assertThat(router.selectToRouter(1)).isZero();
             router.close();
             assertThat(pending.find(source(1))).isPresent();
@@ -130,7 +130,7 @@ class FilePendingRouterTest {
     void failedHandoffLeavesSourceEligibleAndAcceptedContentUntouched() {
         try (var pending = pending()) {
             pending.open();
-            pending.admit(source(1), message(source(1), "accepted", 0));
+            pending.admit(source(1), message(source(1), "accepted", 2));
             pending.selectionLock().lock();
             try {
                 assertThatThrownBy(() -> pending.stageNext(Instant.now(), selected -> {
@@ -148,24 +148,23 @@ class FilePendingRouterTest {
     }
 
     @Test
-    void unsafeIndexRemovalAfterPublicationFailsClosedAndRecoversSource() throws Exception {
+    void ordinarySelectionNeedsNoDiskReadyReferencesAndRecoversSource() throws Exception {
         try (var pending = pending()) {
             pending.open();
-            pending.admit(source(1), message(source(1), "accepted", 0));
+            pending.admit(source(1), message(source(1), "accepted", 2));
             pending.selectionLock().lock();
             try {
                 var captured = new ArrayList<Selected<StandardMessage>>();
-                assertThatThrownBy(() -> pending.stageNext(Instant.now(), selected -> {
-                    captured.add(selected);
-                    try {
-                        FolderPendingIndex.discard(root.resolve("derived/ready/0"));
-                        Files.writeString(root.resolve("derived/ready/0"), "broken reference tree");
-                    } catch (java.io.IOException failure) {
-                        throw new IllegalStateException(failure);
-                    }
-                })).isInstanceOf(OutboundStorageException.class);
+                assertThat(pending.stageNext(Instant.now(), captured::add)).isTrue();
                 assertThat(captured).hasSize(1);
-                assertThat(pending.status().state()).isEqualTo(OutboundStage.State.FAILED);
+                assertThat(root.resolve("derived/ready")).doesNotExist();
+                assertThat(root.resolve("derived/sources")).doesNotExist();
+                assertThat(root.resolve("derived/priorities")).doesNotExist();
+                try (var files = Files.walk(root.resolve("derived"))) {
+                    assertThat(files.filter(Files::isRegularFile).toList()).isEmpty();
+                }
+                assertThat(pending.stageNext(Instant.now(), captured::add)).isFalse();
+                assertThat(pending.status().state()).isEqualTo(OutboundStage.State.READY);
             } finally {
                 pending.selectionLock().unlock();
             }

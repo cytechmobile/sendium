@@ -241,7 +241,10 @@ class PendingTerminalRecoveryTest {
         try (var store = store()) {
             store.open();
         }
-        Files.delete(root.resolve("sources"));
+        for (int priority : new int[]{3, 2, 1}) {
+            Files.delete(root.resolve("accepted").resolve(Integer.toString(priority)));
+        }
+        Files.delete(root.resolve("accepted"));
         Files.delete(root.resolve("format"));
         assertThatThrownBy(() -> store().open()).hasMessageContaining("reason:missingFormatMarker");
         assertThat(Files.exists(root.resolve("format"))).isFalse();
@@ -263,7 +266,7 @@ class PendingTerminalRecoveryTest {
 
     private Path sourcePath(SourceId source) {
         String id = source.value().toString();
-        return root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+        return root.resolve("accepted/2").resolve(id.substring(0, 2)).resolve(id + ".cbor");
     }
 
     private Path intentPath(Intent intent) {

@@ -17,7 +17,7 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
- * Passive reader for the proposed accepted/3, /2, /1 layout; not yet wired into the pending store.
+ * Bounded reader for the accepted/3, /2, /1 layout.
  * The owner must serialize traversal, admission, deletion and active-source reservations with its lock.
  * Retains at most three directory streams and one bounded result page, never a whole-spool ID set.
  */
@@ -38,6 +38,28 @@ final class AcceptedSourceTraversal implements AutoCloseable {
      * The caller reserves returned IDs before another poll so retained active work is not selected twice.
      */
     Page poll(int limit, int scanBudget, Predicate<SourceId> eligible) throws IOException {
+        return scan(limit, scanBudget, eligible, 0);
+    }
+
+    /** Fixed runtime ready counts let the owner avoid probing known-empty priorities. */
+    Page pollPriority(int priority, int limit, int scanBudget, Predicate<SourceId> eligible) throws IOException {
+        if (priority < 1 || priority > 3) {
+            throw new IllegalArgumentException("acceptedTraversal|error|reason:unsupportedPriority");
+        }
+        nextPriority = 3 - priority;
+        return scan(limit, scanBudget, eligible, priority);
+    }
+
+    void restartPriority(int priority) throws IOException {
+        if (closed || priority < 1 || priority > 3) {
+            throw new IllegalStateException("acceptedTraversal|error|reason:invalidRestartState");
+        }
+        BucketCursor cursor = priorities[3 - priority];
+        cursor.finishBucket();
+        cursor.bucket = 0;
+    }
+
+    private Page scan(int limit, int scanBudget, Predicate<SourceId> eligible, int priority) throws IOException {
         if (closed || limit <= 0 || scanBudget <= 0) {
             throw new IllegalStateException("acceptedTraversal|error|reason:invalidPollState");
         }
@@ -48,6 +70,14 @@ final class AcceptedSourceTraversal implements AutoCloseable {
         try {
             while (steps < scanBudget && found.size() < limit) {
                 BucketCursor cursor = priorities[nextPriority];
+                if (priority != 0 && cursor.priority != priority) {
+                    if (++nextPriority == priorities.length) {
+                        nextPriority = 0;
+                        complete = true;
+                        break;
+                    }
+                    continue;
+                }
                 if (cursor.stream == null) {
                     if (cursor.bucket == 256) {
                         cursor.bucket = 0;

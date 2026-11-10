@@ -216,8 +216,8 @@ class FileHeldPublicationTest {
             store.open();
             router.open();
             store.admitHeld(source(message), message);
-            Files.delete(root.resolve("derived/priorities"));
-            Files.writeString(root.resolve("derived/priorities"), "broken index");
+            Files.delete(root.resolve("derived/multipart/ready/2"));
+            Files.writeString(root.resolve("derived/multipart/ready/2"), "broken index");
             assertThatThrownBy(() -> store.makeHeldReady(Set.of(source(message)), message))
                     .hasMessageContaining("reason:bindingPublicationFailed");
             assertThat(store.status().state()).isEqualTo(OutboundStage.State.FAILED);

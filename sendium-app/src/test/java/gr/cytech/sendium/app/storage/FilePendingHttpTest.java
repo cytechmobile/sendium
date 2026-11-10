@@ -62,7 +62,7 @@ class FilePendingHttpTest {
             var response = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertThat(response.statusCode()).isEqualTo(202);
             var source = Path.of(config.getValue(MessageStorageProfile.PENDING_PATH, String.class))
-                    .resolve("sources").resolve(response.body().substring(0, 2)).resolve(response.body() + ".cbor");
+                    .resolve("accepted/2").resolve(response.body().substring(0, 2)).resolve(response.body() + ".cbor");
             assertThat(source).isRegularFile();
             assertThat(Files.size(source)).isPositive();
             assertThat(providers.submitted.await(5, TimeUnit.SECONDS)).isTrue();

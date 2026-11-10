@@ -16,15 +16,20 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.OWNERSHIP_CONFLICT;
@@ -36,7 +41,7 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * Callers must finish recovery/indexing before admission. No host/power-loss durability is claimed.
  */
 public final class PendingSpool implements AutoCloseable {
-    private static final String FORMAT = "sendium-pending-spool:1\n";
+    private static final String FORMAT = "sendium-pending-spool:2\n";
     private final Path root;
     private final PendingRecordCodec codec = new PendingRecordCodec();
     private FileChannel owner;
@@ -47,6 +52,7 @@ public final class PendingSpool implements AutoCloseable {
     private FolderPendingIndex index;
     private HeldPendingPublications publications;
     private PendingTerminalJournal terminal;
+    private AcceptedSourceTraversal acceptedTraversal;
 
     public PendingSpool(Path root) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
@@ -267,15 +273,70 @@ public final class PendingSpool implements AutoCloseable {
 
     public synchronized List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
         requireReady();
+        if (limit <= 0) {
+            throw new IllegalArgumentException("pendingSourcePage|error|reason:nonPositiveLimit");
+        }
         try {
-            return index.sourcesAfter(afterExclusive, limit);
-        } catch (IOException failure) {
+            // Administrative ordered paging: bounded IDs, no duplicate disk index or payload reads.
+            Comparator<SourceId> order = Comparator.comparing(SourceId::value);
+            var page = new PriorityQueue<SourceId>(Math.min(limit, 128), order.reversed());
+            visitAccepted(path -> {
+                SourceId source = sourceName(path.getFileName().toString());
+                if (afterExclusive == null || order.compare(source, afterExclusive) > 0) {
+                    if (page.size() < limit) {
+                        page.add(source);
+                    } else if (order.compare(source, page.element()) < 0) {
+                        page.remove();
+                        page.add(source);
+                    }
+                }
+            });
+            return page.stream().sorted(order).toList();
+        } catch (IOException | RuntimeException failure) {
             ready = false;
+            if (failure instanceof OutboundStorageException storage) {
+                throw storage;
+            }
             throw unavailable("pendingIndexTraversal|error|reason:sourcePageFailed", failure);
         }
     }
 
-    // Selection integration follows in the pending-store task; callers must retain the owner lock.
+    synchronized void forEachRecord(Consumer<PendingSourceRecord> action) {
+        requireReady();
+        try {
+            visitAccepted(path -> action.accept(read(path, sourceName(path.getFileName().toString()))));
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            if (failure instanceof OutboundStorageException storage) {
+                throw storage;
+            }
+            throw unavailable("pendingRecovery|error|reason:sourceTraversalFailed", failure);
+        }
+    }
+
+    synchronized AcceptedSourceTraversal traversal() {
+        requireReady();
+        if (acceptedTraversal == null) {
+            acceptedTraversal = new AcceptedSourceTraversal(root.resolve("accepted"));
+        }
+        return acceptedTraversal;
+    }
+
+    synchronized Optional<PendingSourceRecord> findCandidate(AcceptedSourceTraversal.Candidate candidate) {
+        requireReady();
+        Path path = acceptedPath(candidate.priority(), candidate.source());
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(read(path, candidate.source()));
+        } catch (RuntimeException failure) {
+            ready = false;
+            throw failure;
+        }
+    }
+
+    // Prepared multipart work only; callers must retain the owner lock.
     synchronized List<SourceId> readyCandidates(int limit) {
         requireReady();
         try {
@@ -300,7 +361,11 @@ public final class PendingSpool implements AutoCloseable {
     public synchronized PendingSourceRecord publish(PendingSourceRecord record) {
         requireReady();
         byte[] encoded = codec.encode(Objects.requireNonNull(record, "record"));
-        Path target = sourcePath(record.source());
+        Optional<PendingSourceRecord> retained = find(record.source());
+        if (retained.isPresent()) {
+            return retained.orElseThrow();
+        }
+        Path target = acceptedPath(requirePriority(record.message().priority()), record.source());
         try {
             Files.createDirectories(target.getParent());
             requireDirectory(target.getParent());
@@ -319,21 +384,33 @@ public final class PendingSpool implements AutoCloseable {
     }
 
     private void validateLayout() throws IOException {
+        // Reject an old format before cleaning or rebuilding any of its data.
+        Path format = root.resolve("format");
+        if (Files.exists(root.resolve("sources"), LinkOption.NOFOLLOW_LINKS)) {
+            throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingRecovery|error|reason:unsupportedSpoolFormat");
+        }
+        if (Files.exists(format, LinkOption.NOFOLLOW_LINKS)) {
+            requireFile(format);
+            if (Files.size(format) != FORMAT.length() || !FORMAT.equals(Files.readString(format))) {
+                throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingRecovery|error|reason:unsupportedSpoolFormat");
+            }
+        }
         try (var entries = Files.newDirectoryStream(root)) {
             for (Path entry : entries) {
                 String name = entry.getFileName().toString();
                 if (temporary(name)) {
                     deleteTemporary(entry);
-                } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("sources") &&
+                } else if (name.equals("sources")) {
+                    throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingRecovery|error|reason:unsupportedSpoolFormat");
+                } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("accepted") &&
                         !name.equals("derived") && !name.equals("terminal") && !name.equals("closed-groups")) {
                     throw unavailable("pendingRecovery|error|reason:unexpectedSpoolEntry", null);
                 }
             }
         }
-        Path format = root.resolve("format");
         if (!Files.exists(format, LinkOption.NOFOLLOW_LINKS)) {
             // A crash before initial format publication cannot have admitted source files.
-            if (Files.exists(root.resolve("sources"), LinkOption.NOFOLLOW_LINKS) ||
+            if (Files.exists(root.resolve("accepted"), LinkOption.NOFOLLOW_LINKS) ||
                     Files.exists(root.resolve("terminal"), LinkOption.NOFOLLOW_LINKS) ||
                     Files.exists(root.resolve("closed-groups"), LinkOption.NOFOLLOW_LINKS)) {
                 throw unavailable("pendingRecovery|error|reason:missingFormatMarker", null);
@@ -344,9 +421,14 @@ public final class PendingSpool implements AutoCloseable {
         if (Files.size(format) != FORMAT.length() || !FORMAT.equals(Files.readString(format))) {
             throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingRecovery|error|reason:unsupportedSpoolFormat");
         }
-        Path sources = root.resolve("sources");
-        Files.createDirectories(sources);
-        requireDirectory(sources);
+        Path accepted = root.resolve("accepted");
+        Files.createDirectories(accepted);
+        requireDirectory(accepted);
+        for (int priority : new int[]{3, 2, 1}) {
+            Path directory = accepted.resolve(Integer.toString(priority));
+            Files.createDirectories(directory);
+            requireDirectory(directory);
+        }
         // Exercise the actual primitive even when opening an empty existing spool.
         Path probe = root.resolve(".tmp-" + UUID.randomUUID());
         publishBytes(probe, new byte[0]);
@@ -375,42 +457,71 @@ public final class PendingSpool implements AutoCloseable {
         FolderPendingIndex.discard(root.resolve("derived"));
         index = new FolderPendingIndex(root.resolve("derived"));
         publications = new HeldPendingPublications(root.resolve("derived/publications"));
-        try (var buckets = Files.newDirectoryStream(sources)) {
-            for (Path bucket : buckets) {
-                if (!bucket.getFileName().toString().matches("[0-9a-f]{2}")) {
-                    throw unavailable("pendingRecovery|error|reason:invalidSourceBucket", null);
-                }
-                requireDirectory(bucket);
-                try (var records = Files.newDirectoryStream(bucket)) {
-                    for (Path path : records) {
-                        String name = path.getFileName().toString();
-                        if (temporary(name)) {
-                            deleteTemporary(path);
-                            continue;
-                        }
-                        SourceId source = sourceName(name);
-                        if (!sourcePath(source).equals(path)) {
-                            throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:misplacedSource", null);
-                        }
-                        try {
-                            PendingSourceRecord record = read(path, source);
-                            index.add(record);
-                            if (record.multipart() != null && terminal.isClosed(record.multipart().groupId())) {
-                                index.multipart().closeGroup(record.multipart());
-                            }
-                        } catch (IOException failure) {
-                            throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:indexRebuildFailed", failure);
-                        }
-                        recoveredSources++;
-                    }
-                }
+        visitAccepted(path -> {
+            SourceId source = sourceName(path.getFileName().toString());
+            PendingSourceRecord record = read(path, source);
+            if (!sourcePath(source).equals(path)) {
+                throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:misplacedSource", null);
             }
-        }
+            try {
+                index.add(record);
+                if (record.multipart() != null && terminal.isClosed(record.multipart().groupId())) {
+                    index.multipart().closeGroup(record.multipart());
+                }
+            } catch (IOException failure) {
+                throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:indexRebuildFailed", failure);
+            }
+            recoveredSources++;
+        });
         terminal.forEachClosedGroup(group -> {
             if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
                 terminal.forgetGroup(group);
             }
         });
+    }
+
+    private void visitAccepted(Consumer<Path> action) throws IOException {
+        for (int priority : new int[]{3, 2, 1}) {
+            requireDirectory(root.resolve("accepted").resolve(Integer.toString(priority)));
+        }
+        try (var priorities = Files.newDirectoryStream(root.resolve("accepted"))) {
+            for (Path priority : priorities) {
+                if (!priority.getFileName().toString().matches("[123]")) {
+                    throw unavailable("pendingRecovery|error|reason:invalidPriorityDirectory", null);
+                }
+                requireDirectory(priority);
+                try (var buckets = Files.newDirectoryStream(priority)) {
+                    for (Path bucket : buckets) {
+                        if (!bucket.getFileName().toString().matches("[0-9a-f]{2}")) {
+                            throw unavailable("pendingRecovery|error|reason:invalidSourceBucket", null);
+                        }
+                        requireDirectory(bucket);
+                        try (var records = Files.newDirectoryStream(bucket)) {
+                            for (Path path : records) {
+                                String name = path.getFileName().toString();
+                                if (temporary(name)) {
+                                    if (ready) {
+                                        throw unavailable("pendingSourcePage|error|reason:unexpectedTemporaryEntry", null);
+                                    }
+                                    deleteTemporary(path);
+                                    continue;
+                                }
+                                SourceId source = sourceName(name);
+                                if (!source.value().toString().startsWith(bucket.getFileName().toString())) {
+                                    throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:misplacedSource", null);
+                                }
+                                try {
+                                    requireFile(path);
+                                } catch (OutboundStorageException failure) {
+                                    throw unavailable("pendingSourceRead|error|sourceId:" + source.value() + "|reason:invalidCommittedRecord", failure);
+                                }
+                                action.accept(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private void validateIntentSources(Intent intent) {
@@ -432,6 +543,9 @@ public final class PendingSpool implements AutoCloseable {
             if (!record.source().equals(expected)) {
                 throw unavailable("pendingSourceRead|error|sourceId:" + expected.value() + "|reason:identityMismatch", null);
             }
+            if (!acceptedPath(requirePriority(record.message().priority()), expected).equals(path)) {
+                throw unavailable("pendingSourceRead|error|sourceId:" + expected.value() + "|reason:misplacedSource", null);
+            }
             return record;
         } catch (OutboundStorageException failure) {
             throw new OutboundStorageException(PENDING, failure.reason(),
@@ -442,8 +556,36 @@ public final class PendingSpool implements AutoCloseable {
     }
 
     private Path sourcePath(SourceId source) {
+        Path found = null;
+        for (int priority : new int[]{3, 2, 1}) {
+            Path path = acceptedPath(priority, source);
+            try {
+                Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            } catch (NoSuchFileException missing) {
+                continue;
+            } catch (IOException failure) {
+                ready = false;
+                throw unavailable("pendingSourceRead|error|sourceId:" + source.value() + "|reason:lookupFailed", failure);
+            }
+            if (found != null) {
+                ready = false;
+                throw unavailable("pendingSourceRead|error|sourceId:" + source.value() + "|reason:duplicateSource", null);
+            }
+            found = path;
+        }
+        return found == null ? acceptedPath(2, source) : found;
+    }
+
+    private Path acceptedPath(int priority, SourceId source) {
         String id = source.value().toString();
-        return root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+        return root.resolve("accepted").resolve(Integer.toString(priority)).resolve(id.substring(0, 2)).resolve(id + ".cbor");
+    }
+
+    static int requirePriority(int priority) {
+        if (priority < 1 || priority > 3) {
+            throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingAdmission|error|reason:unsupportedPriority");
+        }
+        return priority;
     }
 
     private static SourceId sourceName(String name) {
@@ -526,11 +668,22 @@ public final class PendingSpool implements AutoCloseable {
         closed = true;
         IOException releaseFailure = null;
         try {
+            if (acceptedTraversal != null) {
+                acceptedTraversal.close();
+            }
+        } catch (IOException failure) {
+            releaseFailure = failure;
+        }
+        try {
             if (ownership != null) {
                 ownership.release();
             }
         } catch (IOException failure) {
-            releaseFailure = failure;
+            if (releaseFailure == null) {
+                releaseFailure = failure;
+            } else {
+                releaseFailure.addSuppressed(failure);
+            }
         } finally {
             if (owner != null) {
                 try {

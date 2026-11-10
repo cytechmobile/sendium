@@ -44,7 +44,8 @@ class SharedPendingRecoveryTest {
                     var source = new SourceId(UUID.fromString(response.getMessageId()));
                     // Check at the acknowledgement boundary, not after enqueueIn returns.
                     assertThat(pending.find(source)).isPresent();
-                    assertThat(root.resolve("sources").resolve(response.getMessageId().substring(0, 2))
+                    assertThat(root.resolve("accepted").resolve(Integer.toString(pending.find(source).orElseThrow().priority))
+                            .resolve(response.getMessageId().substring(0, 2))
                             .resolve(response.getMessageId() + ".cbor")).isRegularFile();
                     accepted.add(source);
                 } else {

@@ -233,7 +233,7 @@ class PendingRecoveryCoordinatorTest {
             pending.admit(source(message), message);
         }
         String id = message.serial;
-        Files.write(root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor"), new byte[0]);
+        Files.write(root.resolve("accepted/2").resolve(id.substring(0, 2)).resolve(id + ".cbor"), new byte[0]);
         try (var harness = new Harness()) {
             assertThatThrownBy(harness.coordinator::start).isInstanceOf(OutboundStorageException.class);
             assertThat(harness.schedulerCreations).hasValue(0);

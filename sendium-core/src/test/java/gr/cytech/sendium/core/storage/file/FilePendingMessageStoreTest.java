@@ -157,14 +157,14 @@ class FilePendingMessageStoreTest {
     }
 
     @Test
-    void interruptedCompletionFailsClosedAndReopensWithEstablishedAbsence() throws Exception {
+    void ordinaryCompletionNeedsNoSourceIndexAndReopensWithEstablishedAbsence() throws Exception {
         try (var store = store(1)) {
             store.open();
             store.admit(source(1), message(source(1), "source"));
-            FolderPendingIndex.discard(root.resolve("derived/sources"));
-            Files.writeString(root.resolve("derived/sources"), "broken index");
-            assertThatThrownBy(() -> store.complete(Set.of(source(1)))).hasMessageContaining("reason:sourceRemovalFailed");
-            assertThat(store.status().state()).isEqualTo(OutboundStage.State.FAILED);
+            assertThat(root.resolve("derived/sources")).doesNotExist();
+            store.complete(Set.of(source(1)));
+            assertThat(path(source(1))).doesNotExist();
+            assertThat(store.status().state()).isEqualTo(OutboundStage.State.READY);
         }
         try (var recovered = store(1)) {
             recovered.open();
@@ -227,7 +227,7 @@ class FilePendingMessageStoreTest {
 
     private Path path(SourceId source) {
         String id = source.value().toString();
-        return root.resolve("sources").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+        return root.resolve("accepted/2").resolve(id.substring(0, 2)).resolve(id + ".cbor");
     }
 
     private static void assertFull(FilePendingMessageStore store, SourceId source) {

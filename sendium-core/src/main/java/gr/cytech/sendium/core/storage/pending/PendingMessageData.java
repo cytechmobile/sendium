@@ -82,6 +82,10 @@ public final class PendingMessageData {
         return new PendingMessageData(data);
     }
 
+    public int priority() {
+        return integer("priority");
+    }
+
     public StandardMessage restore() {
         StandardMessage message = new StandardMessage();
         message.from = text("from");
