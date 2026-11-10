@@ -26,6 +26,8 @@ Sendium provides basic live operational metrics for [#383](https://github.com/cy
 
 ### Start With Six Operator Questions
 
+For ready-made **SMS Operations** and **Application Health** dashboards with Docker Compose provisioning, see [`monitoring/README.md`](../monitoring/README.md). They reuse the metrics described here. SMS total cards use raw since-start counters; only rate charts and explicitly estimated period mixes follow the selected period. The manual query/setup instructions below remain available for existing monitoring installations.
+
 After configuring Prometheus and adding its data source to Grafana below, create time-series panels using the queries in [Example Panels](#example-panels). Start with traffic, Pending, Selected/Routed, provider activity and receipt progress; no custom administration UI or dashboard provisioning is required.
 
 - Give gauges a count unit and rates a per-second unit; do not label provider request counts as unique customer messages.
@@ -370,7 +372,7 @@ The collection alert intentionally excludes disabled collection. An unconfigured
 - **Embedding:** core constructors are passive and programmatic workers/stores opt in through documented binding methods. Coordinated provider metrics do not instrument the legacy `doMessage` provider path. Raw receipt storage used outside the managed wrapper does not automatically emit final-outcome counters.
 - **Not a ledger:** process counters reset, scrapes can miss activity, and accepted sources, selections, provider parts and receipt events are not interchangeable. Provider acceptance is not handset delivery. Duplicate receipts, multipart aggregation, suppressed returns and local retention cleanup have the documented boundaries above.
 - **Bounded snapshots:** database collection may be unavailable above the configured row budget, during failures or after staleness. Disabling it leaves event counters working, but omits memory store gauges as well. No unsupported or unavailable backend is represented as a zero backlog.
-- **No new backends or reporting platform:** file/memory DLR and durable outbound implementations belong to #337. They must preserve the shared meanings and add backend-specific collection/recovery tests. Per-account accepted ingress traffic is available, but not per-account provider/receipt tracking. No per-message lookup, billing reports, dashboard provisioning, replicas or persisted metric summaries are added here.
+- **No new backends or reporting platform:** file/memory DLR and durable outbound implementations belong to #337. They must preserve the shared meanings and add backend-specific collection/recovery tests. Per-account accepted ingress traffic is available, but not per-account provider/receipt tracking. Optional Grafana dashboard provisioning is supplied under `monitoring/`; it does not add per-message lookup, billing reports, replicas or persisted metric summaries.
 
 ## Prometheus Configuration
 
