@@ -99,6 +99,12 @@ Replace the sender and recipient with values accepted by your provider. A `202 A
 
 See the [Docker deployment guide](docs/02-docker-deployment.md) for the complete manual container setup. Configuration details are maintained in [Authentication and Security](docs/03-auth-security.md), [SMPP Configuration](docs/04-smpp-configuration.md), [Routing Engine](docs/05-routing-engine.md), and the [Configuration Reference](docs/09-configuration-reference.md).
 
+### Optional: View Metrics in Grafana
+
+For an operational view of SMS traffic, provider activity and application health, use the optional [Prometheus and Grafana setup](monitoring/README.md). It includes **SMS Operations** and **Application Health** dashboards.
+
+Monitoring starts separately from Sendium and is not downloaded or started by `quick-start.sh`. Use the `monitoring/` files from this repository and follow the setup guide to configure a Prometheus target reachable from its container; Docker network addresses can differ from the host's `localhost:8080`. No monitoring services are required to send SMS.
+
 ## 💬 Documentation & Support
 
 The documentation entry point is **[docs/DocumentationMap.md](docs/DocumentationMap.md)**. It includes the recommended reading order, current docs index, runtime files, API discovery endpoints, roadmap, and community resources.
