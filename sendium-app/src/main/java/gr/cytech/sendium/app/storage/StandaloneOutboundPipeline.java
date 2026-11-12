@@ -76,16 +76,11 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         var selected = new MemorySelectedRouterStore<>(pending, positive(config, "router-queue.capacity", 1000));
         var routed = new MemoryRoutedWorkStore<StandardMessage>(sourceCapacity,
                 StandaloneMessageSnapshot::copy);
-        boolean storageMetrics = config.getOptionalValue("sendium.metrics.storage.enabled", Boolean.class).orElse(true);
-        if (storageMetrics) {
-            routed.bindMetrics(metrics);
-        }
+        routed.bindMetrics(metrics);
         var result = new DefaultOutboundCoordinator<>(pending, selected, routed);
         result.start();
-        if (storageMetrics) {
-            pending.bindMetrics(metrics);
-            selected.bindMetrics(metrics);
-        }
+        pending.bindMetrics(metrics);
+        selected.bindMetrics(metrics);
         return result;
     }
 

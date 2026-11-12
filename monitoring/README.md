@@ -2,10 +2,14 @@
 
 This directory runs Prometheus and Grafana and provisions two dashboards in the **Sendium** folder:
 
-- **SMS Operations** (`sendium-sms-operations`): accepted traffic, per-account activity, provider requests/results, receipt outcomes/forwarding and Pending/Selected/Routed backlogs.
+- **SMS Operations** (`sendium-sms-operations`): a compact overview of incoming acceptance/account traffic, outgoing SMS-part load, provider results/rejection percentage, retained-source backlog and receipt progress, plus two diagnostic panels in a collapsed **Queue details** section. Provider load/results charts repeat for the selected providers.
 - **Application Health** (`sendium-application-health`): scrape reachability, uptime, CPU, JVM memory/GC/threads, HTTP performance and database-pool/storage-operation metrics.
 
 It does **not** start Sendium, PostgreSQL or synthetic traffic, and does not install alerts or new application instrumentation. See the [metrics reference](../docs/08-monitoring-observability.md) for counting boundaries and optional alert examples.
+
+The goal is to see how Sendium is operating, not calculate customer/provider charges. Billing stays outside this dashboard. Expand **Queue details** to inspect Selected work by state and Routed work by destination/state when Pending grows. These ownership counts overlap and must not be added together. Cached receipt-storage queries remain in the metrics reference rather than crowding the overview. Application runtime diagnostics stay on Application Health.
+
+Standalone memory Pending/Selected/Routed gauges are always enabled. The single `sendium.metrics.storage.enabled` switch defaults to `true` and controls only PostgreSQL receipt snapshots; set it to `false` and restart to avoid their background database reads without losing the memory backlog view or event counters.
 
 ## Start
 
@@ -26,20 +30,26 @@ It does **not** start Sendium, PostgreSQL or synthetic traffic, and does not ins
 
 Choose the **Prometheus**, **Job** and **Instance** selectors at the top. The default job is `sendium`. Choose one instance: combining different process lifetimes makes raw totals confusing, and summing snapshot copies can double-count a shared PostgreSQL store. If jobs are reused across deployments, use uniquely identifiable instance labels/targets in your Prometheus configuration.
 
+On SMS Operations, **Provider panels** selects which provider load/response charts to repeat (all by default), up to two charts per row. Each provider gets its own unstacked filled chart, so identical rates do not cover one another. The load panels share a scale with one another, as do the response panels: an invisible reference to the largest rate across providers sets a common axis extent. It is hidden from the legend/tooltip and is not extra traffic. The other overview charts still show all providers for the selected job/instance; the selector is not a dashboard-wide provider filter.
+
 The datasource is provisioned as `Prometheus` with UID `sendium-prometheus`. The dashboard datasource selector also permits other Prometheus sources. The provisioned datasource interval is 15 seconds, matching the supplied scrape configuration; update it if you change that interval so Grafana's `$__rate_interval` remains appropriate. If an existing Grafana database already has a provisioned `Prometheus` datasource with another UID, check datasource provisioning logs and resolve that identity conflict before changing or deleting existing sources.
 
 ## Understand the numbers
 
 | View | Meaning |
 | :--- | :--- |
-| Since-start totals and account bars | Raw counters for the selected instance, **not counts within the selected period**. They reset when Sendium restarts. Changing a lookback from 30 to 5 minutes with the end at **now** does not change these totals. Selecting a historical end evaluates the counters at that historical time instead. They are not a durable billing ledger. |
+| Since-start total cards | Raw counters for the selected instance, **not counts within the selected period**. They reset when Sendium restarts. Changing a lookback from 30 to 5 minutes with the end at **now** does not change these totals. Selecting a historical end evaluates the counters at that historical time instead. They are not a durable billing ledger. |
 | Traffic and latency charts | Follow the selected time range. Rates need multiple scrapes; means are not p95/p99. Idle latency or an undefined ratio has no value, not zero latency. |
-| Admission and receipt-mix donuts | **Estimated** selected-period increases. Prometheus extrapolates at period boundaries, so these can move while traffic is stopped and need not reconcile with raw since-start totals. The receipt mix is not the conversion rate of admissions in the same period. |
-| Pending / Selected / Routed | Overlapping ownership, not three independent queues to add together. Pending counts sources; Selected/Routed count selections. Routed active includes preparation and handoff; waiting excludes the preparation FIFO. |
-| Receipt backlog | Cached PostgreSQL snapshot, refreshed every 60 seconds by default. `waiting_provider` awaits provider receipts; `pending_forward` includes queued/in-flight forwarding and retry waits; `failed_forward` is stored failed forwarding. Unavailable is not empty. |
+| Filled SMS rate charts | All charts are unstacked: each filled area shows the individual series, not a cumulative total. Provider load/results use separate charts per selected provider with a common scale within each group. Legend shows last/maximum values and hover shows all visible series. Equal series in a shared chart can overlap; use the legend/tooltip to inspect them. |
+| Incoming traffic | Accepted/rejected submissions per second by HTTP/SMPP, plus accepted submissions by authenticated accountId and ingress. HTTP long messages are one submission but may produce several provider parts; accepted SMPP parts are separate ingress submissions. |
+| SMS-part send attempts | Provider-part request invocations, including retries and requests later rejected/timed out. Not unique parts, accepted provider parts or billable units. For example, 720 single-part plus 180 two-part HTTP messages give 900 submissions and 1,080 part attempts if there are no retries. |
+| Provider results / rejection percentage | First attempt completions: accepted, rejected, timeout, transport_error or protocol_error. Rejection percentage is explicit rejections divided by all completed attempts in the rate window. Idle providers have no defined percentage. A failed final DLR is not a submission rejection. |
+| Pending retained sources | Retained ingress sources, including later-stage ownership/bookkeeping. Not an exact waiting-to-send queue. Watch sustained growth. Detailed Selected/Routed metrics use different units and overlap Pending; do not add their counts. |
+| Final receipt outcomes | Delivered/failed/expired committed transitions after multipart aggregation, by configured receipt-provider identity. These provider labels may differ from outgoing worker names. Not a one-to-one conversion funnel with admissions or provider-part attempts. |
+| Receipt forwarding failures | Failed attempts to forward a receipt to the submitting application, not delivery failure at the handset. A provider-reported failed delivery can still be forwarded successfully. |
 | Metrics endpoint reachable | Prometheus scrape success, **not application readiness** or successful SMS delivery. Use Sendium's `/q/health/ready` separately for readiness; this stack adds no readiness probe. |
 
-Account series are created after the first accepted submission from an authenticated credential with a configured `accountId`. Multiple credentials sharing accountId aggregate. Missing accountId and best-effort metric failures can make account totals lower than global admissions; provider/receipt units also differ. Newer account/forwarding-state panels require a Sendium build exposing those metrics. These files do not invent unsupported values.
+Account series are created after the first accepted submission from an authenticated credential with a configured `accountId`. Multiple credentials sharing accountId aggregate. Missing accountId and best-effort metric failures can make account traffic lower than global admissions; provider/receipt units also differ. Account panels require a Sendium build exposing those metrics. These files do not invent unsupported values. Estimated period-total pies and account-total bars are deliberately omitted to keep the operational view clear.
 
 Counts use full numbers with separators, not `K` abbreviations. Missing series display **No data** or **Unavailable**. JVM panels may be absent with native executables; database-pool/DLR panels may be absent when their subsystem is disabled. A first-start counter that has never observed an event may have no series. Do not interpret every empty panel as a failure.
 

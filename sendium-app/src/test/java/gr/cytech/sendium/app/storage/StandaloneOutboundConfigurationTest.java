@@ -39,12 +39,12 @@ class StandaloneOutboundConfigurationTest {
     }
 
     @Test
-    void storageMetricsDefaultOnAndCanBeDisabledWithoutDisablingAdmission() throws Exception {
-        for (boolean enabled : List.of(true, false)) {
+    void memoryMetricsRemainEnabledRegardlessOfPostgresqlSnapshotSetting() throws Exception {
+        for (var setting : List.of(Optional.<Boolean>empty(), Optional.of(true), Optional.of(false))) {
             var config = mock(Config.class);
             when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
             when(config.getOptionalValue("sendium.metrics.storage.enabled", Boolean.class))
-                    .thenReturn(enabled ? Optional.empty() : Optional.of(false));
+                    .thenReturn(setting);
             var metrics = new SimpleMeterRegistry();
             try {
                 var coordinator = StandaloneOutboundPipeline.coordinator(
@@ -55,13 +55,9 @@ class StandaloneOutboundConfigurationTest {
                     coordinator.selectToRouter(1);
                     var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
                     coordinator.recordToRouted(selected, new Destination<>("provider", selected.message()));
-                    if (enabled) {
-                        assertThat(metrics.get("sendium.sms.pending.sources").gauge().value()).isEqualTo(1);
-                        assertThat(metrics.find("sendium.sms.selected.work").gauges()).hasSize(3);
-                        assertThat(metrics.get("sendium.sms.routed.work").tag("state", "waiting").gauge().value()).isEqualTo(1);
-                    } else {
-                        assertThat(metrics.getMeters()).isEmpty();
-                    }
+                    assertThat(metrics.get("sendium.sms.pending.sources").gauge().value()).isEqualTo(1);
+                    assertThat(metrics.find("sendium.sms.selected.work").gauges()).hasSize(3);
+                    assertThat(metrics.get("sendium.sms.routed.work").tag("state", "waiting").gauge().value()).isEqualTo(1);
                 } finally {
                     coordinator.close();
                 }
