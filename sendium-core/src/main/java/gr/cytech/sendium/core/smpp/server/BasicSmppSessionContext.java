@@ -6,6 +6,7 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 public class BasicSmppSessionContext implements SmppSessionContext {
 
     private final String accountId;
+    private final String configuredAccountId;
     private final String systemId;
     private final int maxConnections;
     private final double maxRate;
@@ -18,6 +19,7 @@ public class BasicSmppSessionContext implements SmppSessionContext {
     public BasicSmppSessionContext(SmppServerWorker worker, CredentialFileWatcher.Credential credential) {
         // For the basic file-based auth, the systemId serves as the accountId
         this.systemId = credential.systemId();
+        this.configuredAccountId = credential.accountId();
         this.accountId = Strings.isNullOrEmpty(credential.accountId()) ? credential.systemId() : credential.accountId();
 
         // Assuming your basic SmppServerWorker has getters for global defaults.
@@ -37,6 +39,10 @@ public class BasicSmppSessionContext implements SmppSessionContext {
     @Override
     public String getAccountId() {
         return accountId;
+    }
+
+    public String getConfiguredAccountId() {
+        return configuredAccountId;
     }
 
     @Override

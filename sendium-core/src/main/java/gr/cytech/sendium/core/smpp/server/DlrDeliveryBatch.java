@@ -1,6 +1,8 @@
 package gr.cytech.sendium.core.smpp.server;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,9 +32,17 @@ public final class DlrDeliveryBatch<M extends StandardMessage> {
     private final SmppServerMessageStore<M> messageStore;
     private final SmppServerSessionHandler<?> owner;
     private boolean active = true;
+    private boolean sending;
+    private final Counter successfulReturns;
+    private final Counter failedReturns;
 
     public DlrDeliveryBatch(M message, int attempt, Set<Integer> expectedParts,
-                            SmppServerMessageStore<M> messageStore, SmppServerSessionHandler<?> owner) {
+                             SmppServerMessageStore<M> messageStore, SmppServerSessionHandler<?> owner) {
+        this(message, attempt, expectedParts, messageStore, owner, null);
+    }
+
+    public DlrDeliveryBatch(M message, int attempt, Set<Integer> expectedParts,
+                             SmppServerMessageStore<M> messageStore, SmppServerSessionHandler<?> owner, MeterRegistry metrics) {
         if (message == null || message.serial == null || message.serial.isBlank()) {
             throw new IllegalArgumentException("DLR batch requires a gateway message ID");
         }
@@ -44,6 +54,19 @@ public final class DlrDeliveryBatch<M extends StandardMessage> {
         this.expectedParts = Set.copyOf(expectedParts);
         this.messageStore = messageStore;
         this.owner = owner;
+        successfulReturns = metrics == null ? null : metrics.counter(
+                "sendium.dlr.return.attempts", "channel", "smpp", "result", "success");
+        failedReturns = metrics == null ? null : metrics.counter(
+                "sendium.dlr.return.attempts", "channel", "smpp", "result", "failure");
+    }
+
+    /** The send boundary, not generation/queueing, establishes an actual return attempt. */
+    public synchronized boolean beginSend() {
+        if (!active) {
+            return false;
+        }
+        sending = true;
+        return true;
     }
 
     public synchronized boolean isActive() {
@@ -71,6 +94,9 @@ public final class DlrDeliveryBatch<M extends StandardMessage> {
             if (successfulParts.size() == expectedParts.size()) {
                 active = false;
                 complete = true;
+                if (sending && successfulReturns != null) {
+                    successfulReturns.increment();
+                }
             }
         }
         if (complete) {
@@ -84,6 +110,9 @@ public final class DlrDeliveryBatch<M extends StandardMessage> {
                 return;
             }
             active = false;
+            if (sending && failedReturns != null) {
+                failedReturns.increment();
+            }
         }
         release(normalizeResult(result));
         unregister();

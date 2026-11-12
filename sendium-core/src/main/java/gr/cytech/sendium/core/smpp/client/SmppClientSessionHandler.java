@@ -180,7 +180,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                 //then just re-enqueue the msg
                 if (pduRequest.getReferenceObject() != null) {
                     if (smppClientWorker.handleCoordinatedResponse(pduRequest.getReferenceObject(),
-                            SmppConstants.STATUS_DELIVERYFAILURE, null)) {
+                            SmppConstants.STATUS_DELIVERYFAILURE, null, ProviderRequestMetrics.Result.TIMEOUT)) {
                         return;
                     }
                     StandardMessage msg = (StandardMessage) pduRequest.getReferenceObject();
@@ -237,7 +237,10 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
                 SubmitSm submit = (SubmitSm) pduAsyncResponse.getRequest();
                 if (smppClientWorker.handleCoordinatedResponse(submit.getReferenceObject(),
                         pduAsyncResponse.getResponse().getCommandStatus(),
-                        pduAsyncResponse.getResponse() instanceof SubmitSmResp response ? response.getMessageId() : null)) {
+                        pduAsyncResponse.getResponse() instanceof SubmitSmResp response ? response.getMessageId() : null,
+                        !(pduAsyncResponse.getResponse() instanceof SubmitSmResp) ? ProviderRequestMetrics.Result.PROTOCOL_ERROR :
+                                pduAsyncResponse.getResponse().getCommandStatus() == SmppConstants.STATUS_OK ?
+                                        ProviderRequestMetrics.Result.ACCEPTED : ProviderRequestMetrics.Result.REJECTED)) {
                     return;
                 }
                 SubmitSmResp resp = (SubmitSmResp) pduAsyncResponse.getResponse();
@@ -308,7 +311,7 @@ public class SmppClientSessionHandler implements SmsgSmppSessionHandler {
         PartialPdu partialPdu = (PartialPdu) e.getPartialPdu();
         if (smppClientWorker.handleCoordinatedResponse(partialPdu.getReferenceObject(),
                 partialPdu.getCommandStatus() == SmppConstants.STATUS_OK ? SmppConstants.STATUS_UNKNOWNERR :
-                        partialPdu.getCommandStatus(), null)) {
+                        partialPdu.getCommandStatus(), null, ProviderRequestMetrics.Result.PROTOCOL_ERROR)) {
             return;
         }
         if (partialPdu.getReferenceObject() != null && partialPdu.getReferenceObject() instanceof StandardMessage) {

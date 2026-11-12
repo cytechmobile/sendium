@@ -158,7 +158,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
         var execution = new ProviderExecution();
         execution.retryCompletion = () -> track(work.id(), coordinator.complete(work.id(), execution.attempts));
-        CompletionStage<Void> attempts = scheduleAttempt(work.message(), () -> worker, execution);
+        CompletionStage<Void> attempts = scheduleAttempt(work.message(), () -> worker, execution, false);
         execution.attempts = attempts;
         execution.setCompletion(track(work.id(), coordinator.complete(work.id(), attempts)));
         return execution;
@@ -166,8 +166,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
     private CompletionStage<Void> scheduleAttempt(StandardMessage message,
                                                    Supplier<SmppClientWorker<StandardMessage>> destination,
-                                                   ProviderExecution execution) {
-        var attempt = new ProviderAttempt(message, destination, execution);
+                                                    ProviderExecution execution, boolean replacement) {
+        var attempt = new ProviderAttempt(message, destination, execution, replacement);
         execution.providerAttempts.add(attempt);
         attempt.schedule(0);
         return attempt.completed.minimalCompletionStage();
@@ -416,16 +416,18 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         private final StandardMessage message;
         private final Supplier<SmppClientWorker<StandardMessage>> resolveDestination;
         private final ProviderExecution execution;
+        private final boolean replacement;
         private final CompletableFuture<Void> completed = new CompletableFuture<>();
         private volatile SmppClientWorker<StandardMessage> worker;
         private AttemptState state = AttemptState.QUEUED;
         private Throwable failure;
 
         private ProviderAttempt(StandardMessage message, Supplier<SmppClientWorker<StandardMessage>> destination,
-                                 ProviderExecution execution) {
+                                  ProviderExecution execution, boolean replacement) {
             this.message = message;
             this.resolveDestination = destination;
             this.execution = execution;
+            this.replacement = replacement;
         }
 
         private synchronized AttemptSnapshot snapshot() {
@@ -485,7 +487,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
             try {
                 var submission = worker.submitPreparedCoordinated(message, (payload, policy) ->
                         scheduleAttempt(payload, policy == SmppClientWorker.NackHandlePolicy.RETRY_ROUTER ?
-                                () -> retryDestination(payload) : () -> worker, execution));
+                                () -> retryDestination(payload) : () -> worker, execution, true), replacement);
                 execution.submissions.add(submission);
                 synchronized (this) {
                     state = AttemptState.AWAITING_COMPLETION;

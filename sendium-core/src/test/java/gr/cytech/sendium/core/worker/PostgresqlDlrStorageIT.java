@@ -9,6 +9,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
@@ -86,6 +87,65 @@ class PostgresqlDlrStorageIT {
             statement.execute("TRUNCATE sendium_dlr.dlr_message CASCADE");
         }
         storage = new PostgresqlDlrStorage(dataSource);
+    }
+
+    @Test
+    void metricSnapshotsCountCompleteStoredStateWithoutRunningRetention() throws SQLException {
+        var waiting = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
+        acceptProviderMessage(waiting, "waiting");
+        var pending = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
+        saveResolve(pending, "pending");
+        var failed = state(MessageState.DeliveryChannel.HTTP, "system", "https://example.test/dlr");
+        saveResolve(failed, "failed");
+        var attempt = storage.startDeliveryAttempt(failed.getGatewayMsgId(), MessageState.DeliveryChannel.HTTP).orElseThrow();
+        assertThat(storage.failDelivery(failed.getGatewayMsgId(), attempt.getDeliveryAttemptCount(), "http_failure")).isTrue();
+        setCreatedAt(waiting.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '8 days'");
+        assertThat(storage.readMetricSnapshot(3, Duration.ofSeconds(2)))
+                .contains(new PostgresqlDlrStorage.ReceiptCounts(1, 1, 1));
+        assertThat(storage.readMetricSnapshot(2, Duration.ofSeconds(2))).isEmpty();
+    }
+
+    @Test
+    void metricQueryStopsAtTheBudgetSentinelWithoutSortingOrAggregatingTheBacklog() throws Exception {
+        executeSql("""
+                INSERT INTO sendium_dlr.dlr_message
+                    (gateway_message_id, provider_status, delivery_channel, delivery_status, forward_dlr_url)
+                SELECT md5(number::text)::uuid, 'SENT', 'HTTP', 'WAITING_PROVIDER', 'https://example.test/dlr'
+                FROM generate_series(1, 100001) AS number
+                """);
+        assertThat(storage.readMetricSnapshot(100000, Duration.ofSeconds(2))).isEmpty();
+        assertThat(storage.readMetricSnapshot(100001, Duration.ofSeconds(2)))
+                .contains(new PostgresqlDlrStorage.ReceiptCounts(100001, 0, 0));
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery("""
+                     EXPLAIN (ANALYZE, FORMAT JSON)
+                     SELECT delivery_status FROM sendium_dlr.dlr_message LIMIT 101
+                     """)) {
+            assertThat(result.next()).isTrue();
+            var plan = new ObjectMapper().readTree(result.getString(1)).get(0).get("Plan");
+            assertThat(plan.get("Node Type").asText()).isEqualTo("Limit");
+            assertThat(plan.get("Actual Rows").asLong()).isEqualTo(101);
+            assertThat(plan.get("Plans").get(0).get("Actual Rows").asLong()).isEqualTo(101);
+            assertThat(plan.toString()).doesNotContain("\"Node Type\":\"Sort\"", "\"Node Type\":\"Aggregate\"");
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void metricQueryTimeoutCancelsALockedTableRead() throws SQLException {
+        try (Connection blocker = dataSource.getConnection(); Statement lock = blocker.createStatement()) {
+            blocker.setAutoCommit(false);
+            lock.execute("LOCK TABLE sendium_dlr.dlr_message IN ACCESS EXCLUSIVE MODE");
+            try {
+                assertThatThrownBy(() -> storage.readMetricSnapshot(100, Duration.ofSeconds(1)))
+                        .isInstanceOf(DlrStorageException.class)
+                        .hasCauseInstanceOf(SQLException.class)
+                        .satisfies(failure -> assertThat(((SQLException) failure.getCause()).getSQLState()).isEqualTo("57014"));
+            } finally {
+                blocker.rollback();
+            }
+        }
     }
 
     @Test

@@ -3,6 +3,8 @@ package gr.cytech.sendium.core.worker;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.util.MessageTrace;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -45,6 +47,8 @@ public class ForwardDlrService {
 
     private final DlrService dlrService;
     private final HttpClient httpClient;
+    private Counter successfulReturns;
+    private Counter failedReturns;
 
     @Inject
     public ForwardDlrService(DlrService dlrService) {
@@ -54,6 +58,19 @@ public class ForwardDlrService {
     ForwardDlrService(DlrService dlrService, HttpClient httpClient) {
         this.dlrService = dlrService;
         this.httpClient = httpClient;
+    }
+
+    /** CDI binds automatically; direct construction can opt in without changing callback behavior. */
+    @Inject
+    public void bindMetrics(MeterRegistry metrics) {
+        successfulReturns = metrics.counter("sendium.dlr.return.attempts", "channel", "http", "result", "success");
+        failedReturns = metrics.counter("sendium.dlr.return.attempts", "channel", "http", "result", "failure");
+    }
+
+    private void recordReturn(boolean success) {
+        if (successfulReturns != null) {
+            (success ? successfulReturns : failedReturns).increment();
+        }
     }
 
     static HttpClient newHttpClient() {
@@ -110,21 +127,32 @@ public class ForwardDlrService {
         Semaphore hostLimit = hostLimits.computeIfAbsent(
                 request.uri().getHost().toLowerCase(Locale.ROOT), ignored -> new Semaphore(MAX_IN_FLIGHT_PER_HOST));
         boolean acquired = false;
+        boolean attempted = false;
         try {
             hostLimit.acquire();
             acquired = true;
+            attempted = true;
             HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                recordReturn(true);
                 completeDelivery(gatewayMsgId, attempt);
             } else {
+                recordReturn(false);
                 handleAttemptFailure(gatewayMsgId, attempt, "http_failure");
             }
         } catch (HttpTimeoutException e) {
+            recordReturn(false);
             handleAttemptFailure(gatewayMsgId, attempt, "timeout");
         } catch (InterruptedException e) {
+            if (attempted) {
+                recordReturn(false);
+            }
             handleAttemptFailure(gatewayMsgId, attempt, "interrupted");
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
+            if (attempted) {
+                recordReturn(false);
+            }
             handleAttemptFailure(gatewayMsgId, attempt, "transport_failure");
         } finally {
             if (acquired) {

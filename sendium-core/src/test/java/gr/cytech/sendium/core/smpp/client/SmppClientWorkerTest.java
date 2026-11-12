@@ -4,6 +4,7 @@ import com.cloudhopper.commons.charset.CharsetUtil;
 import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.PduAsyncResponse;
 import com.cloudhopper.smpp.pdu.DeliverSm;
+import com.cloudhopper.smpp.pdu.GenericNack;
 import com.cloudhopper.smpp.pdu.PduResponse;
 import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.tlv.Tlv;
@@ -30,6 +31,8 @@ import jakarta.enterprise.inject.Vetoed;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ArcContainer;
 import io.quarkus.arc.ManagedContext;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import utils.OutboundIngressFixture;
 
@@ -56,6 +59,27 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SmppClientWorkerTest {
+    private final SimpleMeterRegistry metricRegistry = new SimpleMeterRegistry();
+    private final ProviderRequestMetrics providerMetrics = new ProviderRequestMetrics(metricRegistry);
+
+    @AfterEach
+    void closeMetricRegistry() {
+        metricRegistry.close();
+    }
+
+    private double attempts(TestSmppClientWorker worker, String kind) {
+        return metricRegistry.get("sendium.sms.provider.attempts").tag("provider", worker.getFullName())
+                .tag("kind", kind).counter().count();
+    }
+
+    private double inFlight(TestSmppClientWorker worker) {
+        return metricRegistry.get("sendium.sms.provider.in.flight").tag("provider", worker.getFullName()).gauge().value();
+    }
+
+    private long responses(TestSmppClientWorker worker, String result) {
+        return metricRegistry.get("sendium.sms.provider.response").tag("provider", worker.getFullName())
+                .tag("result", result).timer().count();
+    }
 
     @Test
     void idleLegacyPollingDoesNotAcquireSendPermits() {
@@ -529,6 +553,7 @@ class SmppClientWorkerTest {
     @Test
     void beforeProcessingDropCompletesWithoutSendingToProvider() throws Exception {
         var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.bindProviderMetrics(providerMetrics);
         worker.preparationStatus = gr.cytech.sendium.external.filter.FilterStatusCodes.DROP;
         var submission = worker.submitPreparedCoordinated(messageWithNetwork(), (payload, policy) -> {
             throw new AssertionError("Dropped message must not retry");
@@ -536,6 +561,7 @@ class SmppClientWorkerTest {
         submission.completion().toCompletableFuture().join();
         assertThat(worker.coordinatedRequests).isEmpty();
         assertThat(worker.coordinatedHandoffs).isZero();
+        assertThat(metricRegistry.getMeters()).isEmpty();
     }
 
     @Test
@@ -629,6 +655,7 @@ class SmppClientWorkerTest {
     @Test
     void firstSendFailureAbortsRemainingSubmitsAndRetriesOriginalPayload() throws Exception {
         var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.bindProviderMetrics(providerMetrics);
         worker.failSendNumber = 1;
         var message = messageWithNetwork();
         message.body = "a".repeat(200);
@@ -639,6 +666,9 @@ class SmppClientWorkerTest {
             return replacement;
         });
         assertThat(worker.coordinatedRequests).hasSize(1);
+        assertThat(attempts(worker, "initial")).isEqualTo(1);
+        assertThat(inFlight(worker)).isZero();
+        assertThat(responses(worker, "transport_error")).isEqualTo(1);
         assertThat(retries).containsExactly(message);
         assertThat(submission.completion().toCompletableFuture()).isNotDone();
         replacement.complete(null);
@@ -655,6 +685,7 @@ class SmppClientWorkerTest {
             }
         };
         var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), tracker);
+        worker.bindProviderMetrics(providerMetrics);
         worker.realCoordinatedHandoff = true;
         var message = messageWithNetwork();
         message.body = "hello";
@@ -663,14 +694,55 @@ class SmppClientWorkerTest {
         });
         respond(handler(worker), worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
         assertThat(submission.completion().toCompletableFuture()).isNotDone();
+        assertThat(inFlight(worker)).isZero();
+        assertThat(responses(worker, "accepted")).isEqualTo(1);
         accepted.complete(null);
         submission.completion().toCompletableFuture().join();
+    }
+
+    @Test
+    void replacementWorkerSharesOutstandingProviderStateWithTheOriginalWorker() throws Exception {
+        var original = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        var replacement = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        original.bindProviderMetrics(providerMetrics);
+        replacement.bindProviderMetrics(providerMetrics);
+        assertThat(replacement.getFullName()).isEqualTo(original.getFullName());
+        var message = messageWithNetwork();
+        message.body = "hello";
+        original.submitCoordinated(message, (payload, policy) -> CompletableFuture.completedStage(null));
+        replacement.submitCoordinated(message, (payload, policy) -> CompletableFuture.completedStage(null), true);
+        assertThat(inFlight(original)).isEqualTo(2);
+        respond(handler(original), original.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+        assertThat(inFlight(replacement)).isEqualTo(1);
+        respond(handler(replacement), replacement.coordinatedRequests.getFirst(), SmppConstants.STATUS_OK);
+        assertThat(inFlight(original)).isZero();
+        assertThat(attempts(original, "initial")).isEqualTo(1);
+        assertThat(attempts(original, "retry")).isEqualTo(1);
+    }
+
+    @Test
+    void coordinatedMalformedResponseIsNotCountedAsProviderRejection() throws Exception {
+        var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.bindProviderMetrics(providerMetrics);
+        var message = messageWithNetwork();
+        message.body = "hello";
+        worker.submitCoordinated(message, (payload, policy) -> CompletableFuture.completedStage(null));
+        var response = new GenericNack();
+        response.setCommandStatus(SmppConstants.STATUS_UNKNOWNERR);
+        var async = mock(PduAsyncResponse.class);
+        when(async.getRequest()).thenReturn(worker.coordinatedRequests.getFirst());
+        when(async.getResponse()).thenReturn(response);
+        handler(worker).fireExpectedPduResponseReceived(async);
+        assertThat(inFlight(worker)).isZero();
+        assertThat(responses(worker, "protocol_error")).isEqualTo(1);
+        assertThat(responses(worker, "rejected")).isZero();
     }
 
     @Test
     void coordinatedExpiryGoesThroughFailurePolicyWithoutLegacyQueueInsertion() throws Exception {
         var routerQueue = new Queue<StandardMessage>();
         var worker = new TestSmppClientWorker(new TestConfigurationProvider(), routerQueue, new CapturingTracker());
+        worker.bindProviderMetrics(providerMetrics);
         var message = messageWithNetwork();
         message.body = "hello";
         var retried = new java.util.ArrayList<StandardMessage>();
@@ -680,6 +752,9 @@ class SmppClientWorkerTest {
             return replacement;
         });
         handler(worker).firePduRequestExpired(worker.coordinatedRequests.getFirst());
+        assertThat(inFlight(worker)).isZero();
+        assertThat(responses(worker, "timeout")).isEqualTo(1);
+        assertThat(responses(worker, "rejected")).isZero();
         assertThat(retried).containsExactly(message);
         assertThat(routerQueue.isEmpty()).isTrue();
         assertThat(submission.completion().toCompletableFuture()).isNotDone();
@@ -692,6 +767,7 @@ class SmppClientWorkerTest {
         try (var fixture = new OutboundIngressFixture(1)) {
             var worker = new TestSmppClientWorker(new TestConfigurationProvider(Map.of(
                     "status.retry.router", Integer.toString(SmppConstants.STATUS_INVDSTADR))), new Queue<>(), new CapturingTracker());
+            worker.bindProviderMetrics(providerMetrics);
             var message = messageWithNetwork();
             message.body = "a".repeat(200);
             SourceId source = new SourceId(UUID.randomUUID());
@@ -710,6 +786,8 @@ class SmppClientWorkerTest {
             respond(session, worker.coordinatedRequests.getFirst(), SmppConstants.STATUS_INVDSTADR);
             assertThat(worker.requestsReady.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(worker.coordinatedRequests).hasSize(4);
+            assertThat(attempts(worker, "initial")).isEqualTo(2);
+            assertThat(attempts(worker, "retry")).isEqualTo(2);
             respond(session, worker.coordinatedRequests.get(2), SmppConstants.STATUS_OK);
             respond(session, worker.coordinatedRequests.get(3), SmppConstants.STATUS_OK);
             assertThat(fixture.pending.find(source)).isPresent();
@@ -718,6 +796,9 @@ class SmppClientWorkerTest {
             execution.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
             assertThat(fixture.pending.find(source)).isEmpty();
             assertThat(worker.getRouterQueue().isEmpty()).isTrue();
+            assertThat(inFlight(worker)).isZero();
+            assertThat(responses(worker, "accepted")).isEqualTo(3);
+            assertThat(responses(worker, "rejected")).isEqualTo(1);
         }
     }
 
@@ -761,22 +842,28 @@ class SmppClientWorkerTest {
     @Test
     void coordinatedMultipartWaitsForAllResponsesAndIgnoresDuplicateCallbacks() throws Exception {
         var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.bindProviderMetrics(providerMetrics);
         var message = messageWithNetwork();
         message.body = "a".repeat(200);
         var submission = worker.submitCoordinated(message, (payload, policy) -> {
             throw new AssertionError("No retry expected");
         });
         assertThat(worker.coordinatedRequests).hasSize(2);
+        assertThat(inFlight(worker)).isEqualTo(2);
         Object first = worker.coordinatedRequests.getFirst().getReferenceObject();
         Object last = worker.coordinatedRequests.getLast().getReferenceObject();
         worker.handleCoordinatedResponse(last, SmppConstants.STATUS_OK, "second");
         assertThat(submission.completion().toCompletableFuture()).isNotDone();
         worker.handleCoordinatedResponse(last, SmppConstants.STATUS_OK, "duplicate");
+        assertThat(inFlight(worker)).isEqualTo(1);
+        assertThat(responses(worker, "accepted")).isEqualTo(1);
         worker.handleCoordinatedResponse(first, SmppConstants.STATUS_OK, "first");
         submission.completion().toCompletableFuture().join();
         assertThat(worker.coordinatedHandoffs).isEqualTo(2);
         assertThat(worker.success).isEmpty();
         assertThat(worker.failures).isEmpty();
+        assertThat(inFlight(worker)).isZero();
+        assertThat(responses(worker, "accepted")).isEqualTo(2);
     }
 
     @Test
@@ -809,6 +896,7 @@ class SmppClientWorkerTest {
     @Test
     void coordinatedTrackingFailureRetriesOnlyHandoffWithoutResubmittingProvider() throws Exception {
         var worker = new TestSmppClientWorker(new TestConfigurationProvider(), new Queue<>(), new CapturingTracker());
+        worker.bindProviderMetrics(providerMetrics);
         worker.failCoordinatedHandoff = true;
         var message = messageWithNetwork();
         message.body = "hello";
@@ -824,6 +912,10 @@ class SmppClientWorkerTest {
         submission.completion().toCompletableFuture().join();
         assertThat(worker.coordinatedRequests).hasSize(1);
         assertThat(worker.coordinatedHandoffs).isEqualTo(2);
+        assertThat(attempts(worker, "initial")).isEqualTo(1);
+        assertThat(attempts(worker, "retry")).isZero();
+        assertThat(inFlight(worker)).isZero();
+        assertThat(responses(worker, "accepted")).isEqualTo(1);
     }
 
     @Test

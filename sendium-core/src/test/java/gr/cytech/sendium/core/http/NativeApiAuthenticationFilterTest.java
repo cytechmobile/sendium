@@ -53,6 +53,7 @@ class NativeApiAuthenticationFilterTest {
 
         var context = ArgumentCaptor.forClass(SecurityContext.class);
         verify(request).setSecurityContext(context.capture());
+        verify(request).setProperty(gr.cytech.sendium.core.AccountSubmissionMetrics.HTTP_ACCOUNT, "account-one");
         assertThat(context.getValue().getUserPrincipal()).isEqualTo(new NativeApiPrincipal("account-one", "product-one"));
         assertThat(context.getValue().getUserPrincipal().getName()).isEqualTo("account-one");
         assertThat(context.getValue().getUserPrincipal().toString()).doesNotContain("key-one");

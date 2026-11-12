@@ -32,6 +32,16 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class KannelResourceTest {
+    @Test
+    void attributesMetricsToCredentialRatherThanRequestOwner() {
+        var credential = new CredentialFileWatcher.Credential(CredentialFileWatcher.CredentialType.HTTP,
+                "trusted-account", null, USERNAME, PASSWORD, null, Set.of());
+        when(resource.credentialFileWatcher.getValidCredentials()).thenReturn(Map.of(USERNAME, credential));
+        resource.requestContext = mock(jakarta.ws.rs.container.ContainerRequestContext.class);
+        assertThat(submit(null).getStatus()).isEqualTo(202);
+        verify(resource.requestContext).setProperty(gr.cytech.sendium.core.AccountSubmissionMetrics.HTTP_ACCOUNT, "trusted-account");
+    }
+
     private static final String USERNAME = "http-user";
     private static final String PASSWORD = "secret";
 

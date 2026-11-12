@@ -50,6 +50,9 @@ public class OutTask<M extends StandardMessage> implements Runnable {
                 if (dlrReference != null) {
                     msg = null;
                     deliverMsgId = dlrReference.receiptMessageId();
+                    if (!dlrReference.batch().beginSend()) {
+                        return;
+                    }
                     success = dlrReference.handler().sendPduRequest((PduRequest) pdu);
                 } else {
                     Object[] arr = (Object[]) pdu.getReferenceObject();

@@ -11,6 +11,7 @@ import gr.cytech.sendium.routing.StandardRoutingManager;
 import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@Timeout(30)
 class StandaloneOutboundSchedulingTest {
     @Test
     void recoverableCycleFailureBacksOffAndKeepsReadinessUp() throws Exception {
@@ -195,7 +197,8 @@ class StandaloneOutboundSchedulingTest {
             when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
             when(config.getOptionalValue("sendium.message.selection-batch-size", Integer.class)).thenReturn(Optional.of(2));
             pipeline.coordinator = spy(StandaloneOutboundPipeline.coordinator(
-                    new MessageStorageProfile("memory", "memory", "memory"), config));
+                    new MessageStorageProfile("memory", "memory", "memory"), config,
+                    new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
             pipeline.config = config;
             pipeline.routing = routing;
             pipeline.workers = mock(OutgoingWorkerManager.class);

@@ -81,6 +81,19 @@ activate this validation, configure an outbound coordinator, or enforce the stan
 Embedding applications own their assembly. Outbound message selectors do not change the independently
 configured DLR subsystem below.
 
+## PostgreSQL Receipt Snapshot Metrics
+
+| Property | Environment variable | Default |
+| :--- | :--- | :--- |
+| `sendium.metrics.storage.enabled` | `SENDIUM_METRICS_STORAGE_ENABLED` | `true` |
+| `sendium.metrics.storage.interval` | `SENDIUM_METRICS_STORAGE_INTERVAL` | `60s` |
+| `sendium.metrics.storage.timeout` | `SENDIUM_METRICS_STORAGE_TIMEOUT` | `2s` |
+| `sendium.metrics.storage.max-rows` | `SENDIUM_METRICS_STORAGE_MAX_ROWS` | `100000` |
+
+The single `enabled` switch defaults to `true` and controls only PostgreSQL receipt snapshot reads. Set it to `false` and restart to stop those reads. The standalone memory Pending/Selected/Routed gauges are always bound; admission/provider/receipt event counters, storage operations and normal processing are unchanged. PostgreSQL collection only exists when the DLR persistence subsystem is configured. It reads at most `max-rows + 1` statuses and publishes complete counts only within the budget; disabled, failed, over-budget, uninitialized or stale snapshots are NaN, not zero.
+
+Interval must be at least 1 second, query timeout a positive whole-second duration and row budget between 1 and 2147483646. These settings require restart. Timeout applies to the JDBC statement; connection acquisition retains the existing shared datasource limit (5 seconds by default). No overlapping collection runs or scrape-triggered SQL are used. Memory occupancy stays live rather than following the refresh interval. See [Monitoring And Observability](08-monitoring-observability.md#storage-collection-controls-and-availability) for availability signals, cost limitations and shared-store deployment guidance.
+
 ## DLR Storage Environment Variables
 
 | Variable | Default | Description |

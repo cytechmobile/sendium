@@ -35,7 +35,8 @@ class StandaloneOutboundShutdownTest {
     void standaloneShutdownDrainsProvidersAndRefusesStageClosureUntilWorkersStop() throws Exception {
         var config = mock(Config.class);
         when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
-        var coordinator = spy(StandaloneOutboundPipeline.coordinator(new MessageStorageProfile("memory", "memory", "memory"), config));
+        var coordinator = spy(StandaloneOutboundPipeline.coordinator(new MessageStorageProfile("memory", "memory", "memory"), config,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
         var shutdownStarted = new CountDownLatch(1);
         doAnswer(invocation -> {
             invocation.callRealMethod();

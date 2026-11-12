@@ -11,6 +11,7 @@ import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -104,14 +105,16 @@ class DefaultOutboundCoordinatorTest {
 
     @Test
     void retainsSourceUntilRequiredHandoff() throws Exception {
-        try (var h = new Harness().start()) {
+        try (var h = new Harness().withMetrics().start()) {
             var delivery = h.delivery();
+            h.assertDeliveryOccupancy(1, 1, 1, 0);
             h.coordinator.complete(new OutboundWork.WorkId(UUID.randomUUID()), new CompletableFuture<>())
                     .toCompletableFuture().join();
             assertThat(h.pending.find(delivery.source())).isPresent();
             CompletableFuture<Void> handoff = new CompletableFuture<>();
             CompletionStage<Void> result = h.coordinator.complete(delivery.work.id(), handoff);
             assertThat(result.toCompletableFuture()).isNotDone();
+            h.assertDeliveryOccupancy(1, 1, 1, 0);
             assertThat(h.pending.find(delivery.source())).isPresent();
             verify(h.pending, never()).complete(any());
             assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
@@ -125,7 +128,9 @@ class DefaultOutboundCoordinatorTest {
             order.verify(h.router).complete(delivery.selected.id());
             order.verify(h.routed).forget(delivery.selected.id());
             assertThat(h.pending.find(delivery.source())).isEmpty();
+            h.assertDeliveryOccupancy(0, 0, 0, 0);
             h.coordinator.complete(delivery.work.id(), new CompletableFuture<>()).toCompletableFuture().join();
+            h.assertDeliveryOccupancy(0, 0, 0, 0);
             verify(h.routed, times(1)).complete(delivery.work.id());
             fails(() -> h.coordinator.recordToRouted(delivery.selected, destination("A", "stale")), INVALID_TRANSITION);
             fails(() -> h.coordinator.returnToRouted(delivery.work), INVALID_TRANSITION);
@@ -135,7 +140,7 @@ class DefaultOutboundCoordinatorTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedOrCancelledHandoffRetainsOwnershipForHandoffOnlyRetry(boolean cancel) throws Exception {
-        try (var h = new Harness().start()) {
+        try (var h = new Harness().withMetrics().start()) {
             var delivery = h.delivery();
             var handoff = new CompletableFuture<Void>();
             var result = h.coordinator.complete(delivery.work.id(), handoff);
@@ -145,19 +150,21 @@ class DefaultOutboundCoordinatorTest {
                 handoff.completeExceptionally(new IllegalStateException("handoff failed"));
             }
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
+            h.assertDeliveryOccupancy(1, 1, 1, 0);
             assertThat(h.pending.find(delivery.source())).isPresent();
             verify(h.routed, never()).complete(any());
             assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
             fails(() -> h.coordinator.returnToRouted(delivery.work), INVALID_TRANSITION);
             h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             assertThat(h.pending.find(delivery.source())).isEmpty();
+            h.assertDeliveryOccupancy(0, 0, 0, 0);
         }
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"routed", "pending", "selected", "forget"})
     void cleanupRetryDoesNotRepeatProviderAttempt(String boundary) throws Exception {
-        try (var h = new Harness().start()) {
+        try (var h = new Harness().withMetrics().start()) {
             var delivery = h.delivery();
             var failure = new IllegalStateException("cleanup failed");
             switch (boundary) {
@@ -169,6 +176,13 @@ class DefaultOutboundCoordinatorTest {
             }
             var result = h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null));
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
+            switch (boundary) {
+                case "routed" -> h.assertDeliveryOccupancy(1, 1, 1, 0);
+                case "pending" -> h.assertDeliveryOccupancy(1, 1, 0, 1);
+                case "selected" -> h.assertDeliveryOccupancy(0, 1, 0, 1);
+                case "forget" -> h.assertDeliveryOccupancy(0, 0, 0, 1);
+                default -> throw new AssertionError(boundary);
+            }
             assertThat(h.coordinator.takeFromRouted("A", Duration.ZERO)).isEmpty();
             assertThat(h.coordinator.selectToRouter(1)).isZero();
             assertThat(h.coordinator.takeForRouting(Duration.ZERO)).isEmpty();
@@ -179,6 +193,7 @@ class DefaultOutboundCoordinatorTest {
             doCallRealMethod().when(h.routed).forget(delivery.selected.id());
             h.coordinator.complete(delivery.work.id(), new CompletableFuture<>()).toCompletableFuture().join();
             assertThat(h.pending.find(delivery.source())).isEmpty();
+            h.assertDeliveryOccupancy(0, 0, 0, 0);
             verify(h.routed, never()).release(any());
             verify(h.routed, times(1)).record(any());
             verify(h.routed, times(boundary.equals("routed") ? 2 : 1)).complete(delivery.work.id());
@@ -189,15 +204,44 @@ class DefaultOutboundCoordinatorTest {
     }
 
     @Test
+    void discardOccupancySurvivesFailedHandoffAndPartialCleanupWithoutCreatingRoutedWork() throws Exception {
+        try (var h = new Harness().withMetrics().start()) {
+            var selected = h.select("discard");
+            var handoff = new CompletableFuture<Void>();
+            var result = h.coordinator.discard(selected.id(), handoff);
+            assertThat(h.selectedOccupancy("routing")).isEqualTo(1);
+            handoff.completeExceptionally(new IllegalStateException("handoff failed"));
+            assertThat(result.toCompletableFuture()).isCompletedExceptionally();
+            assertThat(h.metrics.get("sendium.sms.pending.sources").gauge().value()).isEqualTo(1);
+            assertThat(h.selectedOccupancy("routing")).isEqualTo(1);
+            doThrow(new IllegalStateException("selected cleanup failed")).when(h.router).complete(selected.id());
+            var cleanup = h.coordinator.discard(selected.id(), CompletableFuture.completedStage(null));
+            assertThat(cleanup.toCompletableFuture()).isCompletedExceptionally();
+            assertThat(h.metrics.get("sendium.sms.pending.sources").gauge().value()).isZero();
+            assertThat(h.selectedOccupancy("routing")).isEqualTo(1);
+            assertThat(h.metrics.find("sendium.sms.routed.work").gauges()).isEmpty();
+            doCallRealMethod().when(h.router).complete(selected.id());
+            h.coordinator.discard(selected.id(), new CompletableFuture<>()).toCompletableFuture().join();
+            h.coordinator.discard(selected.id(), new CompletableFuture<>()).toCompletableFuture().join();
+            assertThat(h.selectedOccupancy("routing")).isZero();
+            assertThat(h.selectedOccupancy("retained")).isZero();
+            verify(h.pending, times(1)).complete(selected.sources());
+            verify(h.routed, never()).record(any());
+        }
+    }
+
+    @Test
     void cleanupErrorsSettleTheCompletionStageRatherThanLeavingItPending() throws Exception {
-        try (var h = new Harness().start()) {
+        try (var h = new Harness().withMetrics().start()) {
             var delivery = h.delivery();
             doThrow(new AssertionError("cleanup error")).when(h.pending).complete(delivery.selected.sources());
             var result = h.coordinator.complete(delivery.work.id(), CompletableFuture.completedStage(null));
             assertThat(result.toCompletableFuture()).isCompletedExceptionally();
             assertThat(h.pending.find(delivery.source())).isPresent();
+            h.assertDeliveryOccupancy(1, 1, 0, 1);
             doCallRealMethod().when(h.pending).complete(delivery.selected.sources());
             h.coordinator.complete(delivery.work.id(), new CompletableFuture<>()).toCompletableFuture().join();
+            h.assertDeliveryOccupancy(0, 0, 0, 0);
         }
     }
 
@@ -483,7 +527,7 @@ class DefaultOutboundCoordinatorTest {
 
     @Test
     void concurrentCompletionReportsShareOneHandoffAndOneCleanup() throws Exception {
-        try (var h = new Harness().start(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (var h = new Harness().withMetrics().start(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var delivery = h.delivery();
             var handoff = new CompletableFuture<Void>();
             var reports = new ArrayList<java.util.concurrent.Future<CompletionStage<Void>>>();
@@ -495,8 +539,10 @@ class DefaultOutboundCoordinatorTest {
                 assertThat((Object) report.get(2, TimeUnit.SECONDS)).isSameAs(result);
             }
             verify(h.pending, never()).complete(any());
+            h.assertDeliveryOccupancy(1, 1, 1, 0);
             handoff.complete(null);
             result.toCompletableFuture().join();
+            h.assertDeliveryOccupancy(0, 0, 0, 0);
             verify(h.pending, times(1)).complete(delivery.selected.sources());
             verify(h.routed, times(1)).complete(delivery.work.id());
         }
@@ -560,6 +606,7 @@ class DefaultOutboundCoordinatorTest {
     }
 
     private static final class Harness implements AutoCloseable {
+        private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
         private final MemoryPendingMessageStore<Payload> pending = spy(new MemoryPendingMessageStore<>(4, Payload::copy));
         private final MemorySelectedRouterStore<Payload> router = spy(new MemorySelectedRouterStore<>(pending, 4));
         private final MemoryRoutedWorkStore<Payload> routed;
@@ -572,6 +619,31 @@ class DefaultOutboundCoordinatorTest {
         private Harness(int routedCapacity) {
             routed = spy(new MemoryRoutedWorkStore<>(routedCapacity, Payload::copy));
             coordinator = new DefaultOutboundCoordinator<>(pending, router, routed);
+        }
+
+        private Harness withMetrics() {
+            pending.bindMetrics(metrics);
+            router.bindMetrics(metrics);
+            routed.bindMetrics(metrics);
+            return this;
+        }
+
+        private void assertDeliveryOccupancy(int sources, int selectedRetained, int routedActive, int routedTerminal) {
+            assertThat(metrics.get("sendium.sms.pending.sources").gauge().value()).as("Pending sources").isEqualTo(sources);
+            assertThat(selectedOccupancy("waiting")).as("Selected waiting").isZero();
+            assertThat(selectedOccupancy("routing")).as("Selected routing").isZero();
+            assertThat(selectedOccupancy("retained")).as("Selected retained").isEqualTo(selectedRetained);
+            assertThat(routedOccupancy("waiting")).as("Routed waiting").isZero();
+            assertThat(routedOccupancy("active")).as("Routed active").isEqualTo(routedActive);
+            assertThat(routedOccupancy("terminal")).as("Routed terminal").isEqualTo(routedTerminal);
+        }
+
+        private double selectedOccupancy(String state) {
+            return metrics.get("sendium.sms.selected.work").tag("state", state).gauge().value();
+        }
+
+        private double routedOccupancy(String state) {
+            return metrics.get("sendium.sms.routed.work").tag("destination", "A").tag("state", state).gauge().value();
         }
 
         private Harness start() {
@@ -593,7 +665,11 @@ class DefaultOutboundCoordinatorTest {
 
         @Override
         public void close() {
-            coordinator.close();
+            try {
+                coordinator.close();
+            } finally {
+                metrics.close();
+            }
         }
     }
 

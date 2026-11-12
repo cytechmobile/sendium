@@ -567,6 +567,13 @@ public class SmppServerSessionHandler<M extends StandardMessage> implements Smsg
         return s.getConfiguration().getName();
     }
 
+    public String getAuthenticatedAccountId() {
+        if (sessionContext instanceof BasicSmppSessionContext basic) {
+            return basic.getConfiguredAccountId();
+        }
+        return sessionContext == null ? null : sessionContext.getAccountId();
+    }
+
     public String getApiProduct() {
         return apiProduct;
     }

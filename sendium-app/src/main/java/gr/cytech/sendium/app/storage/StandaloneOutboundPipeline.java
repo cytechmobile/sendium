@@ -17,6 +17,7 @@ import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardOutboundDispatch;
 import gr.cytech.sendium.routing.StandardRoutingManager;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.arc.DefaultBean;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -67,7 +68,7 @@ public class StandaloneOutboundPipeline implements HealthCheck {
     @Produces
     @Singleton
     @DefaultBean
-    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config) {
+    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config, MeterRegistry metrics) {
         int sourceCapacity = positive(config, "pending.capacity", 10000);
         positive(config, "selection-batch-size", 100);
         var pending = new MemoryPendingMessageStore<StandardMessage>(sourceCapacity,
@@ -75,8 +76,11 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         var selected = new MemorySelectedRouterStore<>(pending, positive(config, "router-queue.capacity", 1000));
         var routed = new MemoryRoutedWorkStore<StandardMessage>(sourceCapacity,
                 StandaloneMessageSnapshot::copy);
+        routed.bindMetrics(metrics);
         var result = new DefaultOutboundCoordinator<>(pending, selected, routed);
         result.start();
+        pending.bindMetrics(metrics);
+        selected.bindMetrics(metrics);
         return result;
     }
 

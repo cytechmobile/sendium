@@ -2,14 +2,19 @@ package gr.cytech.sendium.app.storage;
 
 import gr.cytech.sendium.core.AbstractOutWorker;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardRoutingManager;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.eclipse.microprofile.config.Config;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -28,8 +33,37 @@ class StandaloneOutboundConfigurationTest {
             String key = "sendium.message." + setting;
             when(config.getOptionalValue(key, Integer.class)).thenReturn(Optional.of(0));
             assertThatThrownBy(() -> StandaloneOutboundPipeline.coordinator(
-                    new MessageStorageProfile("memory", "memory", "memory"), config))
+                    new MessageStorageProfile("memory", "memory", "memory"), config, new SimpleMeterRegistry()))
                     .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(key).hasMessageContaining("positive");
+        }
+    }
+
+    @Test
+    void memoryMetricsRemainEnabledRegardlessOfPostgresqlSnapshotSetting() throws Exception {
+        for (var setting : List.of(Optional.<Boolean>empty(), Optional.of(true), Optional.of(false))) {
+            var config = mock(Config.class);
+            when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
+            when(config.getOptionalValue("sendium.metrics.storage.enabled", Boolean.class))
+                    .thenReturn(setting);
+            var metrics = new SimpleMeterRegistry();
+            try {
+                var coordinator = StandaloneOutboundPipeline.coordinator(
+                        new MessageStorageProfile("memory", "memory", "memory"), config, metrics);
+                try {
+                    coordinator.accept(new SourceId(UUID.randomUUID()),
+                            new StandardMessage());
+                    coordinator.selectToRouter(1);
+                    var selected = coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                    coordinator.recordToRouted(selected, new Destination<>("provider", selected.message()));
+                    assertThat(metrics.get("sendium.sms.pending.sources").gauge().value()).isEqualTo(1);
+                    assertThat(metrics.find("sendium.sms.selected.work").gauges()).hasSize(3);
+                    assertThat(metrics.get("sendium.sms.routed.work").tag("state", "waiting").gauge().value()).isEqualTo(1);
+                } finally {
+                    coordinator.close();
+                }
+            } finally {
+                metrics.close();
+            }
         }
     }
 

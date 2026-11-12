@@ -9,6 +9,7 @@ import com.cloudhopper.smpp.SmppServerConfiguration;
 import com.cloudhopper.smpp.impl.DefaultSmppServer;
 import com.cloudhopper.smpp.pdu.DeliverSm;
 import com.cloudhopper.smpp.pdu.Pdu;
+import com.cloudhopper.smpp.pdu.SubmitSmResp;
 import com.cloudhopper.smpp.ssl.SslConfiguration;
 import com.cloudhopper.smpp.tlv.Tlv;
 import com.cloudhopper.smpp.type.Address;
@@ -19,6 +20,7 @@ import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.AbstractOutWorker;
+import gr.cytech.sendium.core.AccountSubmissionMetrics;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
@@ -40,11 +42,14 @@ import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.external.filter.FilterStatusCodes;
 import gr.cytech.sendium.external.filter.InMessageFiltering;
 import gr.cytech.sendium.util.MessageTrace;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import jakarta.enterprise.context.Dependent;
+import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -155,6 +160,10 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     private final Map<M, MultipartMembership> pendingPartSources = Collections.synchronizedMap(new IdentityHashMap<>());
     private volatile OutboundCoordinator<M> ingressCoordinator;
     private volatile boolean ingressStarted;
+    private Counter acceptedSubmissions;
+    private Counter rejectedSubmissions;
+    private MeterRegistry submissionMetrics;
+    private MeterRegistry receiptMetrics;
 
     public SmppServerWorker() {
         this.authProvider = new BasicSmppAuthenticationProvider(this);
@@ -168,6 +177,19 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
     ) {
         super(configurationProvider, instName, routerQ);
         setUp();
+    }
+
+    /** CDI binds automatically; programmatic workers can opt in before startup. */
+    @Inject
+    public void bindSubmissionMetrics(MeterRegistry metrics) {
+        submissionMetrics = metrics;
+        acceptedSubmissions = metrics.counter("sendium.sms.submissions", "ingress", "smpp", "result", "accepted");
+        rejectedSubmissions = metrics.counter("sendium.sms.submissions", "ingress", "smpp", "result", "rejected");
+    }
+
+    @Inject
+    public void bindReceiptMetrics(MeterRegistry metrics) {
+        receiptMetrics = metrics;
     }
 
     public void setupInstance(SendiumConfigurationProvider cp, String instName, Queue<M> routerQueue) {
@@ -793,7 +815,7 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
             expectedParts.add(i);
         }
         DlrDeliveryBatch<M> batch = new DlrDeliveryBatch<>(
-                message, started.getAsInt(), expectedParts, messageStore, handler);
+                message, started.getAsInt(), expectedParts, messageStore, handler, receiptMetrics);
         for (int i = 0; i < requests.size(); i++) {
             DeliverSm deliverSm = requests.get(i);
             String receiptMessageId = (String) deliverSm.getReferenceObject();
@@ -1213,6 +1235,13 @@ public class SmppServerWorker<M extends StandardMessage> extends AbstractOutWork
         // using execute instead of submit, so as to not wrap our OutTask runnable with a FutureTask and
         // our PriorityBlockingQueue can prioritize it as needed
         outExecutor.execute(new OutTask<M>(this, event));
+        if (event instanceof SubmitSmResp && acceptedSubmissions != null) {
+            (event.getCommandStatus() == SmppConstants.STATUS_OK ? acceptedSubmissions : rejectedSubmissions).increment();
+            if (event.getCommandStatus() == SmppConstants.STATUS_OK && event.getReferenceObject() instanceof Object[] reference &&
+                    reference.length > 0 && reference[0] instanceof SmppServerSessionHandler<?> handler) {
+                AccountSubmissionMetrics.accepted(submissionMetrics, "smpp", handler.getAuthenticatedAccountId());
+            }
+        }
     }
 
     public LinkedBlockingQueue<InEvent<M>> getInEventQueue() {
