@@ -65,7 +65,7 @@ Download and run the setup script:
 curl -fsSLo quick-start.sh https://raw.githubusercontent.com/cytechmobile/sendium/main/quick-start.sh && sh quick-start.sh
 ```
 
-The script creates a `sendium/` runtime directory, generates random HTTP, SMPP, and database credentials, writes Docker Compose and all required configuration files, starts PostgreSQL and Sendium, and waits for PostgreSQL-backed readiness.
+The script creates a `sendium/` runtime directory, generates a native HTTP API key plus separate Kannel-compatible HTTP, SMPP and database credentials, writes Docker Compose and all required configuration files, starts PostgreSQL and Sendium, and waits for PostgreSQL-backed readiness.
 
 It asks you to choose one upstream option:
 
@@ -79,7 +79,7 @@ When startup completes, the script prints the Swagger URL and an exact command f
 
 ### Send Your First SMS
 
-For a configured upstream provider, load the generated local HTTP credentials and submit a message:
+For a configured upstream provider, load the generated API key and submit through Sendium's native JSON API:
 
 ```bash
 cd sendium
@@ -87,15 +87,15 @@ set -a
 . ./.sendium.env
 set +a
 
-curl -i -G http://127.0.0.1:8080/sendsms \
-  --data-urlencode "username=${SENDIUM_HTTP_USER}" \
-  --data-urlencode "password=${SENDIUM_HTTP_PASSWORD}" \
-  --data-urlencode "from=Sendium" \
-  --data-urlencode "to=306910000000" \
-  --data-urlencode "text=Hello from Sendium!"
+curl -i http://127.0.0.1:8080/api/v1/messages \
+  -H "Authorization: Bearer ${SENDIUM_HTTP_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  --data '{"from":"Sendium","to":"306910000000","text":"Hello from Sendium!"}'
 ```
 
-Replace the sender and recipient with values accepted by your provider. A `202 Accepted` response and UUID mean Sendium validated and queued the request; they do not confirm that the upstream provider accepted or delivered the SMS.
+Replace the sender and recipient with values accepted by your provider. A `202 Accepted` response with JSON containing `messageId` and `status: "accepted"` means Sendium validated and queued the request; it does not confirm that the upstream provider accepted or delivered the SMS.
+
+For existing Kannel integrations, `/sendsms` remains available using the separately generated `SENDIUM_HTTP_USER` and `SENDIUM_HTTP_PASSWORD`; see the [Kannel-compatible HTTP API](docs/06-http-api.md). The two HTTP credentials share the configured `quickstart-http` account. If an older generated runtime has no `SENDIUM_HTTP_API_KEY`, rerun Quick Start with `--force` to regenerate credentials (existing client credentials rotate), or add a native API-key credential using the [authentication guide](docs/03-auth-security.md).
 
 See the [Docker deployment guide](docs/02-docker-deployment.md) for the complete manual container setup. Configuration details are maintained in [Authentication and Security](docs/03-auth-security.md), [SMPP Configuration](docs/04-smpp-configuration.md), [Routing Engine](docs/05-routing-engine.md), and the [Configuration Reference](docs/09-configuration-reference.md).
 
