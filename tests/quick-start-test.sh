@@ -111,6 +111,7 @@ assert_equals 600 "$(file_mode "$local_dir/conf/credentials.yml")" "credentials.
 
 http_user=$(sed -n "s/^SENDIUM_HTTP_USER='\([^']*\)'$/\1/p" "$local_dir/.sendium.env")
 http_password=$(sed -n "s/^SENDIUM_HTTP_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$local_dir/.sendium.env")
+http_api_key=$(sed -n "s/^SENDIUM_HTTP_API_KEY='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$local_dir/.sendium.env")
 smpp_user=$(sed -n "s/^SENDIUM_SMPP_USER='\([^']*\)'$/\1/p" "$local_dir/.sendium.env")
 smpp_password=$(sed -n "s/^SENDIUM_SMPP_PASSWORD='\([A-Za-z0-9][A-Za-z0-9]*\)'$/\1/p" "$local_dir/.sendium.env")
 database_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$local_dir/.sendium.env")
@@ -118,6 +119,14 @@ postgres_password=$(sed -n "s/^POSTGRES_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" 
 assert_equals 'sendium-http' "$http_user" "HTTP environment username"
 assert_equals 'sendium-smpp' "$smpp_user" "SMPP environment username"
 assert_equals 48 "${#http_password}" "HTTP password length"
+assert_equals 64 "${#http_api_key}" "native HTTP API key length"
+assert_contains "apiKey: \"$http_api_key\"" "$local_dir/conf/credentials.yml"
+assert_equals 2 "$(grep -c 'accountId: "quickstart-http"' "$local_dir/conf/credentials.yml")" "shared native and Kannel account"
+assert_contains '/api/v1/messages' "$test_root/local.out"
+assert_contains 'Authorization: Bearer ${SENDIUM_HTTP_API_KEY}' "$test_root/local.out"
+assert_not_contains "$http_api_key" "$test_root/local.out"
+assert_not_contains "$http_api_key" "$local_dir/compose.yml"
+assert_not_contains "$http_api_key" "$local_dir/conf/smsg.properties"
 assert_equals 8 "${#smpp_password}" "SMPP password length"
 assert_equals 64 "${#database_password}" "PostgreSQL password length"
 assert_equals "$database_password" "$postgres_password" "PostgreSQL container password"
@@ -136,16 +145,22 @@ pass "non-empty target protection"
 
 printf 'keep me\n' > "$local_dir/user-file.txt"
 old_http_password=$http_password
+old_http_api_key=$http_api_key
 old_database_password=$database_password
 sh "$quick_start" --directory "$local_dir" --provider local --force --no-start > "$test_root/force.out" 2>&1
 assert_file "$local_dir/user-file.txt"
 assert_contains 'keep me' "$local_dir/user-file.txt"
 assert_contains 'up -d --force-recreate' "$test_root/force.out"
 http_password=$(sed -n "s/^SENDIUM_HTTP_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$local_dir/.sendium.env")
+http_api_key=$(sed -n "s/^SENDIUM_HTTP_API_KEY='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$local_dir/.sendium.env")
 database_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$local_dir/.sendium.env")
 [ -n "$http_password" ] || fail "forced regeneration did not produce an HTTP password"
 assert_equals 48 "${#http_password}" "regenerated HTTP password length"
 [ "$old_http_password" != "$http_password" ] || fail "forced regeneration did not rotate the HTTP password"
+assert_equals 64 "${#http_api_key}" "regenerated native API key length"
+[ "$old_http_api_key" != "$http_api_key" ] || fail "forced regeneration did not rotate the native API key"
+assert_contains "apiKey: \"$http_api_key\"" "$local_dir/conf/credentials.yml"
+assert_not_contains "$http_api_key" "$test_root/force.out"
 assert_equals "$old_database_password" "$database_password" "preserved PostgreSQL password"
 pass "explicit regeneration preserves unrelated files"
 
@@ -296,7 +311,16 @@ if [ -n "${SENDIUM_TEST_IMAGE-}" ]; then
     assert_contains 'Follow live logs with:' "$test_root/integration.out"
     integration_http_user=$(sed -n "s/^SENDIUM_HTTP_USER='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
     integration_http_password=$(sed -n "s/^SENDIUM_HTTP_PASSWORD='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
+    integration_http_api_key=$(sed -n "s/^SENDIUM_HTTP_API_KEY='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
     integration_database_password=$(sed -n "s/^SENDIUM_DLR_POSTGRESQL_PASSWORD='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
+    native_status=$(curl -sS -o "$test_root/native.out" -w '%{http_code}' http://127.0.0.1:8080/api/v1/messages \
+        -H "Authorization: Bearer $integration_http_api_key" \
+        -H 'Content-Type: application/json' \
+        --data '{"from":"Sendium","to":"306910000000","text":"Quick-start native integration test"}')
+    assert_equals 202 "$native_status" "generated native API key submission"
+    grep -E '"messageId"[[:space:]]*:[[:space:]]*"[0-9a-f-]{36}"' "$test_root/native.out" >/dev/null 2>&1 || fail "expected JSON gateway messageId"
+    grep -E '"status"[[:space:]]*:[[:space:]]*"accepted"' "$test_root/native.out" >/dev/null 2>&1 || fail "expected JSON accepted status"
+    assert_not_contains "$integration_http_api_key" "$test_root/integration.out"
     http_status=$(curl -sS -o "$test_root/sendsms.out" -w '%{http_code}' -G http://127.0.0.1:8080/sendsms \
         --data-urlencode "username=$integration_http_user" \
         --data-urlencode "password=$integration_http_password" \
@@ -305,7 +329,7 @@ if [ -n "${SENDIUM_TEST_IMAGE-}" ]; then
         --data-urlencode 'text=Quick-start integration test')
     assert_equals 202 "$http_status" "generated HTTP credential submission"
     grep -E '^[0-9a-f-]{36}$' "$test_root/sendsms.out" >/dev/null 2>&1 || fail "expected gateway UUID response"
-    pass "real container startup, readiness, and HTTP submission"
+    pass "real container startup, readiness, native JSON and Kannel submissions"
 
     original_container_id=$(docker compose -p "$integration_project" -f "$integration_dir/compose.yml" --project-directory "$integration_dir" ps -q sendium)
     SENDIUM_UPSTREAM_HOST='127.0.0.1' \
@@ -330,6 +354,15 @@ if [ -n "${SENDIUM_TEST_IMAGE-}" ]; then
     done
     assert_contains 'Starting: (smppclient.upstream)' "$integration_dir/logs/smsg.log"
     assert_not_contains "Cannot start worker 'upstream': Missing '.type' property" "$integration_dir/logs/smsg.log"
+    recreated_api_key=$(sed -n "s/^SENDIUM_HTTP_API_KEY='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
+    native_status=$(curl -sS -o "$test_root/native-rotated.out" -w '%{http_code}' http://127.0.0.1:8080/api/v1/messages \
+        -H "Authorization: Bearer $integration_http_api_key" -H 'Content-Type: application/json' \
+        --data '{"from":"Sendium","to":"306910000000","text":"Old key"}')
+    assert_equals 401 "$native_status" "old native API key after regeneration"
+    native_status=$(curl -sS -o "$test_root/native-rotated.out" -w '%{http_code}' http://127.0.0.1:8080/api/v1/messages \
+        -H "Authorization: Bearer $recreated_api_key" -H 'Content-Type: application/json' \
+        --data '{"from":"Sendium","to":"306910000000","text":"New key"}')
+    assert_equals 202 "$native_status" "regenerated native API key submission"
     pass "forced regeneration recreates the running container"
 else
     printf 'skip - real container startup (set SENDIUM_TEST_IMAGE to enable)\n'

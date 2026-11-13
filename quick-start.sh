@@ -471,12 +471,14 @@ trap cleanup_quick_start 0
 http_user='sendium-http'
 smpp_user='sendium-smpp'
 http_password=$(generate_secret 24)
+http_api_key=$(generate_secret 32)
 # SMPP 3.4 bind passwords are limited to eight characters.
 smpp_password=$(generate_smpp_secret)
 
 cat > "$staging_dir/.sendium.env" <<EOF
 SENDIUM_HTTP_USER='$http_user'
 SENDIUM_HTTP_PASSWORD='$http_password'
+SENDIUM_HTTP_API_KEY='$http_api_key'
 SENDIUM_SMPP_USER='$smpp_user'
 SENDIUM_SMPP_PASSWORD='$smpp_password'
 SENDIUM_DLR_POSTGRESQL_JDBC_URL='$database_jdbc_url'
@@ -516,6 +518,9 @@ credentials:
     accountId: "quickstart-http"
     systemId: "$http_user"
     password: "$http_password"
+  - type: HTTP
+    accountId: "quickstart-http"
+    apiKey: "$http_api_key"
 EOF
 
 cat > "$staging_dir/conf/smsg.properties" <<'EOF'
@@ -674,6 +679,16 @@ trap - 0
 
 printf '\nSendium runtime generated in %s\n' "$absolute_target"
 printf 'Local credentials: %s\n' "$absolute_target/.sendium.env"
+
+printf '\nAfter startup, submit with the native JSON API (replace sender/recipient):\n'
+printf '  set -a\n  . "%s/.sendium.env"\n  set +a\n' "$absolute_target"
+cat <<'EOF'
+  curl -i http://127.0.0.1:8080/api/v1/messages \
+    -H "Authorization: Bearer ${SENDIUM_HTTP_API_KEY}" \
+    -H 'Content-Type: application/json' \
+    --data '{"from":"Sendium","to":"306910000000","text":"Hello from Sendium!"}'
+EOF
+printf 'HTTP 202 means accepted by Sendium, not provider acceptance or handset delivery.\n'
 
 if [ "$upstream_enabled" = true ]; then
     printf 'Upstream provider: %s (%s:%s)\n' "$provider" "$upstream_host" "$upstream_port"
