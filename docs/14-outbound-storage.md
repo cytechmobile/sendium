@@ -149,7 +149,8 @@ sequenceDiagram
   identify later steps independently of mutable payloads and provider IDs. Return the actual take handle,
   with its updated payload, rather than a reconstructed wrapper; stale returns must not overwrite live work.
 - **Incoming multipart:** `acceptPart` retains each part and its group membership before acknowledgement.
-  The reassembler makes an aggregate or expired individual parts ready using `makeHeldReady(originalSourceIds, payload)`.
+  Memory reassembly publishes prepared work through `makeHeldReady(originalSourceIds, payload)`.
+  File recovery registers source-only readiness and leaves assembly until a router slot is available.
   This creates no new admission; in-process publication retries do not re-acknowledge input or create
   another source binding.
 - **Outgoing multipart:** provider requests and replacements share one routed parent and original source
@@ -165,8 +166,10 @@ sequenceDiagram
 advances stage ownership; it does not choose the destination or send the message.
 `takeFromRouted(destination, timeout)` takes one assigned item without completing ownership;
 `returnToRouted(work)` returns an unfinished take to scheduling at its unchanged destination.
-`makeHeldReady(sources, preparedMessage)` binds held sources to the caller-prepared payload without
-assembling or accepting new input. `selectToRouter(limit)` then selects eligible work into the router
+On the memory backend, `makeHeldReady(sources, preparedMessage)` binds held sources to the caller-prepared
+payload without assembling or accepting new input. The file backend explicitly rejects arbitrary
+replacement payload publication with `UNSUPPORTED`; its indexed recovery uses internal source-derived
+readiness instead. `selectToRouter(limit)` selects eligible work into the router
 backlog and returns the newly staged count; it does not evaluate routing rules.
 
 ## Pending Sources and Multipart Groups
@@ -225,14 +228,18 @@ Payloads are fetched for assembly or expiry. Closing recovery cancels its timers
 still belongs to the coordinator after terminal processing and required DLR handoff.
 
 The file path instead uses rebuilt disk group/deadline references and one batch-bounded poller. Backend
-opening validates every committed source/membership before coordinator recovery becomes ready; later
-publication/expiry visits one group's original payloads at a time. It does not create a heap map or timer
+opening validates every committed source/membership before coordinator recovery becomes ready. Later
+publication/expiry registers source-only recipes, with no assembled body written to disk. Selection
+loads one group's original payloads and assembles only when router capacity is available. Recovery
+does not create a heap payload map or timer
 for every retained group. See the [file architecture and bounds](16-filesystem-pending-storage.md#bounds-and-capacity).
 
 There is **no new durable checkpoint of a runtime assembly, release or publication decision**.
 Pending-only recovery may repeat processing. Selection/destination decisions survive only under
-their own configured stage guarantees. Within a running process, `makeHeldReady` retains the first
-source-to-projection binding and prepared payload, making publication retries idempotent.
+their own configured stage guarantees. Within a running process, memory `makeHeldReady` retains the
+first source-to-projection binding and prepared payload. File recipes retain source ownership and
+assembly mode; a failed handoff derives a fresh execution from the unchanged originals on retry.
+Both paths prevent duplicate ready work while the original sources remain retained.
 
 `SmppServerWorker.reconstructPendingParts(pending, pageSize)` is an explicit pre-ingress startup hook
 using its selected coordinator's publication boundary for handler-owned recovery. It prevents worker

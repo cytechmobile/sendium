@@ -24,8 +24,11 @@ mapper. No existing memory snapshot or ingress behavior is changed by the codec.
 `PendingRecordCodec.decode(bytes)` validates one complete envelope and returns a
 record. The codec has no storage, acknowledgement, routing, or lifecycle side
 effects. Later admission integration must fail before client success if a selected
-durable representation cannot preserve the accepted data. No codec integration
-or new backend profile is enabled by the record/codec work.
+durable representation cannot preserve the accepted data. The codec itself does not enable a profile;
+the implemented [file pending backend](16-filesystem-pending-storage.md) owns publication and recovery.
+Its spool marker (`sendium-pending-spool:2`) and disposable source-only recipe schema (version 2) are
+separate from the accepted-record schema version 1 documented here. File admission supports priorities
+3, 2 and 1, storing the record under `accepted/<priority>/<UUID-prefix>/<sourceId>.cbor`.
 
 ## Version 1 envelope
 
@@ -52,7 +55,8 @@ complete-source development commit was not a released durable format. The
 `multipart` key is required (null for ordinary sources). Intermediate development
 records without this key or the required membership `originalSourceId` are rejected, rather than silently interpreted as a complete
 durable schema. Saved membership does not itself implement process-restart recovery;
-shared reconstruction is described below, and a physical backend follows in #339.
+shared reconstruction is described below, and the [physical backend](16-filesystem-pending-storage.md)
+uses these saved facts to rebuild multipart indexes and source-only readiness after restart.
 
 ## Multipart admission and membership
 
