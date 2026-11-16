@@ -43,7 +43,7 @@ class ForcedPendingRestartTest {
 
     enum Boundary {
         ADMITTED, SELECTED, ROUTED, PROVIDER_PART_PENDING, DLR_HANDOFF_FAILED, TERMINAL_COMPLETE,
-        MULTIPART_COMPLETE, MULTIPART_INCOMPLETE
+        MULTIPART_COMPLETE, MULTIPART_INCOMPLETE, MULTIPART_SELECTED
     }
 
     @ParameterizedTest
@@ -91,14 +91,16 @@ class ForcedPendingRestartTest {
         }
     }
 
-    @Test
-    void completeMultipartReassemblesOriginalOrdinalsAndRetainsDuplicateOwnership() throws Exception {
-        crashAt(Boundary.MULTIPART_COMPLETE);
+    @ParameterizedTest
+    @EnumSource(value = Boundary.class, names = {"MULTIPART_COMPLETE", "MULTIPART_SELECTED"})
+    void completeMultipartReassemblesOriginalOrdinalsAndRetainsDuplicateOwnership(Boundary boundary) throws Exception {
+        crashAt(boundary);
         try (var recovered = new Harness(root, START)) {
             recovered.coordinator.start();
             assertThat(recovered.coordinator.selectToRouter(4)).isEqualTo(1);
             var selected = recovered.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(selected.message().body).isEqualTo("AB");
+            assertThat(selected.message().priority).isEqualTo(1);
             assertThat(selected.sources()).containsExactlyInAnyOrder(source("first"), source("duplicate"), source("second"));
             recovered.coordinator.discard(selected.id(), CompletableFuture.completedStage(null)).toCompletableFuture().join();
             assertThat(recovered.pending.sourcesAfter(null, 4)).isEmpty();
@@ -172,17 +174,25 @@ class ForcedPendingRestartTest {
             Boundary boundary = Boundary.valueOf(args[1]);
             var harness = new Harness(root, START);
             harness.coordinator.start();
-            if (boundary == Boundary.MULTIPART_COMPLETE || boundary == Boundary.MULTIPART_INCOMPLETE) {
-                String total = boundary == Boundary.MULTIPART_COMPLETE ? "02" : "03";
+            if (boundary == Boundary.MULTIPART_COMPLETE || boundary == Boundary.MULTIPART_INCOMPLETE || boundary == Boundary.MULTIPART_SELECTED) {
+                String total = boundary == Boundary.MULTIPART_INCOMPLETE ? "03" : "02";
                 for (var part : List.of(message("first", "A", "0500037F" + total + "01"),
                         message("duplicate", "ignored duplicate", "0500037F" + total + "01"))) {
+                    part.priority = part.body.equals("A") ? 1 : 3;
                     var source = new SourceId(UUID.fromString(part.serial));
                     harness.coordinator.acceptPart(source, part, Duration.ofSeconds(60));
                     harness.coordinator.pendingMultipartRecovery().orElseThrow().accepted(source);
                 }
-                if (boundary == Boundary.MULTIPART_COMPLETE) {
+                if (boundary != Boundary.MULTIPART_INCOMPLETE) {
                     harness.coordinator.acceptPart(source("second"), message("second", "B", "0500037F0202"), Duration.ofSeconds(60));
                     harness.coordinator.pendingMultipartRecovery().orElseThrow().accepted(source("second"));
+                }
+                if (boundary == Boundary.MULTIPART_SELECTED) {
+                    if (harness.coordinator.selectToRouter(1) != 1) {
+                        throw new AssertionError("Multipart work did not reach selection");
+                    }
+                    var selected = harness.coordinator.takeForRouting(Duration.ZERO).orElseThrow();
+                    selected.message().body = "execution-only multipart mutation";
                 }
             } else {
                 harness.coordinator.accept(source("ordinary"), message("ordinary", "accepted", null));

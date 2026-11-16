@@ -435,6 +435,8 @@ same volume with routing resumed. It then finishes the recovered multipart group
 content, required source cleanup and HTTP/SMPP DLR delivery. Test containers/volume are removed at
 the end; this is not a production backup/restore command. Without the flag the existing memory-profile
 PostgreSQL correlation/restart smoke remains unchanged. The fixture uses ports 18080, 27777 and 27779.
+Set `SENDIUM_E2E_SMPP_PORT` to override the host-side SMPP port if 27777 is already in use;
+the container's internal SMPP port remains unchanged.
 
 Rollback from file pending is not code-only: drain accepted sources first or stop and preserve the entire
 spool for later compatible recovery. Switching to memory does not migrate retained work. PostgreSQL DLR

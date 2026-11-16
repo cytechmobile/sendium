@@ -60,7 +60,7 @@ public class NativeE2eSmoke {
     private static final String POSTGRESQL_PASSWORD = System.getenv().getOrDefault(
             "SENDIUM_DLR_POSTGRESQL_PASSWORD", "sendium-test");
     private static final int SENDIUM_HTTP_PORT = 18080;
-    private static final int SENDIUM_SMPP_PORT = 27777;
+    private static final int SENDIUM_SMPP_PORT = Integer.parseInt(System.getenv().getOrDefault("SENDIUM_E2E_SMPP_PORT", "27777"));
     private static final int UPSTREAM_SMPP_PORT = 27779;
     private static final Duration TIMEOUT = Duration.ofSeconds(90);
     private static final boolean PENDING_RESTART = Boolean.parseBoolean(System.getenv("SENDIUM_E2E_PENDING_RESTART"));
