@@ -46,7 +46,7 @@ public final class PendingMultipartRecovery<M extends StandardMessage> implement
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.indexedRecovery = pending instanceof IndexedMultipartSource source ?
-                new IndexedPendingMultipartRecovery<>(pending, source, clock, scheduler, publisher) : null;
+                new IndexedPendingMultipartRecovery<>(pending, source, clock, scheduler) : null;
     }
 
     /** Caller quiesces ingress/processing until successful return; no publication occurs before scan validation. */

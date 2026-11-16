@@ -91,11 +91,11 @@ class FilePendingTraversalTest {
             store.admitHeld(source(held), held);
             store.admit(source(high), high);
             store.admit(source(low), low);
-            store.makeHeldReady(Set.of(source(held)), held);
-            store.makeHeldReady(Set.of(source(held)), held);
+            store.makeMultipartReady(Set.of(source(held)));
+            store.makeMultipartReady(Set.of(source(held)));
             var selected = drain(store, 4);
             assertThat(selected).extracting(work -> work.message().priority).containsExactly(3, 2, 1);
-            store.makeHeldReady(Set.of(source(held)), held); // Must not requeue already selected work.
+            store.makeMultipartReady(Set.of(source(held))); // Must not requeue already selected work.
             assertThat(drain(store, 1)).isEmpty();
             selected.forEach(work -> store.complete(work.sources()));
             store.complete(Set.of(source(held)));
@@ -109,11 +109,11 @@ class FilePendingTraversalTest {
             store.open();
             var held = message(1, 2);
             store.admitHeld(source(held), held);
-            store.makeHeldReady(Set.of(source(held)), held);
+            store.makeMultipartReady(Set.of(source(held)));
             store.complete(Set.of(source(held)));
             assertThat(drain(store, 1)).isEmpty();
             store.admitHeld(source(held), held);
-            store.makeHeldReady(Set.of(source(held)), held);
+            store.makeMultipartReady(Set.of(source(held)));
             failHandoff(store);
             store.selectionLock().lock();
             try {
@@ -139,14 +139,14 @@ class FilePendingTraversalTest {
         try (var store = store()) {
             store.open();
             store.admitHeld(source(held), held);
-            store.makeHeldReady(Set.of(source(held)), held);
+            store.makeMultipartReady(Set.of(source(held)));
             store.admit(source(ordinary), ordinary);
             assertThat(drain(store, 2)).hasSize(2);
         }
         try (var store = store()) {
             store.open();
             assertThat(drain(store, 2)).singleElement().satisfies(work -> assertThat(work.sources()).containsExactly(source(ordinary)));
-            store.makeHeldReady(Set.of(source(held)), held);
+            store.makeMultipartReady(Set.of(source(held)));
             assertThat(drain(store, 2)).singleElement().satisfies(work -> assertThat(work.sources()).containsExactly(source(held)));
         }
     }

@@ -121,7 +121,7 @@ public final class PendingSpool implements AutoCloseable {
             return publications.find(source);
         } catch (IOException | OutboundStorageException failure) {
             ready = false;
-            throw unavailable("pendingPublicationRead|error|sourceId:" + source.value() + "|reason:snapshotReadFailed", failure);
+            throw unavailable("pendingPublicationRead|error|sourceId:" + source.value() + "|reason:recipeReadFailed", failure);
         }
     }
 
@@ -130,7 +130,7 @@ public final class PendingSpool implements AutoCloseable {
         byte[] encoded = publications.encode(publication);
         try {
             publications.publish(publication, encoded);
-            index.addReady(publication.representative(), publication.message().restore().priority);
+            index.addReady(publication.representative(), publication.priority());
         } catch (IOException | RuntimeException failure) {
             ready = false;
             throw unavailable("pendingPublication|error|sourceId:" + publication.representative().value() +
@@ -249,7 +249,7 @@ public final class PendingSpool implements AutoCloseable {
                 Optional<Publication> binding = findPublication(source);
                 if (binding.isPresent() && publicationsRemoved.add(binding.orElseThrow().id())) {
                     Publication publication = binding.orElseThrow();
-                    index.removeReady(publication.representative(), publication.message().restore().priority);
+                    index.removeReady(publication.representative(), publication.priority());
                     publications.remove(publication);
                 }
             }

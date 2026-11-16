@@ -11,6 +11,7 @@ import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 import gr.cytech.sendium.util.MessageUtil;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -497,21 +499,28 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     public void makeHeldReady(Set<SourceId> sources, StandardMessage message) {
         measured("publish_held", () -> {
             requireReady();
-            publishHeld(sources, message);
+            throw unsupported("pendingPublication|error|reason:arbitraryPayloadUnsupported");
+        });
+    }
+
+    @Override
+    public void makeMultipartReady(Set<SourceId> sources) {
+        measured("publish_held", () -> {
+            requireReady();
+            publishHeld(sources);
             return null;
         });
     }
 
-    private void publishHeld(Set<SourceId> sources, StandardMessage message) {
+    private void publishHeld(Set<SourceId> sources) {
         var checked = new HashSet<>(Set.copyOf(sources));
-        Objects.requireNonNull(message, "message");
-        PendingSpool.requirePriority(message.priority);
         if (checked.isEmpty()) {
             throw new IllegalArgumentException("pendingPublication|error|reason:emptySources");
         }
         MultipartMembership assigned = null;
         boolean unassigned = false;
         var originals = new HashSet<SourceId>();
+        var ordinals = new TreeMap<Integer, SourceId>();
         for (SourceId source : checked) {
             PendingSourceRecord record = spool.find(source).orElseThrow(FilePendingMessageStore::invalidPublication);
             if (record.disposition() != PendingSourceRecord.Disposition.HELD) {
@@ -526,6 +535,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                 }
                 assigned = member;
                 originals.add(member.originalSource());
+                ordinals.put(member.ordinal(), member.originalSource());
             }
         }
         if (assigned != null) {
@@ -545,6 +555,8 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                 }
                 cursor = page.getLast();
             }
+        } else if (checked.size() != 1) {
+            throw invalidPublication();
         }
         UUID existing = null;
         int bound = 0;
@@ -568,7 +580,13 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             }
             return;
         }
-        spool.publishHeld(new Publication(UUID.randomUUID(), checked, PendingMessageData.capture(message)));
+        var ordered = new ArrayList<>(ordinals.values());
+        if (assigned == null) {
+            ordered.addAll(checked);
+        }
+        int priority = spool.find(ordered.getFirst()).orElseThrow(FilePendingMessageStore::invalidPublication).message().priority();
+        boolean assembled = assigned != null && ordered.size() == assigned.key().total();
+        spool.publishHeld(new Publication(UUID.randomUUID(), checked, ordered, priority, assembled));
         if (assigned != null) {
             spool.closeGroup(assigned);
         }
@@ -648,9 +666,9 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             }
             prepared = spool.findPublication(candidates.getFirst()).orElseThrow(() -> unsafeSelection("missingPublication"));
         }
-        if (prepared != null && prepared.message().priority() >= ordinaryPriority) {
-            StandardMessage message = prepared.message().restore();
-            int priority = message.priority;
+        if (prepared != null && prepared.priority() >= ordinaryPriority) {
+            StandardMessage message = prepareExecution(prepared);
+            int priority = prepared.priority();
             publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), prepared.sources(), message));
             spool.removeReady(prepared.representative(), priority);
             activeSources.addAll(prepared.sources());
@@ -691,6 +709,33 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         ordinaryWaiting[ordinaryPriority]--;
         reservedOrdinary[ordinaryPriority] = null;
         return true;
+    }
+
+    private StandardMessage prepareExecution(Publication recipe) {
+        var parts = new ArrayList<StandardMessage>();
+        MultipartMembership identity = null;
+        for (SourceId source : recipe.originals()) {
+            PendingSourceRecord record = spool.find(source).orElseThrow(() -> unsafeSelection("missingOriginalSource"));
+            if (record.disposition() != PendingSourceRecord.Disposition.HELD) {
+                throw unsafeSelection("invalidOriginalSource");
+            }
+            if (record.multipart() != null) {
+                MultipartMembership member = record.multipart();
+                if (member.duplicate() || (identity != null && !sameGroup(identity, member)) ||
+                        (recipe.assembled() && member.ordinal() != parts.size() + 1)) {
+                    throw unsafeSelection("invalidOriginalOrder");
+                }
+                identity = member;
+            } else if (recipe.assembled() || recipe.originals().size() != 1) {
+                throw unsafeSelection("missingMultipartMembership");
+            }
+            parts.add(record.message().restore());
+        }
+        if (parts.getFirst().priority != recipe.priority() || (recipe.assembled() && identity == null) ||
+                (identity != null && recipe.assembled() != (recipe.originals().size() == identity.key().total()))) {
+            throw unsafeSelection("invalidRecipe");
+        }
+        return recipe.assembled() ? PendingMultipartRecovery.assemble(parts) : parts.getFirst();
     }
 
     private OutboundStorageException unsafeSelection(String reason) {

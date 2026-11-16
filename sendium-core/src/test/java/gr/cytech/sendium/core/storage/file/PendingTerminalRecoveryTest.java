@@ -93,8 +93,8 @@ class PendingTerminalRecoveryTest {
         try (var store = store(); var router = new MemorySelectedRouterStore<>(store, 2)) {
             store.open();
             router.open();
-            store.makeHeldReady(Set.of(group.first().source()), store.find(group.first().source()).orElseThrow());
-            store.makeHeldReady(Set.of(group.other().source()), store.find(group.other().source()).orElseThrow());
+            store.makeMultipartReady(Set.of(group.first().source()));
+            store.makeMultipartReady(Set.of(group.other().source()));
             store.complete(Set.of(group.first().source(), group.duplicate().source()));
             assertThat(Files.exists(marker(group.first().groupId()))).isTrue();
             assertThat(router.selectToRouter(2)).isEqualTo(1);
@@ -119,7 +119,7 @@ class PendingTerminalRecoveryTest {
                     .hasMessageContaining("reason:incompleteOwnedSourceSet");
             assertThat(store.find(group.first().source())).isPresent();
             assertThat(store.find(group.duplicate().source())).isPresent();
-            store.makeHeldReady(Set.of(group.first().source()), store.find(group.first().source()).orElseThrow());
+            store.makeMultipartReady(Set.of(group.first().source()));
             assertThatThrownBy(() -> store.complete(Set.of(group.duplicate().source())))
                     .hasMessageContaining("reason:incompleteOwnedSourceSet");
             assertThat(store.status().state()).isEqualTo(OutboundStage.State.READY);

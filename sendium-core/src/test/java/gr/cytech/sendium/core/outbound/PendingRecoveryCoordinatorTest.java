@@ -187,7 +187,7 @@ class PendingRecoveryCoordinatorTest {
             harness.coordinator.acceptPart(source(part), part, Duration.ofSeconds(60));
             doThrow(new OutboundStorageException(OutboundStage.Role.PENDING, INVALID_TRANSITION,
                     "testPublication|error|reason:invalidBinding"))
-                    .when(harness.pending).makeHeldReady(any(), any());
+                    .when(harness.pending).makeMultipartReady(any());
             harness.clock.now = NOW.plusSeconds(60);
             harness.poll.get().run();
             assertThat(harness.pending.status().state()).isEqualTo(OutboundStage.State.READY);
@@ -334,7 +334,7 @@ class PendingRecoveryCoordinatorTest {
                     throw new IllegalStateException("testCallback|error|reason:timeout");
                 }
                 return invocation.callRealMethod();
-            }).when(harness.coordinator).makeHeldReady(any(), any());
+             }).when(harness.pending).makeMultipartReady(any());
             harness.clock.now = NOW.plusSeconds(60);
             var polling = executor.submit(() -> harness.poll.get().run());
             assertThat(callbackEntered.await(5, TimeUnit.SECONDS)).isTrue();

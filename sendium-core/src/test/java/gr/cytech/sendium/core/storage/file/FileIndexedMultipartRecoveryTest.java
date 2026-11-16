@@ -25,7 +25,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -53,9 +54,9 @@ class FileIndexedMultipartRecoveryTest {
         SourceId duplicate;
         SourceId second;
         try (var before = new Harness(NOW)) {
-            first = before.part(1, 2, 1, "A", Duration.ofSeconds(60));
-            duplicate = before.part(1, 2, 1, "duplicate", Duration.ofSeconds(60));
-            second = before.part(1, 2, 2, "B", Duration.ofSeconds(60));
+            first = before.part(1, 2, 1, "A", Duration.ofSeconds(60), 1);
+            duplicate = before.part(1, 2, 1, "duplicate", Duration.ofSeconds(60), 3);
+            second = before.part(1, 2, 2, "B", Duration.ofSeconds(60), 2);
         }
         try (var after = new Harness(NOW.plusSeconds(20)); var router = new MemorySelectedRouterStore<>(after.pending, 2)) {
             after.recovery.reconstruct(1);
@@ -65,11 +66,15 @@ class FileIndexedMultipartRecoveryTest {
             var selected = router.take(Duration.ZERO).orElseThrow();
             assertThat(selected.sources()).containsExactlyInAnyOrder(first, duplicate, second);
             assertThat(selected.message().body).isEqualTo("AB");
+            assertThat(selected.message().priority).isEqualTo(1);
             assertThat(selected.message().binheader).isNull();
             assertThat(after.pending.find(first).orElseThrow().body).isEqualTo("A");
             after.recovery.accepted(duplicate);
             after.tick();
             assertThat(after.attempts).hasSize(1);
+            after.pending.complete(selected.sources());
+            router.complete(selected.id());
+            assertThat(after.pending.sourcesAfter(null, 3)).isEmpty();
         }
     }
 
@@ -160,11 +165,11 @@ class FileIndexedMultipartRecoveryTest {
             harness.part(30, 3, 1, "duplicate", Duration.ofSeconds(60));
             SourceId second = harness.part(30, 3, 2, "B", Duration.ofSeconds(60));
             var failOnce = new AtomicBoolean(true);
-            harness.action = (sources, message) -> {
+            harness.action = sources -> {
                 if (sources.contains(second) && failOnce.getAndSet(false)) {
                     throw unavailable();
                 }
-                harness.pending.makeHeldReady(sources, message);
+                harness.pending.makeMultipartReady(sources);
             };
             harness.recovery.reconstruct(1);
             router.open();
@@ -192,11 +197,11 @@ class FileIndexedMultipartRecoveryTest {
             SourceId duplicate = harness.part(40, 3, 1, "duplicate", Duration.ofSeconds(60));
             SourceId second = harness.part(40, 3, 2, "B", Duration.ofSeconds(60));
             var failOnce = new AtomicBoolean(true);
-            harness.action = (sources, message) -> {
+            harness.action = sources -> {
                 if (sources.contains(second) && failOnce.getAndSet(false)) {
                     throw unavailable();
                 }
-                harness.pending.makeHeldReady(sources, message);
+                harness.pending.makeMultipartReady(sources);
                 if (sources.contains(first)) {
                     harness.pending.complete(Set.of(first, duplicate));
                 }
@@ -216,8 +221,8 @@ class FileIndexedMultipartRecoveryTest {
     void completedGroupMayDisappearBeforeItsSchedulingReferenceIsFinished() {
         try (var harness = new Harness(NOW)) {
             SourceId source = harness.part(50, 1, 1, "A", Duration.ofSeconds(60));
-            harness.action = (sources, message) -> {
-                harness.pending.makeHeldReady(sources, message);
+            harness.action = sources -> {
+                harness.pending.makeMultipartReady(sources);
                 harness.pending.complete(sources);
             };
             harness.recovery.reconstruct(1);
@@ -233,7 +238,7 @@ class FileIndexedMultipartRecoveryTest {
         try (var harness = new Harness(NOW)) {
             SourceId source = harness.part(60, 3, 1, "A", Duration.ofSeconds(60));
             harness.recovery.reconstruct(1);
-            harness.action = (sources, message) -> {
+            harness.action = sources -> {
                 throw new OutboundStorageException(OutboundStage.Role.PENDING, INVALID_TRANSITION, "testPublication|error|reason:invalidBinding");
             };
             harness.clock.now = NOW.plusSeconds(60);
@@ -281,7 +286,7 @@ class FileIndexedMultipartRecoveryTest {
     void startupPublicationFailureDoesNotClaimReadinessOrStartAPoller() {
         try (var harness = new Harness(NOW)) {
             harness.part(80, 1, 1, "A", Duration.ofSeconds(60));
-            harness.action = (sources, message) -> {
+            harness.action = sources -> {
                 throw unavailable();
             };
             assertThatThrownBy(() -> harness.recovery.reconstruct(1)).isInstanceOf(OutboundStorageException.class);
@@ -331,28 +336,47 @@ class FileIndexedMultipartRecoveryTest {
         private final AtomicReference<Runnable> poll = new AtomicReference<>();
         private final List<Set<SourceId>> attempts = new ArrayList<>();
         private final PendingMultipartRecovery<StandardMessage> recovery;
-        private BiConsumer<Set<SourceId>, StandardMessage> action;
+        private Consumer<Set<SourceId>> action;
+        private boolean publishing;
 
         private Harness(Instant now) {
             clock = new MutableClock(now);
             pending = spy(new FilePendingMessageStore(root, 64, clock));
             pending.open();
-            action = pending::makeHeldReady;
+            action = pending::makeMultipartReady;
+            doAnswer(invocation -> {
+                if (publishing) {
+                    return invocation.callRealMethod();
+                }
+                Set<SourceId> sources = invocation.getArgument(0);
+                attempts.add(Set.copyOf(sources));
+                publishing = true;
+                try {
+                    action.accept(sources);
+                } finally {
+                    publishing = false;
+                }
+                return null;
+            }).when(pending).makeMultipartReady(any());
             when(scheduler.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class)))
                     .thenAnswer(invocation -> {
                         poll.set(invocation.getArgument(0));
                         return future;
                     });
             recovery = new PendingMultipartRecovery<>(pending, clock, scheduler, (sources, message) -> {
-                attempts.add(Set.copyOf(sources));
-                action.accept(sources, message);
+                throw new AssertionError("Indexed recovery must not prepare payloads before selection");
             });
         }
 
         private SourceId part(int reference, int total, int ordinal, String body, Duration timeout) {
+            return part(reference, total, ordinal, body, timeout, StandardMessage.NORMAL_PRIORITY);
+        }
+
+        private SourceId part(int reference, int total, int ordinal, String body, Duration timeout, int priority) {
             var message = new StandardMessage();
             message.serial = UUID.randomUUID().toString();
             message.body = body;
+            message.priority = priority;
             message.owner_id = "account";
             message.systemId = "system";
             message.from = "sender";

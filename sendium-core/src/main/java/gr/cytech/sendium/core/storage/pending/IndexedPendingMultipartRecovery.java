@@ -11,7 +11,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -19,7 +18,6 @@ import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BiConsumer;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
@@ -27,26 +25,24 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.OWN
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
 
-/** One poller and one group payload at a time; deadlines/retries remain disposable disk references. */
+/** One poller and bounded group metadata; payload preparation belongs to capacity-limited selection. */
 final class IndexedPendingMultipartRecovery<M extends StandardMessage> implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(IndexedPendingMultipartRecovery.class);
     private final PendingMessageStore<M> pending;
     private final IndexedMultipartSource index;
     private final Clock clock;
     private final ScheduledExecutorService scheduler;
-    private final BiConsumer<Set<SourceId>, M> publisher;
     private ScheduledFuture<?> poller;
     private int batchSize;
     private volatile boolean ready;
     private boolean closed;
 
     IndexedPendingMultipartRecovery(PendingMessageStore<M> pending, IndexedMultipartSource index, Clock clock,
-                                    ScheduledExecutorService scheduler, BiConsumer<Set<SourceId>, M> publisher) {
+                                    ScheduledExecutorService scheduler) {
         this.pending = pending;
         this.index = index;
         this.clock = clock;
         this.scheduler = scheduler;
-        this.publisher = publisher;
     }
 
     synchronized void reconstruct(int limit) {
@@ -117,24 +113,10 @@ final class IndexedPendingMultipartRecovery<M extends StandardMessage> implement
         Group group = found.orElseThrow();
         try {
             if (group.originals().size() == group.identity().key().total()) {
-                var parts = new ArrayList<M>();
-                for (SourceId source : group.originals()) {
-                    Optional<M> part = pending.find(source);
-                    if (part.isEmpty()) {
-                        index.scheduleMultipartGroup(id, clock.instant());
-                        return; // A terminal cleanup can race this detached snapshot; reload next batch.
-                    }
-                    parts.add(part.orElseThrow());
-                }
-                publisher.accept(Set.copyOf(group.originals()), PendingMultipartRecovery.assemble(parts));
+                index.makeMultipartReady(Set.copyOf(group.originals()));
             } else if (!group.identity().deadline().isAfter(clock.instant())) {
                 for (SourceId source : group.originals()) {
-                    Optional<M> part = pending.find(source);
-                    if (part.isEmpty()) {
-                        index.scheduleMultipartGroup(id, clock.instant());
-                        return;
-                    }
-                    publisher.accept(Set.of(source), part.orElseThrow());
+                    index.makeMultipartReady(Set.of(source));
                 }
             } else {
                 index.scheduleMultipartGroup(id, group.identity().deadline());

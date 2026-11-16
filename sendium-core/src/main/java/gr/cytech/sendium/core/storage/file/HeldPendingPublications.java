@@ -12,7 +12,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 import java.util.UUID;
 
-/** First-binding execution state for this process only. The entire directory is discarded on open. */
+/** First-binding source recipes for this process only; never stores message payloads. Discarded on open. */
 final class HeldPendingPublications {
     private final Path root;
     private final PendingPublicationCodec codec = new PendingPublicationCodec();

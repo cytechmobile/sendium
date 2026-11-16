@@ -6,6 +6,7 @@ import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -13,6 +14,9 @@ import java.util.UUID;
  * Metadata queries are bounded; publication through the owning pending store includes duplicate handles.
  */
 public interface IndexedMultipartSource {
+    /** Register source-derived work without loading or persisting its assembled payload. */
+    void makeMultipartReady(Set<SourceId> originals);
+
     List<UUID> dueMultipartGroups(Instant now, int limit);
 
     Optional<Group> multipartGroup(UUID group);

@@ -70,6 +70,8 @@ public interface PendingMessageStore<M extends StandardMessage> extends Outbound
      * partial/expired ordinals are published individually, never mixed with another group or unassigned held sources.
      * Publication of original sources atomically includes every retained duplicate of those ordinals, even if
      * its ingress notification has not been processed. A duplicate cannot be published without its original.
+     * Backends that only support source-derived execution may reject arbitrary payload publication with
+     * UNSUPPORTED; filesystem multipart recovery uses its internal source-only readiness operation instead.
      */
     void makeHeldReady(Set<SourceId> sources, M message);
 
