@@ -1,10 +1,34 @@
 package utils;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class NativeE2eSmokeTest {
+
+    @Test
+    void absentPortOverrideUsesTheDefault() {
+        assertThat(NativeE2eSmoke.smppPort(null)).isEqualTo(27777);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"1, 1", "28777, 28777", "65535, 65535"})
+    void acceptsValidPortOverrides(String value, int expected) {
+        assertThat(NativeE2eSmoke.smppPort(value)).isEqualTo(expected);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "invalid", "1.5", " 28777 ", "0", "-1", "65536", "2147483648"})
+    void rejectsMalformedAndOutOfRangePortsWithoutFallback(String value) {
+        assertThatThrownBy(() -> NativeE2eSmoke.smppPort(value))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("SENDIUM_E2E_SMPP_PORT must be an integer between 1 and 65535")
+                .hasNoCause();
+    }
 
     @Test
     void hasSuccessfulStorageOperationIgnoresMalformedMetricValues() {

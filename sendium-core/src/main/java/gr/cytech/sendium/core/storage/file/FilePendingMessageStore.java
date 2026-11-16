@@ -1,0 +1,798 @@
+package gr.cytech.sendium.core.storage.file;
+
+import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
+import gr.cytech.sendium.core.storage.internal.PendingSelectionSource;
+import gr.cytech.sendium.core.storage.pending.MultipartKey;
+import gr.cytech.sendium.core.storage.pending.MultipartMembership;
+import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
+import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
+import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
+import gr.cytech.sendium.util.MessageUtil;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+
+import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
+import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.CAPACITY_EXCEEDED;
+import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
+import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.OWNERSHIP_CONFLICT;
+import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
+import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
+
+/**
+ * File-owned accepted sources using the explicit StandardMessage representation, not Java serialization.
+ * Metrics are optional for embedded use; standalone assembly supplies its existing registry.
+ */
+public final class FilePendingMessageStore implements PendingMessageStore<StandardMessage>, PendingSelectionSource<StandardMessage>, IndexedMultipartSource {
+    public static final String OPERATION_METRIC = "sendium.sms.storage.operation";
+    private static final Logger LOGGER = LoggerFactory.getLogger(FilePendingMessageStore.class);
+    private final MeterRegistry metrics;
+    private final Map<String, Timer> timers = new ConcurrentHashMap<>();
+    private final PendingSpool spool;
+    private final int capacity;
+    private final Clock clock;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition changed = lock.newCondition();
+    private State state = State.NEW;
+    private long retained;
+    private Object selectorOwner;
+    private long lastGroupOrder = -1;
+    private final Set<SourceId> activeSources = new HashSet<>();
+    private final int[] ordinaryWaiting = new int[4];
+    private final PendingSourceRecord[] reservedOrdinary = new PendingSourceRecord[4];
+    private int preparedWaiting;
+    private AcceptedSourceTraversal traversal;
+
+    public FilePendingMessageStore(Path root, int capacity) {
+        this(root, capacity, Clock.systemUTC());
+    }
+
+    public FilePendingMessageStore(Path root, int capacity, Clock clock) {
+        this(root, capacity, clock, null);
+    }
+
+    public FilePendingMessageStore(Path root, int capacity, Clock clock, MeterRegistry metrics) {
+        if (capacity <= 0) {
+            throw new IllegalArgumentException("pendingConfiguration|error|reason:nonPositiveCapacity");
+        }
+        this.spool = new PendingSpool(root);
+        this.capacity = capacity;
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.metrics = metrics;
+    }
+
+    @Override
+    public void open() {
+        measured("open", () -> {
+            initialize();
+            return null;
+        });
+    }
+
+    private void initialize() {
+        if (state == State.READY) {
+            requireReady();
+            return;
+        }
+        if (state != State.NEW) {
+            throw new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                    "pendingLifecycle|error|reason:cannotReopen");
+        }
+        long started = System.nanoTime();
+        try {
+            spool.open();
+            retained = spool.recoveredSources();
+            // Validate cross-record membership before exposing recovered sources to ingress/selection.
+            spool.forEachRecord(record -> {
+                MultipartMembership membership = record.multipart();
+                if (membership != null) {
+                    validateMembership(membership);
+                    lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
+                }
+                if (record.disposition() == PendingSourceRecord.Disposition.READY) {
+                    ordinaryWaiting[record.message().priority()]++;
+                }
+            });
+            traversal = spool.traversal();
+            state = State.READY;
+            LOGGER.info("pendingRecovery|success|backend:file|retainedSources:{}|durationMs:{}", retained,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+        } catch (RuntimeException failure) {
+            state = State.FAILED;
+            try {
+                spool.close();
+            } catch (RuntimeException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+    }
+
+    @Override
+    public Status status() {
+        return withLock(() -> {
+            State effective = state == State.READY && !spool.isReady() ? State.FAILED : state;
+            return new Status("file", true, effective);
+        });
+    }
+
+    @Override
+    public SourceId admit(SourceId source, StandardMessage message) {
+        return measured("admit", () -> admitSource(source, message, PendingSourceRecord.Disposition.READY));
+    }
+
+    @Override
+    public SourceId admitHeld(SourceId source, StandardMessage message) {
+        return measured("admit_held", () -> admitSource(source, message, PendingSourceRecord.Disposition.HELD));
+    }
+
+    private SourceId admitSource(SourceId source, StandardMessage message, PendingSourceRecord.Disposition disposition) {
+        requireReady();
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(message, "message");
+        if (spool.find(source).isPresent()) {
+            return source;
+        }
+        final int priority = PendingSpool.requirePriority(message.priority);
+        checkCapacity(source);
+        PendingSourceRecord record;
+        try {
+            record = new PendingSourceRecord(source, disposition, PendingMessageData.capture(message));
+        } catch (IllegalArgumentException failure) {
+            throw unsupported("pendingAdmission|error|sourceId:" + source.value() + "|reason:invalidSourceIdentity");
+        }
+        spool.publish(record);
+        retained++;
+        if (disposition == PendingSourceRecord.Disposition.READY && ordinaryWaiting[priority]++ == 0) {
+            try {
+                traversal.restartPriority(priority);
+            } catch (IOException failure) {
+                state = State.FAILED;
+                throw new OutboundStorageException(PENDING, UNAVAILABLE, "pendingAdmission|error|reason:cursorRestartFailed", failure);
+            }
+        }
+        return source;
+    }
+
+    @Override
+    public Optional<StandardMessage> find(SourceId source) {
+        return measured("find", () -> {
+            requireReady();
+            return spool.find(source).map(record -> record.message().restore());
+        });
+    }
+
+    @Override
+    public List<SourceId> sourcesAfter(SourceId afterExclusive, int limit) {
+        return measured("sources_after", () -> {
+            requireReady();
+            return spool.sourcesAfter(afterExclusive, limit);
+        });
+    }
+
+    /** Complete an owned execution/ordinal source set; reject subsets that would orphan its handles. */
+    @Override
+    public void complete(Set<SourceId> sources) {
+        measured("complete", () -> {
+            requireReady();
+            Set<SourceId> checked = Set.copyOf(sources);
+            validateCompletion(checked);
+            int[] ordinaryRemoved = new int[4];
+            Set<UUID> preparedRemoved = new HashSet<>();
+            for (SourceId source : checked) {
+                if (!activeSources.contains(source)) {
+                    spool.find(source).ifPresent(record -> {
+                        if (record.disposition() == PendingSourceRecord.Disposition.READY) {
+                            ordinaryRemoved[record.message().priority()]++;
+                        } else {
+                            spool.publicationId(source).ifPresent(preparedRemoved::add);
+                        }
+                    });
+                }
+            }
+            retained -= spool.completeSources(checked);
+            activeSources.removeAll(checked);
+            preparedWaiting -= preparedRemoved.size();
+            for (int priority = 1; priority <= 3; priority++) {
+                ordinaryWaiting[priority] -= ordinaryRemoved[priority];
+                if (reservedOrdinary[priority] != null && checked.contains(reservedOrdinary[priority].source())) {
+                    reservedOrdinary[priority] = null;
+                }
+            }
+            return null;
+        });
+    }
+
+    private void validateCompletion(Set<SourceId> sources) {
+        var bindings = new HashSet<UUID>();
+        var groups = new HashSet<UUID>();
+        for (SourceId source : sources) {
+            Optional<PendingSourceRecord> record = spool.find(source);
+            if (record.isEmpty()) {
+                continue;
+            }
+            Optional<UUID> binding = spool.publicationId(source);
+            if (binding.isPresent() && bindings.add(binding.orElseThrow())) {
+                Publication publication = spool.findPublication(source).orElseThrow(FilePendingMessageStore::invalidPublication);
+                if (!sources.containsAll(publication.sources())) {
+                    throw invalidCompletion(source);
+                }
+            }
+            if (record.orElseThrow().multipart() != null) {
+                groups.add(record.orElseThrow().multipart().groupId());
+            }
+        }
+        for (UUID group : groups) {
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = spool.groupSourcesAfter(group, cursor, 128);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (SourceId source : page) {
+                    MultipartMembership member = retainedMembership(source);
+                    if (sources.contains(member.originalSource()) && !sources.contains(source)) {
+                        throw invalidCompletion(member.originalSource());
+                    }
+                }
+                cursor = page.getLast();
+            }
+        }
+    }
+
+    private static OutboundStorageException invalidCompletion(SourceId source) {
+        return new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                "pendingCompletion|error|sourceId:" + source.value() + "|reason:incompleteOwnedSourceSet");
+    }
+
+    @Override
+    public MultipartMembership admitPart(SourceId source, StandardMessage message, Duration timeout) {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(message, "message");
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("pendingMultipartAdmission|error|reason:nonPositiveTimeout");
+        }
+        return measured("admit_part", () -> admitMultipart(source, message, timeout));
+    }
+
+    private MultipartMembership admitMultipart(SourceId source, StandardMessage message, Duration timeout) {
+        requireReady();
+        Optional<PendingSourceRecord> existing = spool.find(source);
+        if (existing.isPresent()) {
+            MultipartMembership membership = existing.orElseThrow().multipart();
+            if (membership == null) {
+                throw new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                        "pendingMultipartAdmission|error|sourceId:" + source.value() + "|reason:sourceHasNoMembership");
+            }
+            return membership;
+        }
+        checkCapacity(source);
+        PendingMessageData data = PendingMessageData.capture(message);
+        StandardMessage accepted = data.restore();
+        MultipartKey key;
+        int ordinal;
+        try {
+            if (!source.value().toString().equalsIgnoreCase(accepted.serial)) {
+                throw new IllegalArgumentException();
+            }
+            key = MultipartKey.from(accepted);
+            ordinal = MessageUtil.concatenation(accepted).orElseThrow().ordinal();
+        } catch (IllegalArgumentException failure) {
+            throw unsupported("pendingMultipartAdmission|error|sourceId:" + source.value() + "|reason:invalidIdentity");
+        }
+        Instant now = clock.instant();
+        MultipartMembership group = openGroup(key, now);
+        MultipartMembership membership;
+        if (group == null) {
+            if (lastGroupOrder == Long.MAX_VALUE) {
+                throw unsupported("pendingMultipartAdmission|error|reason:groupOrderExhausted");
+            }
+            Instant deadline;
+            try {
+                deadline = now.plus(timeout);
+            } catch (DateTimeException | ArithmeticException failure) {
+                throw unsupported("pendingMultipartAdmission|error|reason:invalidDeadline");
+            }
+            membership = new MultipartMembership(source, UUID.randomUUID(), key, ordinal, deadline, lastGroupOrder + 1);
+        } else {
+            SourceId original = spool.groupOriginal(group.groupId(), ordinal);
+            if (original != null) {
+                MultipartMembership owner = retainedMembership(original);
+                if (!sameGroup(group, owner) || owner.duplicate() || owner.ordinal() != ordinal) {
+                    throw invalidMembership(original);
+                }
+            }
+            membership = new MultipartMembership(source, group.groupId(), key, ordinal, group.deadline(), group.groupOrder(),
+                    original == null ? source : original);
+        }
+        spool.publish(new PendingSourceRecord(source, PendingSourceRecord.Disposition.HELD, data, membership));
+        retained++;
+        lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
+        if (spool.groupOriginalCount(membership.groupId()) == key.total()) {
+            spool.closeGroup(membership);
+        }
+        return membership;
+    }
+
+    private void checkCapacity(SourceId source) {
+        if (retained >= capacity) {
+            throw new OutboundStorageException(PENDING, CAPACITY_EXCEEDED,
+                    "pendingAdmission|error|sourceId:" + source.value() + "|reason:capacityExceeded");
+        }
+    }
+
+    private MultipartMembership openGroup(MultipartKey key, Instant now) {
+        String cursor = null;
+        while (true) {
+            List<String> page = spool.matchingGroupsAfter(key, cursor, 1);
+            if (page.isEmpty()) {
+                return null;
+            }
+            cursor = page.getFirst();
+            MultipartMembership candidate = groupIdentity(MultipartPendingIndex.groupId(cursor));
+            if (!candidate.key().equals(key)) {
+                continue; // A matching-key hash is only a lookup hint, never identity.
+            }
+            if (spool.isGroupClosed(candidate.groupId()) || !candidate.deadline().isAfter(now) ||
+                    spool.groupOriginalCount(candidate.groupId()) == key.total()) {
+                spool.closeGroup(candidate);
+                continue;
+            }
+            return candidate;
+        }
+    }
+
+    private MultipartMembership groupIdentity(UUID groupId) {
+        List<SourceId> sources = spool.groupSourcesAfter(groupId, null, 1);
+        if (sources.isEmpty()) {
+            state = State.FAILED;
+            throw new OutboundStorageException(PENDING, UNAVAILABLE,
+                    "pendingMultipartRecovery|error|groupId:" + groupId + "|reason:missingGroupMembers");
+        }
+        return retainedMembership(sources.getFirst());
+    }
+
+    private MultipartMembership retainedMembership(SourceId source) {
+        return spool.find(source).map(PendingSourceRecord::multipart).orElseThrow(() -> invalidMembership(source));
+    }
+
+    private void validateMembership(MultipartMembership member) {
+        MultipartMembership identity = groupIdentity(member.groupId());
+        MultipartMembership original = retainedMembership(member.originalSource());
+        if (!sameGroup(identity, member) || !sameGroup(original, member) || original.duplicate() ||
+                original.ordinal() != member.ordinal()) {
+            throw invalidMembership(member.source());
+        }
+    }
+
+    private static boolean sameGroup(MultipartMembership left, MultipartMembership right) {
+        return left.groupId().equals(right.groupId()) && left.key().equals(right.key()) &&
+                left.deadline().equals(right.deadline()) && left.groupOrder() == right.groupOrder();
+    }
+
+    private OutboundStorageException invalidMembership(SourceId source) {
+        state = State.FAILED;
+        return new OutboundStorageException(PENDING, UNAVAILABLE,
+                "pendingMultipartRecovery|error|sourceId:" + source.value() + "|reason:invalidMembership");
+    }
+
+    @Override
+    public Optional<MultipartMembership> findMultipart(SourceId source) {
+        return measured("find_multipart", () -> {
+            requireReady();
+            return spool.find(source).map(PendingSourceRecord::multipart);
+        });
+    }
+
+    @Override
+    public List<SourceId> multipartSources(UUID groupId) {
+        return measured("multipart_sources", () -> {
+            requireReady();
+            Objects.requireNonNull(groupId, "groupId");
+            var sources = new ArrayList<SourceId>();
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = spool.groupSourcesAfter(groupId, cursor, 128);
+                if (page.isEmpty()) {
+                    return List.copyOf(sources);
+                }
+                sources.addAll(page);
+                cursor = page.getLast();
+            }
+        });
+    }
+
+    @Override
+    public List<UUID> dueMultipartGroups(Instant now, int limit) {
+        Objects.requireNonNull(now, "now");
+        if (limit <= 0) {
+            throw new IllegalArgumentException("pendingMultipartRecovery|error|reason:nonPositiveLimit");
+        }
+        return measured("due_groups", () -> {
+            requireReady();
+            return spool.dueGroups(now, limit);
+        });
+    }
+
+    @Override
+    public Optional<IndexedMultipartSource.Group> multipartGroup(UUID group) {
+        Objects.requireNonNull(group, "group");
+        return measured("multipart_group", () -> {
+            requireReady();
+            if (spool.groupSourcesAfter(group, null, 1).isEmpty()) {
+                return Optional.empty();
+            }
+            MultipartMembership identity = groupIdentity(group);
+            var originals = new ArrayList<SourceId>();
+            for (int ordinal = 1; ordinal <= identity.key().total(); ordinal++) {
+                SourceId original = spool.groupOriginal(group, ordinal);
+                if (original != null) {
+                    MultipartMembership member = retainedMembership(original);
+                    if (member.duplicate() || member.ordinal() != ordinal || !sameGroup(identity, member)) {
+                        throw invalidMembership(original);
+                    }
+                    originals.add(original);
+                }
+            }
+            if (originals.isEmpty()) {
+                throw invalidMembership(identity.source());
+            }
+            return Optional.of(new IndexedMultipartSource.Group(identity, originals, spool.groupScheduled(group)));
+        });
+    }
+
+    @Override
+    public void scheduleMultipartGroup(UUID group, Instant due) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(due, "due");
+        measured("schedule_group", () -> {
+            requireReady();
+            if (!spool.groupSourcesAfter(group, null, 1).isEmpty()) {
+                spool.scheduleGroup(group, due);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void finishMultipartGroup(UUID group) {
+        Objects.requireNonNull(group, "group");
+        measured("finish_group", () -> {
+            requireReady();
+            spool.finishGroup(group);
+            return null;
+        });
+    }
+
+    @Override
+    public void makeHeldReady(Set<SourceId> sources, StandardMessage message) {
+        measured("publish_held", () -> {
+            requireReady();
+            throw unsupported("pendingPublication|error|reason:arbitraryPayloadUnsupported");
+        });
+    }
+
+    @Override
+    public void makeMultipartReady(Set<SourceId> sources) {
+        measured("publish_held", () -> {
+            requireReady();
+            publishHeld(sources);
+            return null;
+        });
+    }
+
+    private void publishHeld(Set<SourceId> sources) {
+        var checked = new HashSet<>(Set.copyOf(sources));
+        if (checked.isEmpty()) {
+            throw new IllegalArgumentException("pendingPublication|error|reason:emptySources");
+        }
+        MultipartMembership assigned = null;
+        boolean unassigned = false;
+        var originals = new HashSet<SourceId>();
+        var ordinals = new TreeMap<Integer, SourceId>();
+        for (SourceId source : checked) {
+            PendingSourceRecord record = spool.find(source).orElseThrow(FilePendingMessageStore::invalidPublication);
+            if (record.disposition() != PendingSourceRecord.Disposition.HELD) {
+                throw invalidPublication();
+            }
+            MultipartMembership member = record.multipart();
+            if (member == null) {
+                unassigned = true;
+            } else {
+                if (assigned != null && !sameGroup(assigned, member)) {
+                    throw invalidPublication();
+                }
+                assigned = member;
+                originals.add(member.originalSource());
+                ordinals.put(member.ordinal(), member.originalSource());
+            }
+        }
+        if (assigned != null) {
+            if (unassigned || !checked.containsAll(originals) || (originals.size() > 1 && originals.size() != assigned.key().total())) {
+                throw invalidPublication();
+            }
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = spool.groupSourcesAfter(assigned.groupId(), cursor, 128);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (SourceId source : page) {
+                    if (originals.contains(retainedMembership(source).originalSource())) {
+                        checked.add(source);
+                    }
+                }
+                cursor = page.getLast();
+            }
+        } else if (checked.size() != 1) {
+            throw invalidPublication();
+        }
+        UUID existing = null;
+        int bound = 0;
+        for (SourceId source : checked) {
+            Optional<UUID> binding = spool.publicationId(source);
+            if (binding.isPresent()) {
+                if (existing != null && !existing.equals(binding.orElseThrow())) {
+                    throw invalidPublication();
+                }
+                existing = binding.orElseThrow();
+                bound++;
+            }
+        }
+        if (existing != null) {
+            if (bound != checked.size()) {
+                throw invalidPublication();
+            }
+            Publication previous = spool.findPublication(checked.iterator().next()).orElseThrow(FilePendingMessageStore::invalidPublication);
+            if (!previous.sources().equals(checked)) {
+                throw invalidPublication();
+            }
+            return;
+        }
+        var ordered = new ArrayList<>(ordinals.values());
+        if (assigned == null) {
+            ordered.addAll(checked);
+        }
+        int priority = spool.find(ordered.getFirst()).orElseThrow(FilePendingMessageStore::invalidPublication).message().priority();
+        boolean assembled = assigned != null && ordered.size() == assigned.key().total();
+        spool.publishHeld(new Publication(UUID.randomUUID(), checked, ordered, priority, assembled));
+        if (assigned != null) {
+            spool.closeGroup(assigned);
+        }
+        preparedWaiting++;
+        changed.signalAll();
+    }
+
+    private static OutboundStorageException invalidPublication() {
+        return new OutboundStorageException(PENDING, INVALID_TRANSITION,
+                "pendingPublication|error|reason:conflictingSourceBinding");
+    }
+
+    private void requireReady() {
+        requireReady(PENDING);
+    }
+
+    @Override
+    public void requireReady(Role role) {
+        if (status().state() != State.READY) {
+            throw new OutboundStorageException(role, UNAVAILABLE, "pendingLifecycle|error|reason:notReady");
+        }
+    }
+
+    private static OutboundStorageException unsupported(String message) {
+        return new OutboundStorageException(PENDING, UNSUPPORTED, message);
+    }
+
+    @Override
+    public void close() {
+        withLock(() -> {
+            if (state != State.CLOSED) {
+                try {
+                    spool.close();
+                } finally {
+                    state = State.CLOSED;
+                    activeSources.clear();
+                    changed.signalAll();
+                }
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public ReentrantLock selectionLock() {
+        return lock;
+    }
+
+    @Override
+    public Condition selectionChanged() {
+        return changed;
+    }
+
+    @Override
+    public void attachSelector(Object owner) {
+        requireReady(Role.ROUTER_QUEUE);
+        Objects.requireNonNull(owner, "owner");
+        if (selectorOwner != null && selectorOwner != owner) {
+            throw new OutboundStorageException(Role.ROUTER_QUEUE, OWNERSHIP_CONFLICT,
+                    "pendingSelection|error|reason:alreadyOwned");
+        }
+        selectorOwner = owner;
+    }
+
+    @Override
+    public boolean stageNext(Instant now, Consumer<Selected<StandardMessage>> publication) {
+        requireReady(Role.ROUTER_QUEUE);
+        int ordinaryPriority = 3;
+        while (ordinaryPriority > 0 && ordinaryWaiting[ordinaryPriority] == 0) {
+            ordinaryPriority--;
+        }
+        Publication prepared = null;
+        if (preparedWaiting > 0) {
+            List<SourceId> candidates = spool.readyCandidates(1);
+            if (candidates.isEmpty()) {
+                throw unsafeSelection("missingPreparedReference");
+            }
+            prepared = spool.findPublication(candidates.getFirst()).orElseThrow(() -> unsafeSelection("missingPublication"));
+        }
+        if (prepared != null && prepared.priority() >= ordinaryPriority) {
+            StandardMessage message = prepareExecution(prepared);
+            int priority = prepared.priority();
+            publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), prepared.sources(), message));
+            spool.removeReady(prepared.representative(), priority);
+            activeSources.addAll(prepared.sources());
+            preparedWaiting--;
+            return true;
+        }
+        if (ordinaryPriority == 0) {
+            return false;
+        }
+        PendingSourceRecord record = reservedOrdinary[ordinaryPriority];
+        try {
+            if (record == null) {
+                // Bound both empty probes and held/active entries; no whole-backlog payload cache.
+                int remaining = 1024;
+                while (remaining > 0 && record == null) {
+                    var page = traversal.pollPriority(ordinaryPriority, 1, remaining, source -> !activeSources.contains(source));
+                    remaining -= page.steps();
+                    for (var candidate : page.candidates()) {
+                        Optional<PendingSourceRecord> found = spool.findCandidate(candidate);
+                        if (found.isPresent() && found.orElseThrow().disposition() == PendingSourceRecord.Disposition.READY) {
+                            record = found.orElseThrow();
+                        }
+                    }
+                    if (page.roundComplete() || page.steps() == 0) {
+                        break;
+                    }
+                }
+                if (record == null) {
+                    return false;
+                }
+                reservedOrdinary[ordinaryPriority] = record;
+            }
+        } catch (IOException | RuntimeException failure) {
+            throw unsafeSelection("acceptedTraversalFailed", failure);
+        }
+        publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), Set.of(record.source()), record.message().restore()));
+        activeSources.add(record.source());
+        ordinaryWaiting[ordinaryPriority]--;
+        reservedOrdinary[ordinaryPriority] = null;
+        return true;
+    }
+
+    private StandardMessage prepareExecution(Publication recipe) {
+        var parts = new ArrayList<StandardMessage>();
+        MultipartMembership identity = null;
+        for (SourceId source : recipe.originals()) {
+            PendingSourceRecord record = spool.find(source).orElseThrow(() -> unsafeSelection("missingOriginalSource"));
+            if (record.disposition() != PendingSourceRecord.Disposition.HELD) {
+                throw unsafeSelection("invalidOriginalSource");
+            }
+            if (record.multipart() != null) {
+                MultipartMembership member = record.multipart();
+                if (member.duplicate() || (identity != null && !sameGroup(identity, member)) ||
+                        (recipe.assembled() && member.ordinal() != parts.size() + 1)) {
+                    throw unsafeSelection("invalidOriginalOrder");
+                }
+                identity = member;
+            } else if (recipe.assembled() || recipe.originals().size() != 1) {
+                throw unsafeSelection("missingMultipartMembership");
+            }
+            parts.add(record.message().restore());
+        }
+        if (parts.getFirst().priority != recipe.priority() || (recipe.assembled() && identity == null) ||
+                (identity != null && recipe.assembled() != (recipe.originals().size() == identity.key().total()))) {
+            throw unsafeSelection("invalidRecipe");
+        }
+        return recipe.assembled() ? PendingMultipartRecovery.assemble(parts) : parts.getFirst();
+    }
+
+    private OutboundStorageException unsafeSelection(String reason) {
+        return unsafeSelection(reason, null);
+    }
+
+    private OutboundStorageException unsafeSelection(String reason, Throwable cause) {
+        state = State.FAILED;
+        return new OutboundStorageException(Role.ROUTER_QUEUE, UNAVAILABLE, "pendingSelection|error|reason:" + reason, cause);
+    }
+
+    @Override
+    public StandardMessage snapshot(StandardMessage message, Role role) {
+        try {
+            return PendingMessageData.capture(message).restore();
+        } catch (OutboundStorageException failure) {
+            throw new OutboundStorageException(role, failure.reason(), "pendingProjection|error|reason:unsupportedPayload", failure);
+        }
+    }
+
+    @Override
+    public boolean contains(SourceId source) {
+        requireReady();
+        return spool.find(source).isPresent();
+    }
+
+    private <T> T withLock(Supplier<T> operation) {
+        lock.lock();
+        try {
+            return operation.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private <T> T measured(String operation, Supplier<T> action) {
+        if (metrics == null) {
+            return withLock(action);
+        }
+        long started = System.nanoTime();
+        String outcome = "success";
+        String reason = "NONE";
+        try {
+            return withLock(action);
+        } catch (RuntimeException | Error failure) {
+            outcome = "error";
+            reason = failure instanceof OutboundStorageException storage ? storage.reason().name() : "OTHER";
+            throw failure;
+        } finally {
+            String key = operation + '/' + outcome + '/' + reason;
+            String result = outcome;
+            String failureReason = reason;
+            timers.computeIfAbsent(key, ignored -> Timer.builder(OPERATION_METRIC)
+                            .description("File pending storage operation latency including lock wait; error counts by bounded reason")
+                            .tags("backend", "file", "operation", operation, "outcome", result, "reason", failureReason)
+                            .register(metrics))
+                    .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        }
+    }
+}

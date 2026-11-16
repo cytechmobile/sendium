@@ -274,7 +274,7 @@ abstract class PendingMessageStoreContract {
             if (completed) {
                 pending.complete(Set.of(first.source()));
             } else {
-                pending.makeHeldReady(Set.of(first.source()), pending.find(first.source()).orElseThrow());
+                publish(pending, Set.of(first.source()), pending.find(first.source()).orElseThrow());
             }
             var later = acceptPart(pending, multipart("0500037F0302"));
             assertThat(later.groupId()).isNotEqualTo(first.groupId());
@@ -304,14 +304,22 @@ abstract class PendingMessageStoreContract {
             var first = acceptPart(pending, multipart("0500037F0301"));
             var repeated = acceptPart(pending, multipart("0500037F0301"));
             var second = acceptPart(pending, multipart("0500037F0302"));
-            assertThatThrownBy(() -> pending.makeHeldReady(Set.of(first.source(), repeated.source(), second.source()), new StandardMessage()))
+            assertThatThrownBy(() -> publish(pending, Set.of(first.source(), repeated.source(), second.source()), new StandardMessage()))
                     .isInstanceOfSatisfying(OutboundStorageException.class, failure ->
                             assertThat(failure.reason()).isEqualTo(OutboundStorageException.Reason.INVALID_TRANSITION));
-            assertThatThrownBy(() -> pending.makeHeldReady(Set.of(first.source(), second.source()), new StandardMessage()))
+            assertThatThrownBy(() -> publish(pending, Set.of(first.source(), second.source()), new StandardMessage()))
                     .isInstanceOf(OutboundStorageException.class);
             var third = acceptPart(pending, multipart("0500037F0303"));
-            pending.makeHeldReady(Set.of(first.source(), second.source(), third.source()), new StandardMessage());
+            publish(pending, Set.of(first.source(), second.source(), third.source()), new StandardMessage());
             assertThat(pending.findMultipart(repeated.source())).contains(repeated);
+        }
+    }
+
+    private static void publish(PendingMessageStore<StandardMessage> pending, Set<SourceId> sources, StandardMessage message) {
+        if (pending instanceof gr.cytech.sendium.core.storage.internal.IndexedMultipartSource indexed) {
+            indexed.makeMultipartReady(sources);
+        } else {
+            pending.makeHeldReady(sources, message);
         }
     }
 
