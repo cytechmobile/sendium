@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/cytechmobile/sendium/compare/v0.7.0...v0.8.0) (2026-11-13)
+
+
+### Features
+
+* **observability:** add SMS operational metrics and Grafana dashboards ([#394](https://github.com/cytechmobile/sendium/issues/394)) ([f74e036](https://github.com/cytechmobile/sendium/commit/f74e03655d5513b9da42e5e2d5b6895186edda17)), closes [#383](https://github.com/cytechmobile/sendium/issues/383)
+
 ## [0.7.0](https://github.com/cytechmobile/sendium/compare/v0.6.1...v0.7.0) (2026-11-06)
 
 
