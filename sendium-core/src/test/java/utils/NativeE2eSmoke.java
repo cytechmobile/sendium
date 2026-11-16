@@ -60,10 +60,25 @@ public class NativeE2eSmoke {
     private static final String POSTGRESQL_PASSWORD = System.getenv().getOrDefault(
             "SENDIUM_DLR_POSTGRESQL_PASSWORD", "sendium-test");
     private static final int SENDIUM_HTTP_PORT = 18080;
-    private static final int SENDIUM_SMPP_PORT = Integer.parseInt(System.getenv().getOrDefault("SENDIUM_E2E_SMPP_PORT", "27777"));
+    private static final int SENDIUM_SMPP_PORT = smppPort(System.getenv("SENDIUM_E2E_SMPP_PORT"));
     private static final int UPSTREAM_SMPP_PORT = 27779;
     private static final Duration TIMEOUT = Duration.ofSeconds(90);
     private static final boolean PENDING_RESTART = Boolean.parseBoolean(System.getenv("SENDIUM_E2E_PENDING_RESTART"));
+
+    static int smppPort(String configured) {
+        if (configured == null) {
+            return 27777;
+        }
+        try {
+            int port = Integer.parseInt(configured);
+            if (port >= 1 && port <= 65535) {
+                return port;
+            }
+        } catch (NumberFormatException invalid) {
+            // Report a fixed configuration error without echoing an arbitrary environment value.
+        }
+        throw new IllegalArgumentException("SENDIUM_E2E_SMPP_PORT must be an integer between 1 and 65535");
+    }
 
     public static void main(String[] args) throws Exception {
         String containerName = "sendium-e2e-" + UUID.randomUUID().toString().substring(0, 8);

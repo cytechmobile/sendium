@@ -53,12 +53,12 @@ class FileIndexedMultipartRecoveryTest {
         SourceId first;
         SourceId duplicate;
         SourceId second;
-        try (var before = new Harness(NOW)) {
+        try (var before = new Harness(root, NOW)) {
             first = before.part(1, 2, 1, "A", Duration.ofSeconds(60), 1);
             duplicate = before.part(1, 2, 1, "duplicate", Duration.ofSeconds(60), 3);
             second = before.part(1, 2, 2, "B", Duration.ofSeconds(60), 2);
         }
-        try (var after = new Harness(NOW.plusSeconds(20)); var router = new MemorySelectedRouterStore<>(after.pending, 2)) {
+        try (var after = new Harness(root, NOW.plusSeconds(20)); var router = new MemorySelectedRouterStore<>(after.pending, 2)) {
             after.recovery.reconstruct(1);
             router.open();
             assertThat(after.attempts).hasSize(1);
@@ -82,11 +82,11 @@ class FileIndexedMultipartRecoveryTest {
     void restartUsesOriginalDeadlineAndExpiresOnlyAtItsExactInstant() throws Exception {
         SourceId first;
         SourceId duplicate;
-        try (var before = new Harness(NOW)) {
+        try (var before = new Harness(root, NOW)) {
             first = before.part(2, 3, 1, "A", Duration.ofSeconds(60));
             duplicate = before.part(2, 3, 1, "duplicate", Duration.ofSeconds(60));
         }
-        try (var after = new Harness(NOW.plusSeconds(50)); var router = new MemorySelectedRouterStore<>(after.pending, 2)) {
+        try (var after = new Harness(root, NOW.plusSeconds(50)); var router = new MemorySelectedRouterStore<>(after.pending, 2)) {
             after.recovery.reconstruct(2);
             router.open();
             after.clock.now = NOW.plusSeconds(60).minusNanos(1);
@@ -104,7 +104,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void boundsEachStartupAndPollBatchWithOneTimerAndNoBacklogTraversal() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             for (int i = 0; i < 7; i++) {
                 harness.part(10 + i, 1, 1, "complete", Duration.ofSeconds(60));
             }
@@ -128,7 +128,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void runtimeNotificationsAssembleWithoutCreatingPerGroupTimers() throws Exception {
-        try (var harness = new Harness(NOW); var router = new MemorySelectedRouterStore<>(harness.pending, 1)) {
+        try (var harness = new Harness(root, NOW); var router = new MemorySelectedRouterStore<>(harness.pending, 1)) {
             harness.recovery.reconstruct(1);
             router.open();
             SourceId first = harness.part(20, 2, 1, "A", Duration.ofSeconds(60));
@@ -144,7 +144,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void manyUnexpiredGroupsNeedNoRuntimeGroupMapOrIndividualTimers() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             for (int i = 0; i < 32; i++) {
                 harness.part(i, 3, 1, "incomplete", Duration.ofSeconds(60));
             }
@@ -160,7 +160,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void transientPublicationFailureRetriesAfterOneSecondWithoutDuplicateReadyWork() throws Exception {
-        try (var harness = new Harness(NOW); var router = new MemorySelectedRouterStore<>(harness.pending, 3)) {
+        try (var harness = new Harness(root, NOW); var router = new MemorySelectedRouterStore<>(harness.pending, 3)) {
             SourceId first = harness.part(30, 3, 1, "A", Duration.ofSeconds(60));
             harness.part(30, 3, 1, "duplicate", Duration.ofSeconds(60));
             SourceId second = harness.part(30, 3, 2, "B", Duration.ofSeconds(60));
@@ -192,7 +192,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void completionRacingPartialExpiryDoesNotResendFinishedOrdinalsOrFailRecovery() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             SourceId first = harness.part(40, 3, 1, "A", Duration.ofSeconds(60));
             SourceId duplicate = harness.part(40, 3, 1, "duplicate", Duration.ofSeconds(60));
             SourceId second = harness.part(40, 3, 2, "B", Duration.ofSeconds(60));
@@ -219,7 +219,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void completedGroupMayDisappearBeforeItsSchedulingReferenceIsFinished() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             SourceId source = harness.part(50, 1, 1, "A", Duration.ofSeconds(60));
             harness.action = sources -> {
                 harness.pending.makeMultipartReady(sources);
@@ -235,7 +235,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void unsafePublicationFailureCancelsTheSinglePollerAndBlocksNotifications() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             SourceId source = harness.part(60, 3, 1, "A", Duration.ofSeconds(60));
             harness.recovery.reconstruct(1);
             harness.action = sources -> {
@@ -253,7 +253,7 @@ class FileIndexedMultipartRecoveryTest {
     @Test
     void corruptDeadlineIndexFailsClosedAndRebuildsFromAcceptedFacts() throws Exception {
         SourceId source;
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             source = harness.part(70, 3, 1, "A", Duration.ofSeconds(60));
             harness.recovery.reconstruct(1);
             FolderPendingIndex.discard(root.resolve("derived/multipart/due"));
@@ -263,7 +263,7 @@ class FileIndexedMultipartRecoveryTest {
             assertThat(harness.recovery.isReady()).isFalse();
             assertThat(harness.pending.status().state()).isEqualTo(OutboundStage.State.FAILED);
         }
-        try (var recovered = new Harness(NOW.plusSeconds(60))) {
+        try (var recovered = new Harness(root, NOW.plusSeconds(60))) {
             recovered.recovery.reconstruct(1);
             assertThat(recovered.attempts).containsExactly(Set.of(source));
         }
@@ -271,7 +271,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void invalidDeadlineNanosecondsFailClosedInsteadOfBeingNormalized() throws Exception {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             SourceId source = harness.part(75, 3, 1, "A", Duration.ofSeconds(60));
             UUID group = harness.pending.findMultipart(source).orElseThrow().groupId();
             Path keyPath = root.resolve("derived/multipart/groups").resolve(group.toString()).resolve("due-key");
@@ -284,7 +284,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void startupPublicationFailureDoesNotClaimReadinessOrStartAPoller() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             harness.part(80, 1, 1, "A", Duration.ofSeconds(60));
             harness.action = sources -> {
                 throw unavailable();
@@ -298,7 +298,7 @@ class FileIndexedMultipartRecoveryTest {
     @Test
     void deadlineOrderingPreservesNanosecondsAndPreEpochInstants() {
         Instant beforeEpoch = Instant.parse("1960-01-01T00:00:00Z");
-        try (var harness = new Harness(beforeEpoch)) {
+        try (var harness = new Harness(root, beforeEpoch)) {
             SourceId source = harness.part(90, 3, 1, "A", Duration.ofNanos(1));
             harness.recovery.reconstruct(1);
             assertThat(harness.attempts).isEmpty();
@@ -310,7 +310,7 @@ class FileIndexedMultipartRecoveryTest {
 
     @Test
     void closingRecoveryDoesNotCloseTheBackendOrApplicationScheduler() {
-        try (var harness = new Harness(NOW)) {
+        try (var harness = new Harness(root, NOW)) {
             SourceId source = harness.part(100, 3, 1, "A", Duration.ofSeconds(60));
             harness.recovery.reconstruct(1);
             harness.recovery.close();
@@ -328,7 +328,7 @@ class FileIndexedMultipartRecoveryTest {
         return new OutboundStorageException(OutboundStage.Role.PENDING, UNAVAILABLE, "testPublication|error|reason:transientFailure");
     }
 
-    private final class Harness implements AutoCloseable {
+    private static final class Harness implements AutoCloseable {
         private final MutableClock clock;
         private final FilePendingMessageStore pending;
         private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
@@ -339,7 +339,7 @@ class FileIndexedMultipartRecoveryTest {
         private Consumer<Set<SourceId>> action;
         private boolean publishing;
 
-        private Harness(Instant now) {
+        private Harness(Path root, Instant now) {
             clock = new MutableClock(now);
             pending = spy(new FilePendingMessageStore(root, 64, clock));
             pending.open();
