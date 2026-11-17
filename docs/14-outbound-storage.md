@@ -440,6 +440,12 @@ File selected uses the same timer and four labels for `selected_open`, `selected
 DOWN until selected ownership and multipart recovery are reconciled. Reduced router capacity bounds
 the recovered runtime window, not the number of authoritative selections retained on disk.
 
+File routed uses that timer for `routed_open`, `routed_record`, `routed_take`, `routed_release`,
+`routed_complete` and `routed_forget`, with the same bounded labels. Startup reconciles terminal routed
+cleanup before readiness; unfinished records load only into requested destination windows.
+The memory Selected/Routed occupancy gauges are not a count of file-backed backlog.
+See [file-storage monitoring](08-monitoring-observability.md#file-backed-outbound-storage).
+
 After source validation/reconstruction, `pendingRecovery|success|backend:file|retainedSources:…|durationMs:…`
 reports retained source count and startup duration without payloads or paths. This summary does not
 mean the multipart backlog has drained; bounded group publication can continue after startup.
@@ -452,16 +458,23 @@ or native image. Keep its normal PostgreSQL fixture running and set:
 ```sh
 export SENDIUM_E2E_IMAGE=sendium:your-test-image
 export SENDIUM_E2E_PENDING_RESTART=true
+export SENDIUM_E2E_STORAGE_PROFILE=file/file/file
+export SENDIUM_E2E_REVISION="$(git rev-parse HEAD)"
 ./mvnw -pl sendium-core -DskipTests test-compile \
   org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
   -Dexec.classpathScope=test -Dexec.mainClass=utils.NativeE2eSmoke
 ```
 
-This opt-in smoke creates its own named spool volume, pauses routing, checks committed HTTP/SMPP
-and duplicate multipart admissions, forcibly removes the container, and starts a replacement on the
-same volume with routing resumed. It then finishes the recovered multipart group and checks provider
-content, required source cleanup and HTTP/SMPP DLR delivery. Test containers/volume are removed at
-the end; this is not a production backup/restore command. Without the flag the existing memory-profile
+This opt-in smoke creates its own named spool volume and checks committed HTTP/SMPP and duplicate
+multipart admissions across forced replacement. `SENDIUM_E2E_STORAGE_PROFILE` accepts
+`file/memory/memory` (the flag's default), `file/file/memory`, `file/memory/file` or `file/file/file`.
+The selected profile checks stable selection IDs under an unmatched routing gate. File-routed profiles
+check stable work IDs and recorded-destination dispatch while current routing points elsewhere.
+Gate changes use explicit replacement rather than depending on bind-mount file-watch delivery.
+The simulator sends DLRs after final replacement and required correlation handoffs; provider acceptance
+is not treated as receipt delivery. All cases finish the recovered multipart group and check provider
+content, source cleanup and HTTP/SMPP receipts. Test containers/volume are removed at the end;
+this is not a production backup/restore command. Without the flag the existing memory-profile
 PostgreSQL correlation/restart smoke remains unchanged. The fixture uses ports 18080, 27777 and 27779.
 Set `SENDIUM_E2E_SMPP_PORT` to override the host-side SMPP port if 27777 is already in use;
 the container's internal SMPP port remains unchanged.

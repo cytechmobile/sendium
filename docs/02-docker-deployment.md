@@ -4,7 +4,21 @@ This guide explains how to run Sendium with Docker for local testing or simple d
 
 Outbound message storage defaults to non-durable memory. For opt-in accepted-source recovery across
 container replacement, use the [filesystem pending deployment guide](16-filesystem-pending-storage.md#deployment)
-and retain a separate writable spool volume. The PostgreSQL DLR volume alone does not retain pending messages.
+and retain a separate writable spool volume. That same spool also holds selected/routed snapshots when
+those stages use file storage. The PostgreSQL DLR volume alone does not retain outbound messages.
+
+For `file/file/file`, set `SENDIUM_MESSAGE_PENDING_BACKEND=file`,
+`SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND=file`, `SENDIUM_MESSAGE_ROUTED_WORK_BACKEND=file`, and
+`SENDIUM_MESSAGE_PENDING_PATH` to the mounted spool path. Provision one private writable local volume
+for one process, with permissions for the container's runtime UID. All authoritative namespaces contain
+sensitive message content or ownership metadata; CBOR does not encrypt them. Protect disk and backups.
+See the [file deployment example](16-filesystem-pending-storage.md#deployment) rather than mounting
+different roots for each stage.
+
+Preserve the entire spool across replacements. Drain it with a compatible binary before downgrading,
+or stop the instance and preserve both binary/configuration and spool for later recovery. Do not edit
+the format marker, selectively remove stage files, or run an older image against incompatible state.
+Back up only a stopped spool; PostgreSQL DLR backup remains a separate, coordinated recovery concern.
 
 ## Generated Quick Start
 
@@ -144,7 +158,8 @@ After starting the container:
 
 1. Check container status with `docker ps`.
 2. Open `http://localhost:8080/swagger-ui` to confirm the HTTP API is available.
-3. Check `http://localhost:8080/q/health/ready` and confirm the `sendium-dlr-storage` check is `UP` before sending traffic.
+3. Check `http://localhost:8080/q/health/ready` and confirm `sendium-sms-storage` and, when enabled,
+   `sendium-dlr-storage` are `UP` before sending traffic.
 4. Inspect `logs/smsg.log`, `logs/smppclient.log`, and `logs/smppserver.log` if startup fails.
 
 ## Configuration Files

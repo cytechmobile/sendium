@@ -78,6 +78,21 @@ Do not downgrade to memory routing while any routed records remain, or to memory
 selected records remain. Startup rejects these downgrades without deletion or memory fallback. Drain
 with a compatible binary, or preserve the entire spool and compatible binary for later resumption.
 
+### Why stage payloads coexist
+
+This is not limited to multipart traffic. For one ordinary SMS, `file/file/file` can retain an accepted
+input, a selected execution snapshot and a routed snapshot at the same time. They may contain largely
+identical payloads, but represent different committed decisions and share stable ownership identities.
+They are not three independent messages.
+
+Commit the next stage before suppressing earlier scheduling: if a crash follows routed publication,
+recovery uses its selection/source IDs to resume the recorded destination rather than route or select
+the earlier records again. Earlier full payloads remain until terminal cleanup under the implemented
+ownership design. Once routed work is committed, its payload is sufficient for dispatch; retaining
+earlier snapshots through completion is a deliberate disk/write tradeoff, not a universal durability
+requirement. Required tracking/DLR handoff completion permits cleanup; a later handset receipt is
+handled separately by the DLR subsystem.
+
 ## Components and ownership
 
 ```mermaid
@@ -157,8 +172,9 @@ pending/
 
 Each accepted bucket is the first two lowercase hexadecimal characters of its source UUID (`00`–`ff`);
 only populated buckets need exist. An accepted source always stays in its admission-priority folder,
-including after multipart assembly, selection or routing. There is no separate authoritative parent
-message file and no ordinary source, priority or ready-reference index.
+including after multipart assembly, selection or routing. Pending has no separate assembled-parent
+payload file and no ordinary source, priority or ready-reference index; file selected/routed stages
+write their own execution snapshots separately.
 
 The derived tree above shows logical reference locations. Its `members`, `matching`, `due` and `ready`
 indexes split large leaves into `children/<hex-pair>/…` directories; the full reference key remains the
@@ -169,9 +185,9 @@ references use 56-character time/group keys. These implementation details are no
 Accepted CBOR sources are authoritative. Each accepted multipart duplicate has its own source record;
 the first ordinal payload remains the assembly owner. Cleanup intents and group-closure markers are
 also authoritative: dropping them can resurrect terminal work or reopen an unfinished closed group.
-Selected CBOR files are also authoritative; do not delete them to change a backend profile.
+Selected, routed and routed-terminal CBOR files are also authoritative; do not delete them to change a backend profile.
 `derived/` is disposable to **the locked startup implementation**, not permission to edit a running spool.
-It contains multipart lookup/deadline/ready references, source-only recipes/bindings and selected-stage references.
+It contains multipart lookup/deadline/ready references, source-only recipes/bindings and selected/routed-stage references.
 No embedded database is used; folder references are reconstructed from the authoritative state.
 
 ### Example: two parts and a duplicate
@@ -193,6 +209,8 @@ See the [membership schema](15-pending-record-schema.md#multipart-admission-and-
 Recovery registers a recipe containing the two original UUIDs in ordinal order and ownership of all
 three source UUIDs. It does **not** write an assembled "Hello world" payload. Only when a router slot
 is available does selection read the original parts and assemble that detached message in memory.
+With file selected storage, selection then commits that assembled execution in `selected/`; file routed
+storage additionally commits the routing-time payload in `routed/`. The recipe itself remains source-only.
 Assembly preserves the first ordinal's priority (2 here), not the duplicate's priority or the highest
 priority among the parts. Terminal completion removes all three owned source files. For an incomplete
 expired group, each received original is forwarded independently with its duplicates, preserving its UDH.
@@ -326,7 +344,8 @@ itself mean corrupt storage. Diagnose the typed failure; do not make the service
 
 1. Fence new HTTP/SMPP submissions. Stop the owning process/container and verify it has exited.
    Do not copy a live spool or use the presence/absence of the lock file to infer process ownership.
-2. Back up the **entire spool root**, including `format`, `accepted`, `selected`, `terminal` and `closed-groups`.
+2. Back up the **entire spool root**, including `format`, `accepted`, `selected`, `routed`,
+   `routed-terminal`, `terminal` and `closed-groups`.
    Preserve ownership, permissions and contents. Including `derived/` is safe; startup rebuilds it.
    Store the backup outside the spool, encrypt/protect it and record the application version/configuration.
 3. Back up PostgreSQL DLR state under its separate operational procedure. There is no atomic joint
@@ -335,8 +354,9 @@ itself mean corrupt storage. Diagnose the typed failure; do not make the service
    source directories from different backups/runs, edit records, or overlay an active spool.
 5. Restore suitable runtime ownership/permissions and start one format-compatible file-profile instance
    against that destination. Require `sendium-sms-storage` readiness and inspect recovery diagnostics
-   before reopening ingress. Expect reconstruction of unowned sources, restoration of file selections
-   when configured, repeated routing and possible duplicate provider submission.
+   before reopening ingress. Expect reconstruction of unowned sources and restoration of configured
+   file stages. Memory routing repeats routing; file routing resumes recorded destinations.
+   Provider submission can still repeat before committed terminal processing.
 
 A successful restore replays retained work, not an exact external-provider history. Unknown-version or
 corrupt committed data must be investigated from the preserved backup; there is no automatic migration,
@@ -349,8 +369,9 @@ Changing the backend selector does **not** migrate or drain retained files. Choo
 
 - **Drain first:** fence new ingress while the current service can still process work. Allow complete/
   expired multipart work, provider outcomes and required handoffs to finish. Stop the owner, then verify
-   there are no committed `accepted/<priority>/<bucket>/*.cbor` or `selected/<bucket>/*.cbor` files, and
-   no unfinished terminal intents. Retain a backup and the separate PostgreSQL
+   there are no committed accepted, selected, routed or routed-terminal records and no unfinished
+   cleanup intents. Zero accepted sources alone does not prove routed forget finished.
+   Retain a backup and the separate PostgreSQL
   DLR state before switching. An empty pending spool does not mean PostgreSQL's downstream DLR queue
   is empty.
 - **Preserve for later recovery:** stop the owner and preserve the full spool plus compatible application
@@ -362,13 +383,18 @@ against an unsupported spool format. Reusing a preserved spool later requires an
 plan; it is not a transparent code-only rollback.
 
 An older binary that cannot read format 3 needs its own empty spool after draining; an empty format-3
-directory does not become compatible with it merely because accepted and selected counts are zero.
+directory does not become compatible with it merely because its message counts are zero.
 
 In particular, `file/file/memory` is operationally one-way while selected records remain. Reopening the
 same spool as `file/memory/memory` fails with `selectedRecovery|error|reason:outstandingSelectedWork|fallback:none`.
 Do not bypass this check by deleting selected files or editing the format marker. If draining is blocked
 by unavailable workers or required handoffs, preserve the compatible binary, configuration and entire
 spool for later resumption. A separate memory deployment does not transfer or consume the preserved work.
+
+Likewise, opening a spool with routed assignments or terminal facts under memory routing fails with
+`routedRecovery|error|reason:outstandingRoutedWork|fallback:none`. This includes records waiting only
+for final cleanup. A downgrade from file selected to memory selected is also rejected while selected
+records remain, even if routed records currently suppress their scheduling.
 
 ## Verification and remaining limits
 
@@ -379,10 +405,14 @@ admission/selection/routing/provider-handoff boundaries. Live JVM/native contain
 named volume and real HTTP/SMPP/PostgreSQL DLR fixtures, including a multipart group completed after
 replacement. These are not power-loss or live-carrier exactly-once tests.
 
-Durable-selection tests cover restored IDs/payloads, multipart ownership exclusion, required-handoff
-failure, startup readiness, bounded-label metrics and profile downgrades. The cross-profile forced-process
-and fresh JVM/native matrix for selected/routed stages is separate follow-up verification, not a claim
-that the historical pending-only smokes already proved those profiles.
+Selected/routed tests cover restored identities/payloads, multipart ownership exclusion, required-handoff
+failure, startup readiness, bounded windows/metric labels and profile downgrades.
+`ForcedStageRestartTest` exercises selection, routing, authorized partial cleanup and provider ambiguity;
+`FileStageFaultTest` covers failed publication and a 140-record backlog reopened with capacity two.
+The live matrix passed all five profiles on freshly built JVM and native images, including retained-volume
+stage-identity probes and dispatch under changed routing for file-routed profiles. Provider observations
+are simulator-side checks, not live-carrier or exactly-once guarantees. The four file profiles use retained
+spool volumes; the memory case checks independent PostgreSQL DLR correlation/restart, not outbound memory durability.
 
 The performance workflow can select either pending backend independently of JVM/native and HTTP/SMPP;
 its [results record the profile](../performance/workflow/README.md#sendium-build-and-runtime-details).
