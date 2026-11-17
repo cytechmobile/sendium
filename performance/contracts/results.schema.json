@@ -28,7 +28,7 @@
           "properties": {
             "benchmarkTarget": { "enum": ["sendium", "kannel"] },
             "runtime": { "enum": ["jvm", "native", "kannel"] },
-            "messageStorageProfile": { "enum": ["memory/memory/memory", "file/memory/memory"] },
+            "messageStorageProfile": { "enum": ["memory/memory/memory", "file/memory/memory", "file/file/memory", "file/memory/file", "file/file/file"] },
             "source": { "$ref": "#/$defs/kannelSource" },
             "messageStore": { "enum": ["spool", "file", "disabled"] },
             "jvmArguments": { "type": "array", "items": { "type": "string" } },

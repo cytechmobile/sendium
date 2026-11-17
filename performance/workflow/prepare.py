@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from jsonschema import Draft202012Validator, ValidationError
 from preset_validation import validate_preset
-from application_runtime import RUNTIMES, runtime_mode, validate_native_build, verify_elf_header
+from application_runtime import RUNTIMES, runtime_mode, validate_native_build, verify_elf_header, storage_profile
 from kannel_identity import SOURCE as KANNEL_SOURCE, validate_build as validate_kannel_build
 
 
@@ -77,13 +77,19 @@ def boolean(value):
 
 
 def normalize(inputs, context, preset):
-    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "pending_backend"}
+    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "pending_backend", "storage_profile", "application_branch"}
     require(isinstance(inputs, dict) and set(inputs) <= allowed, "Unknown dispatch input")
     result = json.loads(json.dumps(preset))
     mode = inputs.get("application_runtime", runtime_mode(result))
     require(mode in RUNTIMES, "Application runtime must be jvm or native")
     result["runtime"]["applicationRuntime"] = mode
-    result["runtime"]["pendingBackend"] = inputs.get("pending_backend", result["runtime"].get("pendingBackend", "memory"))
+    result["runtime"]["pendingBackend"] = inputs.get("pending_backend", storage_profile(result["runtime"]).split("/")[0])
+    profile = inputs.get("storage_profile", "pending-backend")
+    if profile != "pending-backend":
+        storage_profile({"messageStorageProfile": profile})
+        result["runtime"]["messageStorageProfile"] = profile
+        result["runtime"]["pendingBackend"] = profile.split("/")[0]
+    storage_profile(result["runtime"])
     workload = result["workload"]
     for name, field in INPUT_FIELDS.items():
         workload[field] = number(inputs.get(name, workload[field]), integral=name != "offered_rate")
@@ -104,6 +110,10 @@ def normalize(inputs, context, preset):
         require(isinstance(context.get(key), str) and re.fullmatch(r"[a-f0-9]{40}", context[key]), "Exact commit SHA required")
     require(isinstance(context.get("ref"), str) and context["ref"].startswith("refs/heads/") and len(context["ref"]) > 11
             and not any(ord(character) < 32 for character in context["ref"]), "Select an application branch using Run workflow")
+    branch = inputs.get("application_branch", "")
+    require(isinstance(branch, str) and (not branch or context["ref"] == "refs/heads/" + branch),
+            "Application branch differs from resolved source")
+    require(target != "kannel" or not branch, "Application branch selection is Sendium-only")
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", context["repository"]), "Invalid repository")
     for key in ("runId", "runAttempt"):
         require(re.fullmatch(r"[1-9][0-9]*", str(context[key])), "Invalid workflow run identity")
@@ -262,8 +272,8 @@ def read_inputs():
 
 
 def github_context(controller_revision):
-    return {"ref": os.environ["GITHUB_REF"], "repository": os.environ["GITHUB_REPOSITORY"],
-            "applicationCommit": os.environ["GITHUB_SHA"], "controllerRevision": controller_revision,
+    return {"ref": os.environ.get("APPLICATION_REF", os.environ["GITHUB_REF"]), "repository": os.environ["GITHUB_REPOSITORY"],
+            "applicationCommit": os.environ.get("APPLICATION_SHA", os.environ["GITHUB_SHA"]), "controllerRevision": controller_revision,
             "workflowRevision": os.environ["GITHUB_WORKFLOW_SHA"], "runId": os.environ["GITHUB_RUN_ID"],
             "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "workflowRunUrl": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"]}

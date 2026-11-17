@@ -5,6 +5,18 @@ import struct
 
 
 RUNTIMES = ("jvm", "native")
+STORAGE_PROFILES = ("memory/memory/memory", "file/memory/memory", "file/file/memory", "file/memory/file", "file/file/file")
+
+
+def storage_profile(runtime):
+    pending = runtime.get("pendingBackend", "memory")
+    require(pending in ("memory", "file"), "Pending backend must be memory or file")
+    profile = runtime.get("messageStorageProfile", pending + "/memory/memory")
+    require(profile in STORAGE_PROFILES, "Unsupported message storage profile")
+    require("pendingBackend" not in runtime or profile.split("/")[0] == pending,
+            "Message storage profile conflicts with pending backend")
+    return profile
+
 ELF_MACHINES = {"x86_64": 62, "arm64": 183}
 CREDENTIAL_ENVIRONMENT = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
                           "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",

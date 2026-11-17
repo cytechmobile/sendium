@@ -22,6 +22,17 @@ on:
         options: [http, smpp]
         default: http
         required: true
+      application_branch:
+        description: 'Application branch to benchmark (blank uses the dispatch branch)'
+        type: string
+        default: ''
+        required: false
+      storage_profile:
+        description: 'Sendium pending/selected/routed storage; pending-backend preserves legacy input'
+        type: choice
+        options: [pending-backend, memory/memory/memory, file/memory/memory, file/file/memory, file/memory/file, file/file/file]
+        default: pending-backend
+        required: true
       pending_backend:
         description: 'Sendium-only pending storage (Kannel uses its own filesystem spool; keep this input at its default for Kannel)'
         type: choice
@@ -111,11 +122,23 @@ jobs:
         run: python -m pip install -r control/performance/workflow/requirements-dev.txt
       - name: Check preparation contracts
         run: python -m unittest discover -s control/performance/workflow -p 'test_*.py'
+      - name: Resolve application source without executing application code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.sha }}
+          path: application-source
+          persist-credentials: false
       - name: Normalize inputs and pin revisions
         id: request
         env:
           DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+          APPLICATION_BRANCH: ${{ inputs.application_branch }}
         run: |
+          export APPLICATION_SHA="$(git -C application-source rev-parse HEAD)"
+          export APPLICATION_REF="$GITHUB_REF"
+          if [ -n "$APPLICATION_BRANCH" ]; then
+            export APPLICATION_REF="refs/heads/$APPLICATION_BRANCH"
+          fi
           CONTROLLER_REVISION="$(git -C control rev-parse HEAD)" \
             python control/performance/workflow/prepare.py normalize --output "$RUNNER_TEMP/request.json"
       - name: Preserve normalized request

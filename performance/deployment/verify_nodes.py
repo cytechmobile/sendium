@@ -51,6 +51,10 @@ def main():
     harness = harnesses[0]
     pending_backend = os.environ.get("SENDIUM_PENDING_BACKEND", "memory")
     assert pending_backend in ("memory", "file"), "Pending backend must be memory or file"
+    from application_runtime import storage_profile
+    profile = storage_profile({"messageStorageProfile": os.environ.get(
+        "SENDIUM_STORAGE_PROFILE", pending_backend + "/memory/memory")})
+    pending_backend = profile.split("/")[0]
     native_archive = os.environ.get("SENDIUM_NATIVE_ARCHIVE")
     native_build = read(Path(native_archive).with_name("build-manifest.json"))["nativeBuild"] if native_archive else None
     evidence = Path(os.environ["SENDIUM_NODE_EVIDENCE"]) if os.environ.get("SENDIUM_NODE_EVIDENCE") else None
@@ -94,14 +98,14 @@ def main():
                     "artifacts": [{"name": "harness", "sha256": digest(harness)}]},
                     "application": {"runtime": "native" if native_archive else "jvm", "jvmArguments": [],
                         **({"nativeArguments": ["-Xms128m", "-Xmx512m"], "nativeBuild": native_build} if native_archive else {}),
-                         "connections": {}, "dlrStorage": "postgresql", "messageStorageProfile": pending_backend + "/memory/memory"},
+                          "connections": {}, "dlrStorage": "postgresql", "messageStorageProfile": profile},
                     "infrastructure": {"preset": "local-test", "region": "local", "sendium": {"architecture": native_build["architecture"]} if native_build else {}, "harness": {},
                                        "database": {"engine": "postgresql"}}, "diagnostics": []},
                 "resources": {"schemaVersion": 1, "sendiumSamples": None, "harnessSamples": None, "cpuCredits": None, "sampleBudget": 120},
                 "sampling": None}
             common = {"runIdentity": identity, "region": "local", "bucket": "bucket", "artifacts": artifacts,
                       "jvmArguments": ["-Xms128m", "-Xmx512m"], "sampleIntervalSeconds": 1, "sampleBudget": 120, "timeoutSeconds": 90}
-            sendium = Node({**common, "source": "sendium", "deployment": deployment, "workload": workload, "pendingBackend": pending_backend,
+            sendium = Node({**common, "source": "sendium", "deployment": deployment, "workload": workload, "pendingBackend": pending_backend, "messageStorageProfile": profile,
                             **({"applicationRuntime": "native", "nativeArguments": ["-Xms128m", "-Xmx512m"],
                                 "architecture": {"x86_64": "x86_64", "aarch64": "arm64"}[platform.machine()]}
                                if native_archive else {}),
@@ -127,7 +131,7 @@ def main():
                 harness_thread.join(timeout=90)
                 assert not harness_thread.is_alive()
                 report = read(harness_node.root / "report/results.json")
-                assert report["configuration"]["application"]["messageStorageProfile"] == pending_backend + "/memory/memory"
+                assert report["configuration"]["application"]["messageStorageProfile"] == profile
                 if run_application:
                     assert report["validity"]["status"] != "failed", report["validity"]
                     counts = report["overall"]["counts"]

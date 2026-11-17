@@ -50,7 +50,7 @@ def validate(document, request):
     prepare.require(application.get("runtime", "jvm") == mode, "Published application runtime mismatch")
     if target == "sendium":
         prepare.require(application.get("messageStorageProfile", "memory/memory/memory") ==
-                        request["preset"]["runtime"].get("pendingBackend", "memory") + "/memory/memory",
+                        prepare.storage_profile(request["preset"]["runtime"]),
                         "Published message storage profile mismatch")
     if target == "kannel":
         prepare.require(application["dlrStorage"] == "postgresql" and application["messageStore"] == "spool"
@@ -78,7 +78,7 @@ def unavailable(request, code):
                     "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if runtime_mode(preset) == "jvm" else [],
                     **({"nativeArguments": preset["runtime"]["native"]["arguments"]} if runtime_mode(preset) == "native" else {}),
                      "connections": {}, "dlrStorage": "postgresql",
-                     "messageStorageProfile": preset["runtime"].get("pendingBackend", "memory") + "/memory/memory"},
+                     "messageStorageProfile": prepare.storage_profile(preset["runtime"])},
                 "infrastructure": {"preset": preset["id"], "region": "unresolved",
                     "sendium": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["sendium"]},
                     "harness": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["harness"]},

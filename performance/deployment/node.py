@@ -18,7 +18,7 @@ import time
 
 from aws_cli import AwsCli, AwsError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
-from application_runtime import validate_runtime_mode, verify_elf_header
+from application_runtime import validate_runtime_mode, verify_elf_header, storage_profile
 
 
 ROOT = Path("/var/lib/sendium-benchmark")
@@ -151,7 +151,8 @@ class Node:
         if self.target not in ("sendium", "kannel"):
             raise ValueError("Unknown benchmark target")
         self.mode = validate_runtime_mode(document.get("applicationRuntime", "jvm"))
-        self.pending_backend = document.get("pendingBackend", "memory")
+        self.storage_profile = storage_profile(document)
+        self.pending_backend = self.storage_profile.split("/")[0]
         if self.pending_backend not in ("memory", "file"):
             raise ValueError("Pending backend must be memory or file")
         if self.pending_backend == "file" and (self.target != "sendium" or self.source != "sendium"):
@@ -273,8 +274,9 @@ class Node:
 
     def configure_storage(self):
         # Configure the launched process here, not the shared harness generator or Kannel adapter.
-        settings = {"sendium.message.pending.backend": self.pending_backend,
-                    "sendium.message.router-queue.backend": "memory", "sendium.message.routed-work.backend": "memory"}
+        pending, selected, routed = self.storage_profile.split("/")
+        settings = {"sendium.message.pending.backend": pending,
+                    "sendium.message.router-queue.backend": selected, "sendium.message.routed-work.backend": routed}
         if self.pending_backend == "file":
             spool = self.root / "pending"
             spool.mkdir(mode=0o700, exist_ok=True)
@@ -284,7 +286,7 @@ class Node:
         environment.update({key.upper().replace(".", "_").replace("-", "_"): value for key, value in settings.items()})
         write(environment_path, environment)
         effective = read(self.root / "generated/harness/effective-configuration.json")
-        effective["messageStorageProfile"] = self.pending_backend + "/memory/memory"
+        effective["messageStorageProfile"] = self.storage_profile
         effective["applicationProperties"].update(settings)
         for location in ("public", "harness"):
             write(self.root / ("generated/" + location + "/effective-configuration.json"), effective)
