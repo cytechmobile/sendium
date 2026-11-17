@@ -5,6 +5,8 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -13,6 +15,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
@@ -22,6 +27,8 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
     private final FilePendingMessageStore pending;
     private final int capacity;
     private final Clock clock;
+    private final MeterRegistry metrics;
+    private final Map<String, Timer> timers = new ConcurrentHashMap<>();
     private final Map<SelectionId, Entry> active = new HashMap<>();
     private final ArrayDeque<Entry> ready = new ArrayDeque<>();
     private State state = State.NEW;
@@ -32,16 +39,28 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
     }
 
     public FileSelectedRouterStore(FilePendingMessageStore pending, int capacity, Clock clock) {
+        this(pending, capacity, clock, null);
+    }
+
+    public FileSelectedRouterStore(FilePendingMessageStore pending, int capacity, Clock clock, MeterRegistry metrics) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("selectedConfiguration|error|reason:nonPositiveCapacity");
         }
         this.pending = Objects.requireNonNull(pending, "pending");
         this.capacity = capacity;
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.metrics = metrics;
     }
 
     @Override
     public void open() {
+        measured("selected_open", () -> {
+            openStore();
+            return null;
+        });
+    }
+
+    private void openStore() {
         pending.selectionLock().lock();
         try {
             if (state == State.READY) {
@@ -76,6 +95,10 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
 
     @Override
     public int selectToRouter(int limit) {
+        return measured("selected_select", () -> select(limit));
+    }
+
+    private int select(int limit) {
         if (limit <= 0) {
             throw new IllegalArgumentException("selectedSelection|error|reason:nonPositiveLimit");
         }
@@ -105,6 +128,19 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
 
     @Override
     public Optional<Selected<StandardMessage>> take(Duration timeout) throws InterruptedException {
+        long started = System.nanoTime();
+        Throwable outcome = null;
+        try {
+            return takeSelected(timeout);
+        } catch (InterruptedException | RuntimeException | Error failure) {
+            outcome = failure;
+            throw failure;
+        } finally {
+            record("selected_take", started, outcome);
+        }
+    }
+
+    private Optional<Selected<StandardMessage>> takeSelected(Duration timeout) throws InterruptedException {
         Objects.requireNonNull(timeout, "timeout");
         if (timeout.isNegative()) {
             throw new IllegalArgumentException("selectedTake|error|reason:negativeTimeout");
@@ -140,6 +176,13 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
 
     @Override
     public void release(Selected<StandardMessage> selected) {
+        measured("selected_release", () -> {
+            releaseSelected(selected);
+            return null;
+        });
+    }
+
+    private void releaseSelected(Selected<StandardMessage> selected) {
         Objects.requireNonNull(selected, "selected");
         pending.selectionLock().lock();
         try {
@@ -163,6 +206,13 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
 
     @Override
     public void markRouted(SelectionId selection) {
+        measured("selected_mark_routed", () -> {
+            markSelectionRouted(selection);
+            return null;
+        });
+    }
+
+    private void markSelectionRouted(SelectionId selection) {
         Objects.requireNonNull(selection, "selection");
         pending.selectionLock().lock();
         try {
@@ -187,6 +237,13 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
 
     @Override
     public void complete(SelectionId selection) {
+        measured("selected_complete", () -> {
+            completeSelection(selection);
+            return null;
+        });
+    }
+
+    private void completeSelection(SelectionId selection) {
         Objects.requireNonNull(selection, "selection");
         pending.selectionLock().lock();
         try {
@@ -229,6 +286,13 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
 
     @Override
     public void close() {
+        measured("selected_close", () -> {
+            closeStore();
+            return null;
+        });
+    }
+
+    private void closeStore() {
         pending.selectionLock().lock();
         try {
             state = State.CLOSED;
@@ -238,6 +302,33 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
         } finally {
             pending.selectionLock().unlock();
         }
+    }
+
+    private <T> T measured(String operation, Supplier<T> action) {
+        long started = System.nanoTime();
+        Throwable outcome = null;
+        try {
+            return action.get();
+        } catch (RuntimeException | Error failure) {
+            outcome = failure;
+            throw failure;
+        } finally {
+            record(operation, started, outcome);
+        }
+    }
+
+    private void record(String operation, long started, Throwable failure) {
+        if (metrics == null) {
+            return;
+        }
+        String outcome = failure == null ? "success" : "error";
+        String reason = failure == null ? "NONE" : failure instanceof OutboundStorageException storage ? storage.reason().name() : "OTHER";
+        String key = operation + '/' + outcome + '/' + reason;
+        timers.computeIfAbsent(key, ignored -> Timer.builder(FilePendingMessageStore.OPERATION_METRIC)
+                        .description("File selected storage operation latency including lock wait; error counts by bounded reason")
+                        .tags("backend", "file", "operation", operation, "outcome", outcome, "reason", reason)
+                        .register(metrics))
+                .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
     }
 
     private static final class Entry {

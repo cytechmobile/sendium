@@ -1,4 +1,4 @@
-# Filesystem Pending Storage: Architecture and Operations
+# Filesystem Pending and Selected Storage: Architecture and Operations
 
 [Documentation map](DocumentationMap.md) · [Outbound lifecycle](14-outbound-storage.md) · [Source schema](15-pending-record-schema.md)
 
@@ -15,8 +15,34 @@ to the provider but before source completion can repeat submission. A lost clien
 cause a duplicate when the client retries. An admission error after publication does not prove that
 no source was committed. Use application-level reconciliation where duplicates matter.
 
-Only pending storage is durable in this profile. File selected/routed stages, PostgreSQL outbound
-stages and copied-route execution are not enabled by it.
+Only pending storage is durable in that profile. Opt-in `file/file/memory` also restores committed
+selections; see [durable selection](#durable-selection-filefilememory). File routed stages, PostgreSQL
+outbound stages and copied-route execution remain unsupported.
+
+### Durable selection (`file/file/memory`)
+
+Set `sendium.message.router-queue.backend=file` (or `SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND=file`)
+alongside the file-pending configuration below. The selected store shares pending's root and exclusive
+owner; do not provision a second selected directory or process. Defaults remain memory.
+
+Each selected item is an immutable CBOR envelope with `schemaVersion=1`, canonical `selectionId`, the
+complete `sources` UUID set and an explicit `message` mapping using the accepted message fields.
+For multipart work this is the committed assembled result, not a pending readiness recipe. Originals
+and duplicates remain accepted sources. Source membership and identities are validated on recovery.
+Each item commits independently: a failed selection call can leave some items committed and others
+eligible pending work. Startup reconciles them without assigning new IDs to committed selections.
+
+Startup first replays authorized cleanup, validates surviving selected ownership and rebuilds disk-backed
+source/scheduling references. It then restores a bounded routing window and reconstructs only unowned
+multipart originals. Current routing rules run again on the restored selected payload; neither the
+previous destination nor runtime release mutations/retry timing are restored. Router dequeue is volatile.
+Completion requires all terminal processing and required DLR handoffs; its intent authorizes removal of
+both accepted sources and their selected record and survives interrupted deletion. A crash before that
+terminal boundary can repeat provider submission.
+
+Workers retain their normal startup/reconnection behavior. No grace period or removed-destination
+fallback is added. An absent worker can leave its in-process assignment retained and consuming capacity;
+with memory routed storage, restart repeats routing rather than preserving that destination.
 
 ## Components and ownership
 
@@ -38,13 +64,16 @@ flowchart LR
     handoff --> coordinator
 ```
 
+The diagram above is `file/memory/memory`. In `file/file/memory`, replace the memory selected backlog
+with `FileSelectedRouterStore`, which writes authoritative selected records under the same spool owner.
+
 - `StandaloneOutboundPipeline` constructs compatible stores and starts the coordinator before returning
   it to admission. Unsupported profiles, missing paths and unsafe storage fail without memory fallback.
 - `DefaultOutboundCoordinator` owns store startup, one shared recovery component and coordinated source
   completion. Stopping an SMPP worker does not stop shared recovery; handlers only borrow it.
 - `FilePendingMessageStore` retains accepted content, multipart identity and absolute deadlines.
   Mutable execution messages are detached from the accepted source snapshot.
-- The selected/routed stores remain memory projections. Completion retains source ownership until every
+- The selected store is memory or file-backed; the routed store remains memory-backed. Completion retains source ownership until every
   required provider-part/tracking/DLR handoff succeeds. A failed handoff is not terminal cleanup.
 - Recovery shuts down outside the coordinator lock, before stores close, to avoid deadlock with a
   recovery callback. Closing stores preserves unfinished sources; it is not completion.
@@ -56,12 +85,13 @@ Treat the entire directory as private application state, not a public file API:
 ```text
 pending/
   owner.lock                         OS-held exclusive ownership; not a stale-lock flag
-  format                             sendium-pending-spool:2 followed by newline
+  format                             sendium-pending-spool:3 followed by newline
   accepted/
     3/<bucket>/<source-UUID>.cbor      high priority
     2/<bucket>/<source-UUID>.cbor      normal priority
     1/<bucket>/<source-UUID>.cbor      low priority
   terminal/<intent-UUID>.cbor         committed cleanup authorization
+  selected/<bucket>/<selection-UUID>.cbor  authoritative selected results when configured
   closed-groups/<bucket>/<UUID>.closed
   derived/                           disposable, rebuilt while opening the spool
     multipart/
@@ -78,6 +108,9 @@ pending/
     publications/
       work/<publication-UUID>.cbor    source-only readiness recipe, never a message body
       bindings/<bucket>/<source-UUID>
+    selected/
+      owners/<bucket>/<source-UUID>   source-to-selection lookup references
+      ready/<selection-order-key>    bounded directory-reference scheduling index
 ```
 
 Each accepted bucket is the first two lowercase hexadecimal characters of its source UUID (`00`–`ff`);
@@ -94,8 +127,9 @@ references use 56-character time/group keys. These implementation details are no
 Accepted CBOR sources are authoritative. Each accepted multipart duplicate has its own source record;
 the first ordinal payload remains the assembly owner. Cleanup intents and group-closure markers are
 also authoritative: dropping them can resurrect terminal work or reopen an unfinished closed group.
+Selected CBOR files are also authoritative; do not delete them to change a backend profile.
 `derived/` is disposable to **the locked startup implementation**, not permission to edit a running spool.
-It contains only multipart lookup/deadline/ready references and source-only recipes/bindings.
+It contains multipart lookup/deadline/ready references, source-only recipes/bindings and selected-stage references.
 No embedded database is used; folder references are reconstructed from the authoritative state.
 
 ### Example: two parts and a duplicate
@@ -140,9 +174,10 @@ Old spool markers or an old `sources/` tree are rejected before temporary cleanu
 rebuilding. There is no conversion, automatic deletion or migration of old spools. Preserve old data
 and use its compatible binary to drain it; changing the marker or renaming directories is not migration.
 
-Terminal completion first publishes a cleanup intent, then removes authorized sources and associated
+Terminal completion first publishes a cleanup intent, then removes authorized sources, selected records and associated
 references. Group-closure markers survive while siblings remain. If the process dies during deletion,
-startup replays the committed intent before validating duplicate/original relationships.
+startup replays the committed intent before validating duplicate/original relationships. Intent schema 1
+adds a `selections` UUID array for selected records covered by the same cleanup authorization.
 
 ## Startup and restart sequence
 
@@ -158,7 +193,7 @@ sequenceDiagram
     FileStore->>FileStore: validate layout and cleanup metadata
     FileStore->>FileStore: replay terminal intents
     FileStore->>FileStore: rebuild multipart references and validate every source/membership
-    Coordinator->>Coordinator: open memory selected/routed stages
+    Coordinator->>Coordinator: open selected (memory or file) and memory routed stages
     Coordinator->>Recovery: initialize bounded reconstruction and one poller
     Coordinator-->>App: ready coordinator
     App->>Ingress: allow admission
@@ -170,12 +205,13 @@ sequenceDiagram
 ```
 
 Readiness means validated ownership and initialized safe recovery, **not an empty backlog**. Complete
-groups assemble again from original accepted parts. Incomplete groups retain their original absolute
+unowned groups assemble again from original accepted parts. Incomplete groups retain their original absolute
 deadline; a later part or timeout reconfiguration does not extend it. Expired originals become independent
 routing work while duplicate source handles remain owned through completion.
 
 Startup discards old recipes/bindings and rebuilds readiness from accepted membership rather than
-resuming old assembly/routing decisions. Payload assembly waits for selection capacity.
+resuming old pending-only assembly/routing decisions. With file selected, committed selections instead
+take precedence over reconstruction of their sources. Payload assembly for new selections waits for selection capacity.
 Current routing configuration/filters therefore apply again to retained sources. Plan configuration changes
 accordingly; restart is not a promise to use the previous destination or provider retry timing.
 
@@ -222,7 +258,8 @@ Verify the old process/container has exited and investigate the mount/owner inst
 - Selection/recovery batch size defaults to **100**. Ordinary selection traverses accepted directories
   directly with persistent cursors, at most three directory streams and a **1,024-step** per-call scan
   budget. Three in-memory waiting counts skip known-empty priorities, and runtime active-source
-  ownership prevents reselection without disk markers. Accepted buckets are streamed, not sorted or
+  ownership prevents reselection for memory selected. File-selected ownership is resolved through disk
+  references rather than a backlog-sized runtime source map. Accepted buckets are streamed, not sorted or
   limited to 128 records. Only the remaining derived reference indexes have **128-entry** leaf bounds.
 - Selection prefers priorities **3, 2, 1**. It resumes within a priority rather than repeatedly choosing
   the smallest UUID; there is no FIFO promise or instantaneous preemption for concurrent admissions.
@@ -247,7 +284,7 @@ itself mean corrupt storage. Diagnose the typed failure; do not make the service
 
 1. Fence new HTTP/SMPP submissions. Stop the owning process/container and verify it has exited.
    Do not copy a live spool or use the presence/absence of the lock file to infer process ownership.
-2. Back up the **entire spool root**, including `format`, `accepted`, `terminal` and `closed-groups`.
+2. Back up the **entire spool root**, including `format`, `accepted`, `selected`, `terminal` and `closed-groups`.
    Preserve ownership, permissions and contents. Including `derived/` is safe; startup rebuilds it.
    Store the backup outside the spool, encrypt/protect it and record the application version/configuration.
 3. Back up PostgreSQL DLR state under its separate operational procedure. There is no atomic joint
@@ -256,7 +293,8 @@ itself mean corrupt storage. Diagnose the typed failure; do not make the service
    source directories from different backups/runs, edit records, or overlay an active spool.
 5. Restore suitable runtime ownership/permissions and start one format-compatible file-profile instance
    against that destination. Require `sendium-sms-storage` readiness and inspect recovery diagnostics
-   before reopening ingress. Expect reselection/rerouting and possible duplicate provider submission.
+   before reopening ingress. Expect reconstruction of unowned sources, restoration of file selections
+   when configured, repeated routing and possible duplicate provider submission.
 
 A successful restore replays retained work, not an exact external-provider history. Unknown-version or
 corrupt committed data must be investigated from the preserved backup; there is no automatic migration,
@@ -269,7 +307,8 @@ Changing the backend selector does **not** migrate or drain retained files. Choo
 
 - **Drain first:** fence new ingress while the current service can still process work. Allow complete/
   expired multipart work, provider outcomes and required handoffs to finish. Stop the owner, then verify
-   there are no committed `accepted/<priority>/<bucket>/*.cbor` files. Retain a backup and the separate PostgreSQL
+   there are no committed `accepted/<priority>/<bucket>/*.cbor` or `selected/<bucket>/*.cbor` files, and
+   no unfinished terminal intents. Retain a backup and the separate PostgreSQL
   DLR state before switching. An empty pending spool does not mean PostgreSQL's downstream DLR queue
   is empty.
 - **Preserve for later recovery:** stop the owner and preserve the full spool plus compatible application
@@ -280,6 +319,15 @@ Do not roll an unreadable spool forward by deleting committed files, and do not 
 against an unsupported spool format. Reusing a preserved spool later requires an explicit reconciliation
 plan; it is not a transparent code-only rollback.
 
+An older binary that cannot read format 3 needs its own empty spool after draining; an empty format-3
+directory does not become compatible with it merely because accepted and selected counts are zero.
+
+In particular, `file/file/memory` is operationally one-way while selected records remain. Reopening the
+same spool as `file/memory/memory` fails with `selectedRecovery|error|reason:outstandingSelectedWork|fallback:none`.
+Do not bypass this check by deleting selected files or editing the format marker. If draining is blocked
+by unavailable workers or required handoffs, preserve the compatible binary, configuration and entire
+spool for later resumption. A separate memory deployment does not transfer or consume the preserved work.
+
 ## Verification and remaining limits
 
 Tests cover immutable source ownership, folder bounds, codecs/corruption, permissions/capacity/locking,
@@ -288,6 +336,11 @@ ordering, readiness and bounded-label metrics. Forced child-JVM tests kill the w
 admission/selection/routing/provider-handoff boundaries. Live JVM/native container smokes use a retained
 named volume and real HTTP/SMPP/PostgreSQL DLR fixtures, including a multipart group completed after
 replacement. These are not power-loss or live-carrier exactly-once tests.
+
+Durable-selection tests cover restored IDs/payloads, multipart ownership exclusion, required-handoff
+failure, startup readiness, bounded-label metrics and profile downgrades. The cross-profile forced-process
+and fresh JVM/native matrix for selected/routed stages is separate follow-up verification, not a claim
+that the historical pending-only smokes already proved those profiles.
 
 The performance workflow can select either pending backend independently of JVM/native and HTTP/SMPP;
 its [results record the profile](../performance/workflow/README.md#sendium-build-and-runtime-details).

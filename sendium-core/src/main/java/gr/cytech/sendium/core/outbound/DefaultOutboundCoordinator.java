@@ -15,6 +15,7 @@ import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.RoutedWorkStore;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
@@ -42,8 +43,8 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNA
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
 
 /**
- * Coordinates fresh volatile stages with optional indexed durable pending recovery. Retained pending
- * sources repeat selection/routing on restart; durable selected/routed stages remain unsupported.
+ * Coordinates volatile or file-backed pending/selected stages with indexed multipart recovery.
+ * Durable selections resume before pending reconstruction; destinations remain volatile.
  * Handoff waits and callbacks on returned completion stages never run under the coordinator lock.
  */
 public final class DefaultOutboundCoordinator<M extends StandardMessage> implements OutboundCoordinator<M> {
@@ -62,6 +63,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     private PendingMultipartRecovery<M> multipartRecovery;
     private ScheduledExecutorService recoveryScheduler;
     private Lifecycle lifecycle = Lifecycle.NEW;
+    private volatile boolean startupComplete;
 
     public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed) {
         this(pending, router, routed, 100);
@@ -113,6 +115,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                     multipartRecovery = new PendingMultipartRecovery<>(pending, recoveryClock, recoveryScheduler, this::makeHeldReady);
                     multipartRecovery.reconstruct(recoveryBatchSize);
                 }
+                startupComplete = true;
             } catch (RuntimeException | Error failure) {
                 lifecycle = Lifecycle.CLOSED;
                 startupFailure = failure;
@@ -154,6 +157,9 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     @Override
     public boolean isReady() {
+        if (!startupComplete) {
+            return false;
+        }
         lock.lock();
         try {
             return lifecycle == Lifecycle.RUNNING && pending.status().state() == OutboundStage.State.READY &&
@@ -166,7 +172,9 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     private void open(OutboundStage stage, Role role, List<OutboundStage> attempted) {
         OutboundStage.Status status = stage.status();
-        if (status.durable() && (role != Role.PENDING || !(stage instanceof IndexedMultipartSource))) {
+        boolean supportedDurable = role == Role.PENDING && stage instanceof IndexedMultipartSource ||
+                role == Role.ROUTER_QUEUE && stage instanceof FileSelectedRouterStore && pending.status().durable();
+        if (status.durable() && !supportedDurable) {
             throw new OutboundStorageException(role, UNSUPPORTED, "outboundStartup|error|reason:unsupportedDurableStage");
         }
         if (status.state() != OutboundStage.State.NEW) {

@@ -6,7 +6,8 @@ Accepted sources remain owned until provider processing and every required track
 
 **`memory/memory/memory`** remains the non-durable default. Opt-in **`file/memory/memory`** retains
 accepted sources across process/container restarts using an explicitly configured local spool path.
-Selection and routing repeat after restart; power-loss durability and exactly-once delivery are not guaranteed.
+Selection and routing repeat after restart in that profile. **`file/file/memory`** additionally restores
+committed selections without reselection, but still repeats routing. Power-loss durability and exactly-once delivery are not guaranteed.
 See [Filesystem Pending Storage](16-filesystem-pending-storage.md) for the as-built file architecture,
 deployment, stopped-instance backup/restore and rollback procedures.
 The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
@@ -105,7 +106,7 @@ flowchart LR
 | `MultipartKey` / `MultipartMembership` | Match compatible parts and retain each source's assigned group, ordinal, absolute deadline and group creation order. |
 | `PendingSourceRecord` / `PendingMessageData` / `PendingRecordCodec` | Explicit accepted-source representation and versioned Jackson CBOR codec; not a physical backend or automatic memory-store encoding. |
 | `PendingMultipartRecovery` | Shared record-driven assembly/expiry entrypoint using bounded reads; backend/application startup integration is explicit. |
-| `SelectedRouterStore` / `MemorySelectedRouterStore` | Own bounded selection and unassigned routing work; retain selected bookkeeping after routing. |
+| `SelectedRouterStore` / `MemorySelectedRouterStore` / `FileSelectedRouterStore` | Own selection and bounded runtime routing work; retain selected ownership after routing. The file implementation restores committed selections from the shared spool. |
 | `RoutedWorkStore` / `MemoryRoutedWorkStore` | Record one destination per selection and schedule its unfinished work by destination. |
 | `DefaultOutboundCoordinator` / `OutboundWork` | Enforce typed source/selection/work ownership, transitions, handoff-dependent completion and retryable cleanup. |
 | `StandardRoutingManager` / `StandardOutboundDispatch` | Resolve rules/filters, retain recording intents and schedule tracked provider attempts. |
@@ -234,7 +235,8 @@ loads one group's original payloads and assembles only when router capacity is a
 does not create a heap payload map or timer
 for every retained group. See the [file architecture and bounds](16-filesystem-pending-storage.md#bounds-and-capacity).
 
-There is **no new durable checkpoint of a runtime assembly, release or publication decision**.
+Pending readiness recipes and runtime release are **not durable checkpoints**. A file selected backend
+separately commits the selected result, which can contain the assembled execution payload.
 Pending-only recovery may repeat processing. Selection/destination decisions survive only under
 their own configured stage guarantees. Within a running process, memory `makeHeldReady` retains the
 first source-to-projection binding and prepared payload. File recipes retain source ownership and
@@ -245,10 +247,17 @@ Both paths prevent duplicate ready work while the original sources remain retain
 using its selected coordinator's publication boundary for handler-owned recovery. It prevents worker
 startup/admission success after failed reconstruction. Standalone file-profile workers instead attach
 to the coordinator's automatically initialized shared recovery; they cannot reconstruct or close that
-borrowed component. Memory remains the non-durable default. Durable selected/routed stages remain
-separate future work, not an implied guarantee of pending recovery.
+borrowed component. Memory remains the non-durable default. Durable selection requires its explicit
+file backend; it is not an implied guarantee of pending recovery. File recovery excludes selected-owned
+originals and duplicates before publishing new multipart work, including when only some expired ordinals
+are selected. Durable routed storage remains future work.
 
 ## Ownership and Capacity
+
+`file/file/memory` additionally persists selected executions. Its runtime routing window remains
+bounded; a recovered selected backlog larger than the new capacity stays on disk and refills as slots
+free. Accepted sources still consume pending capacity through required handoffs. The lifecycle tables
+below describe logical ownership, not a requirement to load every durable selected record into memory.
 
 The stores are process-local objects, not three independent batches. The routed store contains queues
 for recorded destinations; it is **not** the worker's legacy `msgQ` or a disk directory.
@@ -391,7 +400,7 @@ existing router/worker startup. A failing coordinated admission never falls back
 |---|---|---|
 | `memory/memory/memory` | Implemented and activated; default | No recovery across closure/restart. |
 | `file/memory/memory` | Implemented; explicit pending path required | Recover sources; reselect and reroute. |
-| `file/file/memory` | Future [#345](https://github.com/cytechmobile/sendium/issues/345) | Recover selected work; reroute. |
+| `file/file/memory` | Implemented; explicit pending path required | Restore committed selection IDs, membership and payloads; reroute using current configuration. |
 | `file/memory/file` | Future #345 | Reselect not-yet-routed sources; restore recorded destinations. |
 | `file/file/file` | Future #345 | Restore selected work and recorded destinations. |
 | PostgreSQL profiles | Future [#333](https://github.com/cytechmobile/sendium/issues/333) | Only explicitly implemented combinations. |
@@ -399,8 +408,10 @@ existing router/worker startup. A failing coordinated admission never falls back
 Future profiles are not selectable today. Memory remains the non-durable default; file profiles
 are opt-in. Durable recovery must reconcile identities and resume the latest recorded stage without
 scheduling earlier retained records independently. It requires surviving storage and remains at least
-once: provider submission before recorded completion may repeat. The CBOR source codec is implemented;
-durable later-stage implementations belong to subsequent issues. Durable provider
+once: provider submission before recorded completion may repeat. File selected records share the pending
+spool's exclusive owner and are validated before multipart reconstruction/admission. They retain ownership
+through required handoffs; terminal authorization covers source and selected deletion together. Routed
+destinations remain volatile in the enabled profiles. Durable provider
 outcome/retry checkpoints remain outside this delivery.
 
 ### Storage readiness and metrics
@@ -418,6 +429,11 @@ Labels are restricted to `backend=file`, fixed operation names, `outcome=success
 storage `reason` (`NONE` for success, `OTHER` for non-storage failures). No message, account, group or
 path labels are emitted. Status probes are not timed and metric collection does not enumerate files.
 Embedded file stores opt in by supplying a `MeterRegistry` to the constructor.
+
+File selected uses the same timer and four labels for `selected_open`, `selected_select`, `selected_take`,
+`selected_release`, `selected_mark_routed`, `selected_complete` and `selected_close`. Startup readiness stays
+DOWN until selected ownership and multipart recovery are reconciled. Reduced router capacity bounds
+the recovered runtime window, not the number of authoritative selections retained on disk.
 
 After source validation/reconstruction, `pendingRecovery|success|backend:file|retainedSources:…|durationMs:…`
 reports retained source count and startup duration without payloads or paths. This summary does not

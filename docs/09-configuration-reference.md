@@ -59,9 +59,9 @@ settings in `smsg.properties`.
 | `sendium.message.router-queue.capacity` | `SENDIUM_MESSAGE_ROUTER_QUEUE_CAPACITY` | `1000` |
 | `sendium.message.selection-batch-size` | `SENDIUM_MESSAGE_SELECTION_BATCH_SIZE` | `100` |
 
-**`memory/memory/memory`** and **`file/memory/memory`** are selectable. Missing backend settings default to `memory`;
+**`memory/memory/memory`**, **`file/memory/memory`** and **`file/file/memory`** are selectable. Missing backend settings default to `memory`;
 explicitly empty, unknown, or unsupported values fail startup. Values are case-sensitive. Requests
-such as `file/file/memory`, file router/routed combinations, or any PostgreSQL outbound combination fail
+such as a file routed backend, a file selected backend with memory pending, or any PostgreSQL outbound combination fail
 with an error naming the supported profiles and configuration keys. There is no
 fallback to a less durable backend.
 
@@ -73,13 +73,19 @@ SMPP-client submission, retries and terminal handoffs. All capacity/batch settin
 
 For `file` pending, set `sendium.message.pending.path` explicitly to a writable local spool directory.
 Only one process may own it. Startup validates and reconstructs retained sources before admission;
-unsafe storage fails closed. Retain the directory across process/container restarts. Selection and
-routing repeat after restart; power-loss durability and exactly-once delivery are not guaranteed.
+unsafe storage fails closed. Retain the directory across process/container restarts. With memory selected,
+selection and routing repeat after restart. With file selected, committed selections (including their
+identities, full source membership and selected payloads) restore without reselection; routing still repeats.
+Required DLR handoffs must succeed before accepted/selected cleanup. Power-loss durability and exactly-once delivery are not guaranteed.
 Drain the spool or preserve it for later file-profile recovery before switching to memory or rolling back;
-changing the selector does not migrate retained messages.
+changing the selector does not migrate retained messages. Opening a spool with outstanding selected files
+under `file/memory/memory` is rejected without fallback. Preserve a compatible binary and the entire spool
+if it cannot be drained; see the [rollback procedure](16-filesystem-pending-storage.md#rollback-or-switching-back-to-memory).
 
 Pending capacity counts retained accepted sources (including held multipart parts); router capacity
-counts queued plus taken unassigned selections. Routed capacity equals pending source capacity, so
+counts the runtime window of queued plus taken unassigned selections. File-selected recovery keeps
+excess records on disk when capacity is lowered; it does not discard them or load the whole backlog.
+Routed capacity equals pending source capacity, so
 normal source-retaining operation does not introduce a smaller destination-record bound. Partial terminal
 cleanup may still occupy routed slots after sources are removed; such cleanup failures require retry.
 Selection and each destination take loop process at most the configured batch size per poll.

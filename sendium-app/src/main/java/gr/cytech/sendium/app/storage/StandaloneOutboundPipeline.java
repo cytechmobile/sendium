@@ -9,7 +9,9 @@ import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.SelectedRouterStore;
 import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
+import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
@@ -78,11 +80,13 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         int recoveryBatchSize = positive(config, "selection-batch-size", 100);
         int routerCapacity = positive(config, "router-queue.capacity", 1000);
         PendingMessageStore<StandardMessage> pending;
-        MemorySelectedRouterStore<StandardMessage> selected;
+        SelectedRouterStore<StandardMessage> selected;
         if ("file".equals(profile.pending())) {
             var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity, Clock.systemUTC(), metrics);
             pending = filePending;
-            selected = new MemorySelectedRouterStore<>(filePending, routerCapacity);
+            selected = "file".equals(profile.routerQueue()) ?
+                    new FileSelectedRouterStore(filePending, routerCapacity, Clock.systemUTC(), metrics) :
+                    new MemorySelectedRouterStore<>(filePending, routerCapacity);
         } else {
             var memoryPending = new MemoryPendingMessageStore<StandardMessage>(sourceCapacity, StandaloneMessageSnapshot::copy);
             pending = memoryPending;
@@ -98,8 +102,8 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         }
         var result = new DefaultOutboundCoordinator<>(pending, selected, routed, recoveryBatchSize);
         result.start();
-        if (metrics != null) {
-            selected.bindMetrics(metrics);
+        if (metrics != null && selected instanceof MemorySelectedRouterStore<StandardMessage> memorySelected) {
+            memorySelected.bindMetrics(metrics);
         }
         return result;
     }

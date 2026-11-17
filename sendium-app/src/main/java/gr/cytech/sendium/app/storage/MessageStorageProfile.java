@@ -7,9 +7,12 @@ public record MessageStorageProfile(String pending, String routerQueue, String r
     public static final String PENDING_PATH = "sendium.message.pending.path";
 
     public MessageStorageProfile {
-        if (!("memory".equals(pending) || "file".equals(pending)) || !"memory".equals(routerQueue) || !"memory".equals(routedWork)) {
+        boolean supported = "memory".equals(routedWork) &&
+                ("memory".equals(routerQueue) && ("memory".equals(pending) || "file".equals(pending)) ||
+                        "file".equals(pending) && "file".equals(routerQueue));
+        if (!supported) {
             throw new IllegalArgumentException(
-                    "messageStorageConfiguration|error|reason:unsupportedProfile|supported:memory/memory/memory,file/memory/memory" +
+                    "messageStorageConfiguration|error|reason:unsupportedProfile|supported:memory/memory/memory,file/memory/memory,file/file/memory" +
                             "|pendingSetting:" + PENDING_BACKEND + "|routerSetting:" + ROUTER_BACKEND +
                             "|routedSetting:" + ROUTED_BACKEND + "|fallback:none");
         }

@@ -462,11 +462,15 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                     if (member.duplicate() || member.ordinal() != ordinal || !sameGroup(identity, member)) {
                         throw invalidMembership(original);
                     }
-                    originals.add(original);
+                    if (spool.selectedOwner(original).isEmpty()) {
+                        originals.add(original);
+                    }
                 }
             }
             if (originals.isEmpty()) {
-                throw invalidMembership(identity.source());
+                // Every retained ordinal is owned downstream; do not let it monopolize the due page.
+                spool.finishGroup(group);
+                return Optional.empty();
             }
             return Optional.of(new IndexedMultipartSource.Group(identity, originals, spool.groupScheduled(group)));
         });
@@ -516,6 +520,13 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         var checked = new HashSet<>(Set.copyOf(sources));
         if (checked.isEmpty()) {
             throw new IllegalArgumentException("pendingPublication|error|reason:emptySources");
+        }
+        long selected = checked.stream().filter(source -> spool.selectedOwner(source).isPresent()).count();
+        if (selected == checked.size()) {
+            return; // Recovery/admission can observe a selection committed since its group snapshot.
+        }
+        if (selected != 0) {
+            throw invalidPublication(); // Let recovery refresh the remaining unowned ordinals.
         }
         MultipartMembership assigned = null;
         boolean unassigned = false;
@@ -647,6 +658,10 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         if (selectorOwner != null && selectorOwner != owner) {
             throw new OutboundStorageException(Role.ROUTER_QUEUE, OWNERSHIP_CONFLICT,
                     "pendingSelection|error|reason:alreadyOwned");
+        }
+        if (!(owner instanceof FileSelectedRouterStore) && !spool.selectedCandidates(1).isEmpty()) {
+            throw new OutboundStorageException(Role.ROUTER_QUEUE, UNSUPPORTED,
+                    "selectedRecovery|error|reason:outstandingSelectedWork|fallback:none");
         }
         selectorOwner = owner;
     }
