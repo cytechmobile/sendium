@@ -77,18 +77,16 @@ def boolean(value):
 
 
 def normalize(inputs, context, preset):
-    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "pending_backend", "storage_profile", "application_branch"}
+    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "storage_profile", "application_branch"}
     require(isinstance(inputs, dict) and set(inputs) <= allowed, "Unknown dispatch input")
     result = json.loads(json.dumps(preset))
     mode = inputs.get("application_runtime", runtime_mode(result))
     require(mode in RUNTIMES, "Application runtime must be jvm or native")
     result["runtime"]["applicationRuntime"] = mode
-    result["runtime"]["pendingBackend"] = inputs.get("pending_backend", storage_profile(result["runtime"]).split("/")[0])
-    profile = inputs.get("storage_profile", "pending-backend")
-    if profile != "pending-backend":
-        storage_profile({"messageStorageProfile": profile})
-        result["runtime"]["messageStorageProfile"] = profile
-        result["runtime"]["pendingBackend"] = profile.split("/")[0]
+    profile = inputs.get("storage_profile", storage_profile(result["runtime"]))
+    storage_profile({"messageStorageProfile": profile})
+    result["runtime"]["messageStorageProfile"] = profile
+    result["runtime"]["pendingBackend"] = profile.split("/")[0]
     storage_profile(result["runtime"])
     workload = result["workload"]
     for name, field in INPUT_FIELDS.items():

@@ -17,6 +17,7 @@ import prepare
 
 ROOT = Path(__file__).resolve().parents[2]
 PRESET = prepare.read(ROOT / "performance/presets/aws-private-jvm-v1.json")
+PRESET["runtime"]["messageStorageProfile"] = "memory/memory/memory"
 CONTEXT = {"ref": "refs/heads/feature/selected", "repository": "cytechmobile/sendium", "applicationCommit": "ab" * 20,
            "controllerRevision": "cd" * 20, "workflowRevision": "ef" * 20, "runId": "12345", "runAttempt": "2",
            "workflowRunUrl": "https://github.com/cytechmobile/sendium/actions/runs/12345"}
@@ -49,40 +50,29 @@ class InputTests(unittest.TestCase):
         self.assertEqual(context["controllerRevision"], "44" * 20)
         self.assertEqual(context["ref"], "refs/heads/feature/selected")
 
-    def test_full_storage_profiles_cover_runtime_and_ingress_without_changing_legacy_defaults(self):
+    def test_full_storage_profiles_cover_runtime_and_ingress_with_memory_defaults(self):
         profiles = ["memory/memory/memory", "file/memory/memory", "file/file/memory", "file/memory/file", "file/file/file"]
         field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["storage_profile"]
-        self.assertEqual(field["options"], ["pending-backend", *profiles])
-        self.assertEqual(field["default"], "pending-backend")
+        self.assertEqual(field["options"], profiles)
+        self.assertEqual(field["default"], "memory/memory/memory")
         for runtime in ("jvm", "native"):
             for ingress in ("http", "smpp"):
                 for profile in profiles:
                     result = request({"storage_profile": profile, "application_runtime": runtime, "ingress_mode": ingress})
                     self.assertEqual(result["preset"]["runtime"]["messageStorageProfile"], profile)
                     self.assertEqual(result["preset"]["runtime"]["pendingBackend"], profile.split("/")[0])
-        self.assertEqual(request({"storage_profile": "pending-backend", "pending_backend": "file"})["preset"]["runtime"]["pendingBackend"], "file")
-        for profile in ("file/file/postgresql", "memory/file/file", "", None):
+        for profile in ("pending-backend", "file/file/postgresql", "memory/file/file", "", None):
             with self.subTest(profile=profile), self.assertRaises(ValueError):
                 request({"storage_profile": profile})
         with self.assertRaises(ValueError):
             request({"storage_profile": "file/file/file", "benchmark_target": "kannel"})
 
-    def test_pending_backend_defaults_and_runtime_ingress_matrix(self):
+    def test_legacy_pending_input_is_removed_and_rejected(self):
         self.assertEqual(request()["preset"]["runtime"]["pendingBackend"], "memory")
-        field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["pending_backend"]
-        self.assertEqual(field["options"], ["memory", "file"])
-        self.assertEqual(field["default"], "memory")
-        for runtime in ("jvm", "native"):
-            for ingress in ("http", "smpp"):
-                for backend in ("memory", "file"):
-                    with self.subTest(runtime=runtime, ingress=ingress, backend=backend):
-                        result = request({"application_runtime": runtime, "ingress_mode": ingress, "pending_backend": backend})
-                        self.assertEqual(result["preset"]["runtime"]["pendingBackend"], backend)
-        for backend in ("", "FILE", "postgresql", "file;echo unsafe", None):
+        self.assertNotIn("pending_backend", WORKFLOW["on"]["workflow_dispatch"]["inputs"])
+        for backend in ("memory", "file", "", None):
             with self.subTest(backend=backend), self.assertRaises(ValueError):
                 request({"pending_backend": backend})
-        with self.assertRaisesRegex(ValueError, "Kannel cannot select"):
-            request({"benchmark_target": "kannel", "pending_backend": "file"})
 
     def test_defaults_match_preset_and_dispatch_commit_is_independent_from_harness(self):
         result = request()
@@ -216,10 +206,38 @@ class ArtifactTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_downstream_revalidation_reuses_pinned_application_identity(self):
+        sha_expression = "${{ inputs.application_branch && needs.validate.outputs.application_revision || github.sha }}"
+        ref_expression = "${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.ref }}"
+        for job_name in ("aws-execution", "diagnostics", "cleanup", "publish", "archive"):
+            job = WORKFLOW["jobs"][job_name]
+            with self.subTest(job=job_name):
+                self.assertIn("validate", job["needs"])
+                self.assertEqual(job["env"]["APPLICATION_SHA"], sha_expression)
+                self.assertEqual(job["env"]["APPLICATION_REF"], ref_expression)
+                for target, branch in (("sendium", "feature/selected"), ("sendium", ""), ("kannel", "")):
+                    inputs = {"benchmark_target": target, "application_branch": branch,
+                              "storage_profile": "file/file/file" if branch else "memory/memory/memory"}
+                    application_sha = "ab" * 20 if branch else "12" * 20
+                    application_ref = "refs/heads/" + branch if branch else "refs/heads/main"
+                    context = {**CONTEXT, "ref": application_ref, "applicationCommit": application_sha}
+                    original = prepare.normalize(inputs, context, PRESET)
+                    environment = {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "12" * 20,
+                                   "GITHUB_REPOSITORY": CONTEXT["repository"], "GITHUB_SERVER_URL": "https://github.com",
+                                   "GITHUB_RUN_ID": CONTEXT["runId"], "GITHUB_RUN_ATTEMPT": CONTEXT["runAttempt"],
+                                   "GITHUB_WORKFLOW_SHA": CONTEXT["workflowRevision"],
+                                   "APPLICATION_SHA": application_sha, "APPLICATION_REF": application_ref}
+                    with patch.dict(os.environ, environment, clear=True):
+                        repeated = prepare.normalize(inputs, prepare.github_context(CONTEXT["controllerRevision"]), PRESET)
+                    self.assertEqual(repeated, original)
+                    with patch.dict(os.environ, {**environment, "APPLICATION_SHA": "34" * 20}, clear=True):
+                        wrong = prepare.normalize(inputs, prepare.github_context(CONTEXT["controllerRevision"]), PRESET)
+                    self.assertNotEqual(wrong, original)
+
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 16)
+        self.assertEqual(len(inputs), 15)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)
