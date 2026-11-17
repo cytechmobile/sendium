@@ -60,7 +60,7 @@ class PublicationTests(unittest.TestCase):
         for runtime in ("jvm", "native"):
             for backend in ("memory", "file"):
                 with self.subTest(runtime=runtime, backend=backend):
-                    req = request({"application_runtime": runtime, "pending_backend": backend})
+                    req = request({"application_runtime": runtime, "storage_profile": backend + "/memory/memory"})
                     report = publish.unavailable(req, "FIXTURE")
                     self.assertEqual(report["configuration"]["application"]["messageStorageProfile"], backend + "/memory/memory")
                     publish.validate(report, req)

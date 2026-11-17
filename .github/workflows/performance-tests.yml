@@ -28,16 +28,10 @@ on:
         default: ''
         required: false
       storage_profile:
-        description: 'Sendium pending/selected/routed storage; pending-backend preserves legacy input'
+        description: 'Sendium pending/selected/routed storage (leave memory/memory/memory for Kannel)'
         type: choice
-        options: [pending-backend, memory/memory/memory, file/memory/memory, file/file/memory, file/memory/file, file/file/file]
-        default: pending-backend
-        required: true
-      pending_backend:
-        description: 'Sendium-only pending storage (Kannel uses its own filesystem spool; keep this input at its default for Kannel)'
-        type: choice
-        options: [memory, file]
-        default: memory
+        options: [memory/memory/memory, file/memory/memory, file/file/memory, file/memory/file, file/file/file]
+        default: memory/memory/memory
         required: true
       sendium_instance_type:
         description: Gateway EC2 instance type (Sendium or Kannel)
@@ -160,6 +154,8 @@ jobs:
       contents: read
       id-token: write
     env:
+      APPLICATION_SHA: ${{ inputs.application_branch && needs.validate.outputs.application_revision || github.sha }}
+      APPLICATION_REF: ${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.ref }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
       AWS_ARCHIVE_ROLE_ARN: ${{ vars.AWS_ARCHIVE_ROLE_ARN }}
@@ -238,6 +234,8 @@ jobs:
       contents: read
       id-token: write
     env:
+      APPLICATION_SHA: ${{ inputs.application_branch && needs.validate.outputs.application_revision || github.sha }}
+      APPLICATION_REF: ${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.ref }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_ORCHESTRATOR_ROLE_ARN: ${{ vars.AWS_ORCHESTRATOR_ROLE_ARN }}
       AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
@@ -506,6 +504,8 @@ jobs:
       contents: read
       id-token: write
     env:
+      APPLICATION_SHA: ${{ inputs.application_branch && needs.validate.outputs.application_revision || github.sha }}
+      APPLICATION_REF: ${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.ref }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
       AWS_DIAGNOSTICS_ROLE_ARN: ${{ vars.AWS_DIAGNOSTICS_ROLE_ARN }}
@@ -561,6 +561,8 @@ jobs:
       contents: read
       id-token: write
     env:
+      APPLICATION_SHA: ${{ inputs.application_branch && needs.validate.outputs.application_revision || github.sha }}
+      APPLICATION_REF: ${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.ref }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_BOOTSTRAP_STACK: ${{ vars.AWS_BOOTSTRAP_STACK }}
       AWS_CLEANUP_ROLE_ARN: ${{ vars.AWS_CLEANUP_ROLE_ARN }}
@@ -607,6 +609,9 @@ jobs:
     if: always() && needs.validate.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      APPLICATION_SHA: ${{ inputs.application_branch && needs.validate.outputs.application_revision || github.sha }}
+      APPLICATION_REF: ${{ inputs.application_branch && format('refs/heads/{0}', inputs.application_branch) || github.ref }}
     permissions:
       contents: read
     steps:

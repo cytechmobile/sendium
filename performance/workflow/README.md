@@ -31,8 +31,7 @@ therefore have individual fields; durations do not need a grouped string.
 | `benchmark_target` | `sendium` | `sendium` or `kannel`; one target per dispatch |
 | `application_runtime` | `jvm` | Sendium: `jvm` or `native`; leave `jvm` for Kannel, which uses its C runtime |
 | `application_branch` | blank | Sendium branch to resolve to an exact application SHA; blank uses the dispatch branch. Controller remains on the default branch. |
-| `storage_profile` | `pending-backend` | Sendium pending/selected/routed: `memory/memory/memory`, `file/memory/memory`, `file/file/memory`, `file/memory/file`, or `file/file/file`. |
-| `pending_backend` | `memory` | Legacy `memory`/`file` selector used when `storage_profile=pending-backend`; otherwise the full profile takes precedence. Leave `memory` for Kannel. |
+| `storage_profile` | `memory/memory/memory` | Sendium pending/selected/routed: `memory/memory/memory`, `file/memory/memory`, `file/file/memory`, `file/memory/file`, or `file/file/file`. Leave the default for Kannel. |
 | `ingress_mode` | `http` | Sendium: `http` or `smpp`; Kannel: HTTP only |
 | `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
@@ -117,10 +116,10 @@ validated after merge; local integration results are not AWS capacity findings.
 
 ## Sendium build and runtime details
 
-`storage_profile` is independent of JVM/native runtime and HTTP/SMPP ingress. The default
-`pending-backend` preserves legacy `pending_backend` callers and memory defaults; legacy `file`
-selects `file/memory/memory`. An explicit profile controls all three backends and takes precedence
-over the legacy input. Unsupported combinations are rejected before deployment.
+`storage_profile` is independent of JVM/native runtime and HTTP/SMPP ingress and defaults to
+`memory/memory/memory`. It controls all three backends. The old `pending_backend` dispatch input and
+`pending-backend` sentinel have been removed; API/CLI callers must use `storage_profile` instead.
+Unsupported combinations are rejected before deployment.
 The gateway node creates a private writable
 `pending/` directory under its existing per-run root and passes explicit backend/path settings to
 the application process. Existing spool content is not cleared on reconfiguration. This uses the
@@ -140,6 +139,10 @@ the desired runtime/ingress/workload. The unprivileged preparation job resolves 
 without executing its code. The application build uses that exact SHA; controller/harness and workflow
 revisions remain separately recorded. Branch selection is Sendium-only. Dispatch provisions paid AWS
 resources; do not dispatch just to test the form.
+
+Execution, diagnostics, cleanup, publication and archival reuse the application SHA captured by the
+preparation job when revalidating the request. They do not resolve the application branch again or
+substitute the dispatch commit; workflow and controller identities remain independent.
 
 The maintained `build_selected_application.py` helper validates the exact selected
 checkout, Linux runner architecture, Java 25 and absence of cloud credential
