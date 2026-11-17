@@ -659,7 +659,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             throw new OutboundStorageException(Role.ROUTER_QUEUE, OWNERSHIP_CONFLICT,
                     "pendingSelection|error|reason:alreadyOwned");
         }
-        if (!(owner instanceof FileSelectedRouterStore) && !spool.selectedCandidates(1).isEmpty()) {
+        if (!(owner instanceof FileSelectedRouterStore) && spool.hasSelectedRecords()) {
             throw new OutboundStorageException(Role.ROUTER_QUEUE, UNSUPPORTED,
                     "selectedRecovery|error|reason:outstandingSelectedWork|fallback:none");
         }
@@ -667,6 +667,18 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
     }
 
     /** Shared physical owner, not a second lock or independently opened spool. */
+    /** A volatile routed backend must never silently abandon retained durable assignments. */
+    public void requireRoutedBackend(boolean durable) {
+        withLock(() -> {
+            requireReady();
+            if (!durable && spool.routedCount() != 0) {
+                throw new OutboundStorageException(Role.ROUTED_WORK, UNSUPPORTED,
+                        "routedRecovery|error|reason:outstandingRoutedWork|fallback:none");
+            }
+            return null;
+        });
+    }
+
     PendingSpool selectedSpool() {
         requireReady(Role.ROUTER_QUEUE);
         return spool;

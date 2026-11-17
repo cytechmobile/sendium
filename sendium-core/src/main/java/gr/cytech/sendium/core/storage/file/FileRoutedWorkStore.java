@@ -5,10 +5,13 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Assignment;
 import gr.cytech.sendium.core.outbound.OutboundWork.Completed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.RoutedWorkStore;
 import gr.cytech.sendium.core.storage.file.RoutedRecordCodec.StoredWork;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -17,7 +20,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.CAPACITY_EXCEEDED;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
@@ -28,6 +35,8 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
     private final FilePendingMessageStore pending;
     private final int capacity;
     private final int prefetch;
+    private final MeterRegistry metrics;
+    private final Map<String, Timer> timers = new ConcurrentHashMap<>();
     private final Map<WorkId, Entry> active = new HashMap<>();
     private final Map<String, ArrayDeque<Entry>> ready = new HashMap<>();
     private PendingSpool spool;
@@ -39,16 +48,28 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
 
     /** Prefetch bounds queued plus taken projections per requested destination, not retained disk records. */
     public FileRoutedWorkStore(FilePendingMessageStore pending, int capacity, int prefetch) {
+        this(pending, capacity, prefetch, null);
+    }
+
+    public FileRoutedWorkStore(FilePendingMessageStore pending, int capacity, int prefetch, MeterRegistry metrics) {
         if (capacity <= 0 || prefetch <= 0) {
             throw new IllegalArgumentException("routedConfiguration|error|reason:nonPositiveCapacity");
         }
         this.pending = Objects.requireNonNull(pending, "pending");
         this.capacity = capacity;
         this.prefetch = prefetch;
+        this.metrics = metrics;
     }
 
     @Override
     public void open() {
+        measured("routed_open", () -> {
+            openStore();
+            return null;
+        });
+    }
+
+    private void openStore() {
         pending.selectionLock().lock();
         try {
             if (state == State.READY) {
@@ -84,6 +105,10 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
 
     @Override
     public Routed<StandardMessage> record(Assignment<StandardMessage> assignment) {
+        return measured("routed_record", () -> recordAssignment(assignment));
+    }
+
+    private Routed<StandardMessage> recordAssignment(Assignment<StandardMessage> assignment) {
         Objects.requireNonNull(assignment, "assignment");
         pending.selectionLock().lock();
         try {
@@ -116,6 +141,19 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
 
     @Override
     public Optional<Routed<StandardMessage>> take(String destination, Duration timeout) throws InterruptedException {
+        long started = System.nanoTime();
+        Throwable failure = null;
+        try {
+            return takeWork(destination, timeout);
+        } catch (RuntimeException | InterruptedException | Error outcome) {
+            failure = outcome;
+            throw outcome;
+        } finally {
+            recordMetric("routed_take", started, failure);
+        }
+    }
+
+    private Optional<Routed<StandardMessage>> takeWork(String destination, Duration timeout) throws InterruptedException {
         Objects.requireNonNull(destination, "destination");
         if (destination.isBlank()) {
             throw new IllegalArgumentException("routedTake|error|reason:blankDestination");
@@ -149,6 +187,13 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
 
     @Override
     public void release(Routed<StandardMessage> taken) {
+        measured("routed_release", () -> {
+            releaseWork(taken);
+            return null;
+        });
+    }
+
+    private void releaseWork(Routed<StandardMessage> taken) {
         Objects.requireNonNull(taken, "taken");
         pending.selectionLock().lock();
         try {
@@ -172,6 +217,10 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
 
     @Override
     public Completed complete(WorkId id) {
+        return measured("routed_complete", () -> completeWork(id));
+    }
+
+    private Completed completeWork(WorkId id) {
         Objects.requireNonNull(id, "id");
         pending.selectionLock().lock();
         try {
@@ -207,8 +256,27 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
         }
     }
 
+    /** Resolve cleanup ownership only for a requested execution, without hydrating the backlog. */
+    public Set<SourceId> sourcesFor(WorkId id) {
+        Objects.requireNonNull(id, "id");
+        pending.selectionLock().lock();
+        try {
+            requireReady();
+            return spool.routedWork(id).sources();
+        } finally {
+            pending.selectionLock().unlock();
+        }
+    }
+
     @Override
     public void forget(SelectionId selection) {
+        measured("routed_forget", () -> {
+            forgetSelection(selection);
+            return null;
+        });
+    }
+
+    private void forgetSelection(SelectionId selection) {
         Objects.requireNonNull(selection, "selection");
         pending.selectionLock().lock();
         try {
@@ -288,6 +356,33 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
         } finally {
             pending.selectionLock().unlock();
         }
+    }
+
+    private <T> T measured(String operation, Supplier<T> action) {
+        long started = System.nanoTime();
+        Throwable failure = null;
+        try {
+            return action.get();
+        } catch (RuntimeException | Error outcome) {
+            failure = outcome;
+            throw outcome;
+        } finally {
+            recordMetric(operation, started, failure);
+        }
+    }
+
+    private void recordMetric(String operation, long started, Throwable failure) {
+        if (metrics == null) {
+            return;
+        }
+        String outcome = failure == null ? "success" : "error";
+        String reason = failure == null ? "NONE" : failure instanceof OutboundStorageException storage ? storage.reason().name() : "OTHER";
+        String key = operation + '/' + outcome + '/' + reason;
+        timers.computeIfAbsent(key, ignored -> Timer.builder(FilePendingMessageStore.OPERATION_METRIC)
+                        .description("File routed storage operation latency including lock wait; error counts by bounded reason")
+                        .tags("backend", "file", "operation", operation, "outcome", outcome, "reason", reason)
+                        .register(metrics))
+                .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
     }
 
     private static final class Entry {

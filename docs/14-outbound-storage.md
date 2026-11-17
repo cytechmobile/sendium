@@ -7,7 +7,9 @@ Accepted sources remain owned until provider processing and every required track
 **`memory/memory/memory`** remains the non-durable default. Opt-in **`file/memory/memory`** retains
 accepted sources across process/container restarts using an explicitly configured local spool path.
 Selection and routing repeat after restart in that profile. **`file/file/memory`** additionally restores
-committed selections without reselection, but still repeats routing. Power-loss durability and exactly-once delivery are not guaranteed.
+committed selections without reselection, but still repeats routing. **`file/memory/file`** and
+**`file/file/file`** restore committed routed payloads and recorded destinations without routing them again.
+Power-loss durability and exactly-once delivery are not guaranteed.
 See [Filesystem Pending Storage](16-filesystem-pending-storage.md) for the as-built file architecture,
 deployment, stopped-instance backup/restore and rollback procedures.
 The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
@@ -250,7 +252,7 @@ to the coordinator's automatically initialized shared recovery; they cannot reco
 borrowed component. Memory remains the non-durable default. Durable selection requires its explicit
 file backend; it is not an implied guarantee of pending recovery. File recovery excludes selected-owned
 originals and duplicates before publishing new multipart work, including when only some expired ordinals
-are selected. Durable routed storage remains future work.
+are selected. File routed storage also excludes routed-owned sources and restores their recorded destinations.
 
 ## Ownership and Capacity
 
@@ -260,7 +262,8 @@ free. Accepted sources still consume pending capacity through required handoffs.
 below describe logical ownership, not a requirement to load every durable selected record into memory.
 
 The stores are process-local objects, not three independent batches. The routed store contains queues
-for recorded destinations; it is **not** the worker's legacy `msgQ` or a disk directory.
+for recorded destinations; it is **not** the worker's legacy `msgQ`. The file implementation refills these
+runtime queues from disk-backed destination references, with bounded queued plus taken payloads per destination.
 
 For three groups of 100 distinct, unfinished, single-source messages:
 
@@ -401,8 +404,8 @@ existing router/worker startup. A failing coordinated admission never falls back
 | `memory/memory/memory` | Implemented and activated; default | No recovery across closure/restart. |
 | `file/memory/memory` | Implemented; explicit pending path required | Recover sources; reselect and reroute. |
 | `file/file/memory` | Implemented; explicit pending path required | Restore committed selection IDs, membership and payloads; reroute using current configuration. |
-| `file/memory/file` | Future #345 | Reselect not-yet-routed sources; restore recorded destinations. |
-| `file/file/file` | Future #345 | Restore selected work and recorded destinations. |
+| `file/memory/file` | Implemented; explicit pending path required | Reselect not-yet-routed sources; restore recorded destinations. |
+| `file/file/file` | Implemented; explicit pending path required | Restore selected work and recorded destinations. |
 | PostgreSQL profiles | Future [#333](https://github.com/cytechmobile/sendium/issues/333) | Only explicitly implemented combinations. |
 
 Future profiles are not selectable today. Memory remains the non-durable default; file profiles
@@ -410,8 +413,10 @@ are opt-in. Durable recovery must reconcile identities and resume the latest rec
 scheduling earlier retained records independently. It requires surviving storage and remains at least
 once: provider submission before recorded completion may repeat. File selected records share the pending
 spool's exclusive owner and are validated before multipart reconstruction/admission. They retain ownership
-through required handoffs; terminal authorization covers source and selected deletion together. Routed
-destinations remain volatile in the enabled profiles. Durable provider
+through required handoffs; terminal authorization covers source and selected deletion together. File routed
+records restore destinations without routing again; terminal routed facts resume cleanup before readiness.
+Unopened or removed destinations retain their disk records without blocking other destination windows.
+Durable provider
 outcome/retry checkpoints remain outside this delivery.
 
 ### Storage readiness and metrics
@@ -469,8 +474,9 @@ storage remains independently owned. Follow the [file-profile rollback procedure
 
 Embedding applications supply compatible `M extends StandardMessage` stores, selection/preparation,
 snapshot policy, tracking handoffs and lifecycle orchestration. Constructors are passive; the default
-coordinator requires fresh stages and supports indexed durable pending recovery with memory selected/routed
-stores. Durable selected/routed stages remain unsupported. `FilePendingMessageStore` uses the explicit
+coordinator requires fresh stages and supports indexed durable pending recovery with memory or file
+selected/routed stores in the five supported profiles. File selected/routed stores must share the same
+`FilePendingMessageStore` spool owner. The file implementations use the explicit
 `StandardMessage` representation, not arbitrary custom-subtype serialization.
 
 Custom subtype fields and runtime mutations must survive transitions/returns without changing retained

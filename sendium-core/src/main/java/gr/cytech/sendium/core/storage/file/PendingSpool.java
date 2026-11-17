@@ -767,6 +767,21 @@ public final class PendingSpool implements AutoCloseable {
         return routedCount;
     }
 
+    synchronized boolean hasSelectedRecords() {
+        return multipartIndex(() -> {
+            try (var buckets = Files.newDirectoryStream(root.resolve("selected"))) {
+                for (Path bucket : buckets) {
+                    try (var entries = Files.newDirectoryStream(bucket)) {
+                        if (entries.iterator().hasNext()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+    }
+
     synchronized Optional<SelectionId> routedSourceOwner(SourceId source) {
         return routedOperation(() -> index.routedOwner(source).map(FolderPendingIndex.RoutedOwner::selection));
     }

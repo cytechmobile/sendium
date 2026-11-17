@@ -1,4 +1,4 @@
-# Filesystem Pending and Selected Storage: Architecture and Operations
+# Filesystem Outbound Storage: Architecture and Operations
 
 [Documentation map](DocumentationMap.md) · [Outbound lifecycle](14-outbound-storage.md) · [Source schema](15-pending-record-schema.md)
 
@@ -16,8 +16,9 @@ cause a duplicate when the client retries. An admission error after publication 
 no source was committed. Use application-level reconciliation where duplicates matter.
 
 Only pending storage is durable in that profile. Opt-in `file/file/memory` also restores committed
-selections; see [durable selection](#durable-selection-filefilememory). File routed stages, PostgreSQL
-outbound stages and copied-route execution remain unsupported.
+selections; see [durable selection](#durable-selection-filefilememory). The `file/memory/file` and
+`file/file/file` profiles additionally restore routed assignments. PostgreSQL outbound stages and
+copied-route execution remain unsupported.
 
 ### Durable selection (`file/file/memory`)
 
@@ -44,6 +45,39 @@ Workers retain their normal startup/reconnection behavior. No grace period or re
 fallback is added. An absent worker can leave its in-process assignment retained and consuming capacity;
 with memory routed storage, restart repeats routing rather than preserving that destination.
 
+### Durable routing (`file/memory/file` and `file/file/file`)
+
+Set `sendium.message.routed-work.backend=file` (or `SENDIUM_MESSAGE_ROUTED_WORK_BACKEND=file`)
+with file pending. Selection may remain memory-backed or also use file storage. All stages share one
+spool root and exclusive owner; memory remains the default for every selector.
+
+An immutable `routed/<UUID-prefix>/<WorkId>.cbor` envelope contains `schemaVersion=1`, `workId`,
+`selectionId`, the complete `sources` UUID set, the single `destination`, and explicit `message` fields.
+This routing-time snapshot outranks earlier selected/pending scheduling. Startup rebuilds source,
+selection and hashed-destination references on disk, not a whole-backlog payload/ownership map.
+Only requested destinations load payloads: queued plus taken projections are bounded per destination
+by `sendium.message.selection-batch-size`. Unopened destinations load no execution window and do not
+block other destinations. Routed record capacity is the pending source-capacity setting; recovered
+records above a reduced capacity are retained, and new assignments are rejected with `CAPACITY_EXCEEDED`
+until cleanup frees capacity.
+
+Runtime take/release mutations, retry schedules/counters and provider-part outcomes are not persisted.
+A restart resumes the committed routed snapshot at its recorded destination, without rerouting it.
+Normal worker startup/reconnection is unchanged. A removed destination retains its records and capacity
+usage until a compatible worker can process them; there is no grace timer or automatic fallback route.
+
+After terminal processing and required tracking/DLR handoffs succeed, a separate
+`routed-terminal/<UUID-prefix>/<WorkId>.cbor` fact records schema version, work/selection IDs and sources,
+without a message payload. Recovery resumes cleanup rather than sending this work. Cleanup deletes
+accepted/selected records before forgetting the routed assignment and terminal fact; a journaled cleanup
+intent's optional `routedWork` UUID array authorizes deletion through an interrupted final forget.
+The terminal fact does not wait for a later handset DLR. Provider acceptance before terminal publication
+can still be repeated after a crash; these profiles are not exactly-once delivery.
+
+Do not downgrade to memory routing while any routed records remain, or to memory selection while
+selected records remain. Startup rejects these downgrades without deletion or memory fallback. Drain
+with a compatible binary, or preserve the entire spool and compatible binary for later resumption.
+
 ## Components and ownership
 
 ```mermaid
@@ -66,6 +100,7 @@ flowchart LR
 
 The diagram above is `file/memory/memory`. In `file/file/memory`, replace the memory selected backlog
 with `FileSelectedRouterStore`, which writes authoritative selected records under the same spool owner.
+For file-routed profiles, replace memory routed work with `FileRoutedWorkStore` under that same owner.
 
 - `StandaloneOutboundPipeline` constructs compatible stores and starts the coordinator before returning
   it to admission. Unsupported profiles, missing paths and unsafe storage fail without memory fallback.
@@ -73,7 +108,7 @@ with `FileSelectedRouterStore`, which writes authoritative selected records unde
   completion. Stopping an SMPP worker does not stop shared recovery; handlers only borrow it.
 - `FilePendingMessageStore` retains accepted content, multipart identity and absolute deadlines.
   Mutable execution messages are detached from the accepted source snapshot.
-- The selected store is memory or file-backed; the routed store remains memory-backed. Completion retains source ownership until every
+- The selected and routed stores may each be memory or file-backed when pending is file-backed. Completion retains source ownership until every
   required provider-part/tracking/DLR handoff succeeds. A failed handoff is not terminal cleanup.
 - Recovery shuts down outside the coordinator lock, before stores close, to avoid deadlock with a
   recovery callback. Closing stores preserves unfinished sources; it is not completion.
@@ -92,6 +127,8 @@ pending/
     1/<bucket>/<source-UUID>.cbor      low priority
   terminal/<intent-UUID>.cbor         committed cleanup authorization
   selected/<bucket>/<selection-UUID>.cbor  authoritative selected results when configured
+  routed/<bucket>/<work-UUID>.cbor     authoritative single-destination assignments
+  routed-terminal/<bucket>/<work-UUID>.cbor  terminal processing facts without payloads
   closed-groups/<bucket>/<UUID>.closed
   derived/                           disposable, rebuilt while opening the spool
     multipart/
@@ -111,6 +148,11 @@ pending/
     selected/
       owners/<bucket>/<source-UUID>   source-to-selection lookup references
       ready/<selection-order-key>    bounded directory-reference scheduling index
+    routed/
+      owners/<bucket>/<source-UUID>   source-to-selection/work references
+      selections/<bucket>/<selection-UUID>  selection-to-work references
+      destinations/<SHA-256>/ready/  bounded destination scheduling references, not payloads
+      terminal/                      bounded terminal cleanup references
 ```
 
 Each accepted bucket is the first two lowercase hexadecimal characters of its source UUID (`00`–`ff`);
