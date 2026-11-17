@@ -614,13 +614,18 @@ public abstract class AbstractOutWorker<M extends StandardMessage> implements He
         if (pause || suspendManually || suspendAuto) {
             final String action = suspendManually ? "MANUALLY SUSPENDED" : pause ? "PAUSED" : "AUTO SUSPENDED";
             logger.info("__{}__", action);
-            if (!acceptsMessages()) {
-                dequeueAllToRouter();
-            } else {
-                checkSubscribeMessageQueue();
+            // setupInstance configures pause before init establishes the initial worker queue.
+            if (msgQ != null) {
+                if (!acceptsMessages()) {
+                    dequeueAllToRouter();
+                } else {
+                    checkSubscribeMessageQueue();
+                }
             }
         } else {
-            checkSubscribeMessageQueue();
+            if (msgQ != null) {
+                checkSubscribeMessageQueue();
+            }
             logger.info("__UNPAUSED__UNSUSPENDED__");
         }
     }

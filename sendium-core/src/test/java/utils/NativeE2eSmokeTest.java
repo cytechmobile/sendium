@@ -11,6 +11,40 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class NativeE2eSmokeTest {
 
     @Test
+    void storageProfileDefaultsPreserveExistingSmokeModes() {
+        assertThat(NativeE2eSmoke.storageProfile(null, false)).isEqualTo("memory/memory/memory");
+        assertThat(NativeE2eSmoke.storageProfile(null, true)).isEqualTo("file/memory/memory");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"file/memory/memory", "file/file/memory", "file/memory/file", "file/file/file"})
+    void acceptsEachRetainedVolumeProfile(String profile) {
+        assertThat(NativeE2eSmoke.storageProfile(profile, true)).isEqualTo(profile);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "file/file/postgresql", "memory/memory/file", "file|secret\n"})
+    void rejectsUnsupportedSmokeProfilesWithoutEchoingTheInput(String profile) {
+        assertThatThrownBy(() -> NativeE2eSmoke.storageProfile(profile, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("SENDIUM_E2E_STORAGE_PROFILE must name a supported outbound storage profile");
+    }
+
+    @Test
+    void retainedVolumeModeCannotClaimMemoryDurability() {
+        assertThatThrownBy(() -> NativeE2eSmoke.storageProfile("memory/memory/memory", true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("SENDIUM_E2E_PENDING_RESTART requires file pending storage");
+    }
+
+    @Test
+    void fileProfileCannotSilentlyRunTheMemorySmoke() {
+        assertThatThrownBy(() -> NativeE2eSmoke.storageProfile("file/file/file", false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("File smoke profiles require SENDIUM_E2E_PENDING_RESTART=true");
+    }
+
+    @Test
     void absentPortOverrideUsesTheDefault() {
         assertThat(NativeE2eSmoke.smppPort(null)).isEqualTo(27777);
     }

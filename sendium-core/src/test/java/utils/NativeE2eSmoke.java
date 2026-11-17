@@ -22,6 +22,8 @@ import com.cloudhopper.smpp.type.Address;
 import com.cloudhopper.smpp.type.SmppChannelException;
 import com.cloudhopper.smpp.type.SmppInvalidArgumentException;
 import com.cloudhopper.smpp.type.SmppProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.sun.net.httpserver.HttpServer;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -45,6 +47,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -64,6 +67,21 @@ public class NativeE2eSmoke {
     private static final int UPSTREAM_SMPP_PORT = 27779;
     private static final Duration TIMEOUT = Duration.ofSeconds(90);
     private static final boolean PENDING_RESTART = Boolean.parseBoolean(System.getenv("SENDIUM_E2E_PENDING_RESTART"));
+    private static final String STORAGE_PROFILE = storageProfile(System.getenv("SENDIUM_E2E_STORAGE_PROFILE"), PENDING_RESTART);
+
+    static String storageProfile(String configured, boolean restart) {
+        String profile = configured == null ? restart ? "file/memory/memory" : "memory/memory/memory" : configured;
+        if (!List.of("memory/memory/memory", "file/memory/memory", "file/file/memory", "file/memory/file", "file/file/file").contains(profile)) {
+            throw new IllegalArgumentException("SENDIUM_E2E_STORAGE_PROFILE must name a supported outbound storage profile");
+        }
+        if (restart && profile.equals("memory/memory/memory")) {
+            throw new IllegalArgumentException("SENDIUM_E2E_PENDING_RESTART requires file pending storage");
+        }
+        if (!restart && !profile.equals("memory/memory/memory")) {
+            throw new IllegalArgumentException("File smoke profiles require SENDIUM_E2E_PENDING_RESTART=true");
+        }
+        return profile;
+    }
 
     static int smppPort(String configured) {
         if (configured == null) {
@@ -96,7 +114,14 @@ public class NativeE2eSmoke {
                 Process volume = run(List.of("docker", "volume", "create", spoolVolume), true);
                 require(volume.waitFor(30, TimeUnit.SECONDS) && volume.exitValue() == 0, "Cannot create retained spool volume");
                 Files.writeString(workDir.resolve("conf/smsg.properties"),
-                        "\noutSms.pause = true\noutSms.instance.smpp.reassembling.timeoutMillis = 120000\n", StandardOpenOption.APPEND);
+                        "\noutSms.instance.smpp.reassembling.timeoutMillis = 120000\n", StandardOpenOption.APPEND);
+                if (STORAGE_PROFILE.equals("file/memory/memory")) {
+                    Files.writeString(workDir.resolve("conf/smsg.properties"), "\noutSms.pause = true\n", StandardOpenOption.APPEND);
+                } else if (STORAGE_PROFILE.endsWith("file")) {
+                    Files.writeString(workDir.resolve("conf/smsg.properties"), "\noutSms.instance.route.pause = true\n", StandardOpenOption.APPEND);
+                } else {
+                    setRoutingGate(workDir, true);
+                }
             }
             container = startSendiumContainer(containerName, workDir);
             waitForPostgresqlReadiness();
@@ -211,6 +236,9 @@ public class NativeE2eSmoke {
         if (PENDING_RESTART) {
             command.addAll(List.of("-v", containerName + "-pending:/work/spool",
                     "-e", "SENDIUM_MESSAGE_PENDING_BACKEND=file", "-e", "SENDIUM_MESSAGE_PENDING_PATH=/work/spool"));
+            String[] stages = STORAGE_PROFILE.split("/");
+            command.addAll(List.of("-e", "SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND=" + stages[1],
+                    "-e", "SENDIUM_MESSAGE_ROUTED_WORK_BACKEND=" + stages[2]));
         }
         command.add(IMAGE);
         Process process = run(command, true);
@@ -220,8 +248,12 @@ public class NativeE2eSmoke {
     }
 
     private static Process verifyPendingSurvivesReplacement(String name, Path workDir, UpstreamSmppServer upstream,
-                                                           CallbackServer callbackServer) throws Exception {
+                                                            CallbackServer callbackServer) throws Exception {
+        // Deliver receipts only after replacements and required correlation handoffs have finished.
+        upstream.setAutomaticDelivery(false);
         var accepted = new ArrayList<String>();
+        Map<String, String> stageBefore = Map.of();
+        String namespace = STORAGE_PROFILE.endsWith("file") ? "routed" : "selected";
         try (var client = new DownstreamSmppClient()) {
             client.start();
             String callback = URLEncoder.encode("http://host.docker.internal:" + callbackServer.port() + "/dlr?id=%I", StandardCharsets.UTF_8);
@@ -240,17 +272,43 @@ public class NativeE2eSmoke {
             for (String id : accepted) {
                 require(sourceExists(name, id), "Acknowledged source was not committed: " + id);
             }
+            if (!STORAGE_PROFILE.equals("file/memory/memory")) {
+                stageBefore = awaitStageSources(name, namespace, accepted.subList(0, 2));
+            }
             require(upstream.receivedSubmits.get() == 0, "Paused application submitted work before replacement");
         }
-        int previousSessions = upstream.boundSessionCount();
         require(stopContainer(name), "Cannot forcibly remove original pending container");
         Path properties = workDir.resolve("conf/smsg.properties");
         Files.writeString(properties, Files.readString(properties).replace("outSms.pause = true", "outSms.pause = false"));
-        Process restarted = startSendiumContainer(name, workDir);
-        waitForPostgresqlReadiness();
-        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
-        require(upstream.awaitSessionBoundAfter(previousSessions), "Replacement did not bind to provider");
+        if (STORAGE_PROFILE.endsWith("file")) {
+            // An accidental reroute now finds no destination; only the committed assignment can dispatch.
+            setRoutingGate(workDir, true);
+        }
+        Process restarted = startReplacement(name, workDir, upstream);
         require(get("/q/health/ready").body().contains("sendium-sms-storage"), "Replacement lacks storage readiness check");
+        if (!STORAGE_PROFILE.equals("file/memory/memory")) {
+            Map<String, String> stageAfter = awaitStageSources(name, namespace, accepted.subList(0, 2));
+            require(stageAfter.equals(stageBefore), "Replacement changed committed stage identities");
+            require(upstream.receivedSubmits.get() == 0, "Stage gate allowed provider submission before identity inspection");
+            if (STORAGE_PROFILE.endsWith("file")) {
+                require(stopContainer(name), "Cannot replace paused stage-inspection container");
+                Files.writeString(properties, Files.readString(properties)
+                        .replace("outSms.instance.route.pause = true", "outSms.instance.route.pause = false"));
+                restarted = startReplacement(name, workDir, upstream);
+                require(upstream.awaitSubmitCount(2), "Recorded destinations did not dispatch while rerouting was gated");
+                long cleanupDeadline = System.nanoTime() + TIMEOUT.toNanos();
+                for (String id : accepted.subList(0, 2)) {
+                    while (sourceExists(name, id) && System.nanoTime() < cleanupDeadline) {
+                        Thread.sleep(100);
+                    }
+                    require(!sourceExists(name, id), "Recorded assignment did not finish its required handoff");
+                }
+            }
+            // Load configuration at replacement rather than relying on bind-mount file-watch events.
+            require(stopContainer(name), "Cannot replace routing-gated container");
+            setRoutingGate(workDir, false);
+            restarted = startReplacement(name, workDir, upstream);
+        }
         try (var client = new DownstreamSmppClient()) {
             client.start();
             var last = client.sendPart(2, "multipart");
@@ -267,6 +325,9 @@ public class NativeE2eSmoke {
                 require(!sourceExists(name, id), "Terminal source was not removed: " + id);
             }
             require(upstream.receivedSubmits.get() == 3, "Duplicate ordinal produced extra provider submission");
+            for (int submit = 1; submit <= 3; submit++) {
+                upstream.sendDeliveryReceipt(submit);
+            }
             String callback = callbackServer.awaitCallback();
             require(callback != null && callback.contains("id=" + accepted.getFirst()), "Recovered HTTP DLR callback was not delivered");
             while ((!upstream.pendingDeliveryReceipts.isEmpty() || client.receivedDeliveries.get() < 3) && System.nanoTime() < deadline) {
@@ -275,8 +336,62 @@ public class NativeE2eSmoke {
             require(upstream.pendingDeliveryReceipts.isEmpty(), "Provider DLR acknowledgements did not finish before teardown");
             require(client.receivedDeliveries.get() >= 3, "Recovered ordinary/multipart SMPP DLRs were not delivered");
         }
-        System.out.println("pendingRestart|success|image:" + IMAGE + "|acknowledgedSources:5|providerMessages:3|retainedVolume:true");
+        System.out.println("pendingRestart|success|image:" + IMAGE + "|profile:" + STORAGE_PROFILE +
+                "|revision:" + System.getenv().getOrDefault("SENDIUM_E2E_REVISION", "unknown") +
+                "|acknowledgedSources:5|providerMessages:3|retainedVolume:true|stageIdentityProbe:" + !stageBefore.isEmpty() +
+                "|rerouteGateProbe:" + STORAGE_PROFILE.endsWith("file"));
         return restarted;
+    }
+
+    private static Process startReplacement(String name, Path workDir, UpstreamSmppServer upstream) throws Exception {
+        int sessions = upstream.boundSessionCount();
+        Process container = startSendiumContainer(name, workDir);
+        waitForPostgresqlReadiness();
+        waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
+        require(upstream.awaitSessionBoundAfter(sessions), "Replacement did not bind to provider");
+        return container;
+    }
+
+    private static void setRoutingGate(Path workDir, boolean gated) throws IOException {
+        Path table = workDir.resolve("conf/routingTable.conf");
+        String content = Files.readString(table);
+        content = gated ? content.replace("route::default:", "unconfigured-stage-gate::default:") :
+                content.replace("unconfigured-stage-gate::default:", "route::default:");
+        Files.writeString(table, content);
+    }
+
+    private static Map<String, String> awaitStageSources(String container, String namespace, List<String> sources) throws Exception {
+        long deadline = System.nanoTime() + TIMEOUT.toNanos();
+        Map<String, String> identities;
+        do {
+            identities = stageSources(container, namespace);
+            if (identities.keySet().containsAll(sources)) {
+                return identities;
+            }
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadline);
+        throw new IllegalStateException("stageRestart|error|reason:stageCommitTimeout|stage:" + namespace);
+    }
+
+    private static Map<String, String> stageSources(String container, String namespace) throws Exception {
+        var identities = new TreeMap<String, String>();
+        var listing = new ProcessBuilder("docker", "exec", container, "sh", "-c",
+                "for f in /work/spool/\"$1\"/*/*.cbor; do if test -f \"$f\"; then printf '%s\\n' \"$f\"; fi; done",
+                "sh", namespace).start();
+        String paths = new String(listing.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        require(listing.waitFor(10, TimeUnit.SECONDS) && listing.exitValue() == 0, "Cannot inspect stage records");
+        var mapper = new ObjectMapper(new CBORFactory());
+        for (String path : paths.lines().toList()) {
+            var read = new ProcessBuilder("docker", "exec", container, "cat", path).start();
+            byte[] bytes = read.getInputStream().readAllBytes();
+            require(read.waitFor(10, TimeUnit.SECONDS) && read.exitValue() == 0, "Cannot read stage record");
+            var node = mapper.readTree(bytes);
+            String identity = node.required(namespace.equals("routed") ? "workId" : "selectionId").textValue();
+            for (var source : node.required("sources")) {
+                require(identities.put(source.textValue(), identity) == null, "Conflicting stage identity probe");
+            }
+        }
+        return identities;
     }
 
     private static boolean sourceExists(String container, String gatewayId) throws Exception {
