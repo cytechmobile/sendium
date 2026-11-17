@@ -28,6 +28,45 @@ def request(inputs=None):
 
 
 class InputTests(unittest.TestCase):
+    def test_application_branch_requires_matching_resolved_context(self):
+        selected = request({"application_branch": "feature/selected"})
+        self.assertEqual(selected["provenance"]["applicationCommit"], CONTEXT["applicationCommit"])
+        self.assertEqual(selected["workflowRevision"], CONTEXT["workflowRevision"])
+        for branch in ("main", None, "refs/tags/v1", "feature/selected\n"):
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                request({"application_branch": branch})
+
+    def test_application_override_keeps_workflow_revision_independent(self):
+        environment = {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "11" * 20,
+                       "APPLICATION_REF": "refs/heads/feature/selected", "APPLICATION_SHA": "22" * 20,
+                       "GITHUB_REPOSITORY": CONTEXT["repository"], "GITHUB_WORKFLOW_SHA": "33" * 20,
+                       "GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1",
+                       "GITHUB_SERVER_URL": "https://github.com"}
+        with patch.dict(os.environ, environment, clear=True):
+            context = prepare.github_context("44" * 20)
+        self.assertEqual(context["applicationCommit"], "22" * 20)
+        self.assertEqual(context["workflowRevision"], "33" * 20)
+        self.assertEqual(context["controllerRevision"], "44" * 20)
+        self.assertEqual(context["ref"], "refs/heads/feature/selected")
+
+    def test_full_storage_profiles_cover_runtime_and_ingress_without_changing_legacy_defaults(self):
+        profiles = ["memory/memory/memory", "file/memory/memory", "file/file/memory", "file/memory/file", "file/file/file"]
+        field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["storage_profile"]
+        self.assertEqual(field["options"], ["pending-backend", *profiles])
+        self.assertEqual(field["default"], "pending-backend")
+        for runtime in ("jvm", "native"):
+            for ingress in ("http", "smpp"):
+                for profile in profiles:
+                    result = request({"storage_profile": profile, "application_runtime": runtime, "ingress_mode": ingress})
+                    self.assertEqual(result["preset"]["runtime"]["messageStorageProfile"], profile)
+                    self.assertEqual(result["preset"]["runtime"]["pendingBackend"], profile.split("/")[0])
+        self.assertEqual(request({"storage_profile": "pending-backend", "pending_backend": "file"})["preset"]["runtime"]["pendingBackend"], "file")
+        for profile in ("file/file/postgresql", "memory/file/file", "", None):
+            with self.subTest(profile=profile), self.assertRaises(ValueError):
+                request({"storage_profile": profile})
+        with self.assertRaises(ValueError):
+            request({"storage_profile": "file/file/file", "benchmark_target": "kannel"})
+
     def test_pending_backend_defaults_and_runtime_ingress_matrix(self):
         self.assertEqual(request()["preset"]["runtime"]["pendingBackend"], "memory")
         field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["pending_backend"]
@@ -180,7 +219,7 @@ class WorkflowTests(unittest.TestCase):
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 14)
+        self.assertEqual(len(inputs), 16)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)

@@ -30,7 +30,9 @@ therefore have individual fields; durations do not need a grouped string.
 |---|---:|---|
 | `benchmark_target` | `sendium` | `sendium` or `kannel`; one target per dispatch |
 | `application_runtime` | `jvm` | Sendium: `jvm` or `native`; leave `jvm` for Kannel, which uses its C runtime |
-| `pending_backend` | `memory` | Sendium: `memory` or `file`; selected/routed stages remain memory. Leave `memory` for Kannel. |
+| `application_branch` | blank | Sendium branch to resolve to an exact application SHA; blank uses the dispatch branch. Controller remains on the default branch. |
+| `storage_profile` | `pending-backend` | Sendium pending/selected/routed: `memory/memory/memory`, `file/memory/memory`, `file/file/memory`, `file/memory/file`, or `file/file/file`. |
+| `pending_backend` | `memory` | Legacy `memory`/`file` selector used when `storage_profile=pending-backend`; otherwise the full profile takes precedence. Leave `memory` for Kannel. |
 | `ingress_mode` | `http` | Sendium: `http` or `smpp`; Kannel: HTTP only |
 | `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
@@ -115,8 +117,11 @@ validated after merge; local integration results are not AWS capacity findings.
 
 ## Sendium build and runtime details
 
-`pending_backend` is independent of JVM/native runtime and HTTP/SMPP ingress. `memory` remains
-the default; `file` selects `file/memory/memory`. The gateway node creates a private writable
+`storage_profile` is independent of JVM/native runtime and HTTP/SMPP ingress. The default
+`pending-backend` preserves legacy `pending_backend` callers and memory defaults; legacy `file`
+selects `file/memory/memory`. An explicit profile controls all three backends and takes precedence
+over the legacy input. Unsupported combinations are rejected before deployment.
+The gateway node creates a private writable
 `pending/` directory under its existing per-run root and passes explicit backend/path settings to
 the application process. Existing spool content is not cleared on reconfiguration. This uses the
 instance's existing root volume: it survives application restarts but is deleted with the temporary
@@ -127,6 +132,14 @@ The effective configuration, `results.json` application metadata, and Markdown s
 normalized request, so file runs cannot silently be reported as memory runs. PostgreSQL DLR storage
 is unchanged. Kannel retains its own spool settings and rejects Sendium's `file` choice. The selected
 application revision must implement the requested profile; choosing `file` does not retrofit older builds.
+
+To benchmark the filesystem-stage feature branch, first merge this workflow/controller change to
+`main`. Run **Performance Tests** using workflow branch `main`, set
+`application_branch=feat/345-filesystem-stages` and `storage_profile=file/file/file`, then choose
+the desired runtime/ingress/workload. The unprivileged preparation job resolves the application branch
+without executing its code. The application build uses that exact SHA; controller/harness and workflow
+revisions remain separately recorded. Branch selection is Sendium-only. Dispatch provisions paid AWS
+resources; do not dispatch just to test the form.
 
 The maintained `build_selected_application.py` helper validates the exact selected
 checkout, Linux runner architecture, Java 25 and absence of cloud credential

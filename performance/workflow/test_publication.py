@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import prepare
+from application_runtime import STORAGE_PROFILES
 import publish
 import recover
 import test_prepare
@@ -44,6 +45,17 @@ def measured():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_full_profiles_are_preserved_and_wrong_stage_labels_rejected(self):
+        for profile in STORAGE_PROFILES:
+            req = request({"storage_profile": profile})
+            report = publish.unavailable(req, "FIXTURE")
+            self.assertEqual(report["configuration"]["application"]["messageStorageProfile"], profile)
+            publish.validate(report, req)
+            report["configuration"]["application"]["messageStorageProfile"] = (
+                "file/file/file" if profile != "file/file/file" else "file/memory/memory")
+            with self.assertRaisesRegex(ValueError, "storage profile mismatch"):
+                publish.validate(report, req)
+
     def test_storage_profile_is_preserved_and_mislabeled_file_results_are_rejected(self):
         for runtime in ("jvm", "native"):
             for backend in ("memory", "file"):

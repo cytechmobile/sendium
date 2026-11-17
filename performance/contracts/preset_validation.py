@@ -4,7 +4,7 @@ import ipaddress
 import math
 import re
 
-from application_runtime import runtime_mode, validate_native_settings
+from application_runtime import runtime_mode, validate_native_settings, storage_profile
 
 
 def require(condition, message):
@@ -19,7 +19,7 @@ def validate_preset(preset, workload_validator):
     workload_validator.validate(workload)
     aws, runtime, database = preset["aws"], preset["runtime"], preset["database"]
     mode = runtime_mode(preset)
-    require(runtime.get("pendingBackend", "memory") in ("memory", "file"), "Pending backend must be memory or file")
+    storage_profile(runtime)
     if mode == "native" or "native" in runtime:
         validate_native_settings(preset)
     deployment, measurement, bounds = preset["deployment"], preset["measurement"], preset["bounds"]
