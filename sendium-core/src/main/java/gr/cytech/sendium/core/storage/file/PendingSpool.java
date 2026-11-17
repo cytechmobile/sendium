@@ -1,5 +1,8 @@
 package gr.cytech.sendium.core.storage.file;
 
+import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.file.PendingTerminalCodec.Intent;
@@ -41,7 +44,8 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * Callers must finish recovery/indexing before admission. No host/power-loss durability is claimed.
  */
 public final class PendingSpool implements AutoCloseable {
-    private static final String FORMAT = "sendium-pending-spool:2\n";
+    private static final String FORMAT = "sendium-pending-spool:3\n";
+    private final SelectedRecordCodec selectedCodec = new SelectedRecordCodec();
     private final Path root;
     private final PendingRecordCodec codec = new PendingRecordCodec();
     private FileChannel owner;
@@ -238,7 +242,24 @@ public final class PendingSpool implements AutoCloseable {
         if (retained.isEmpty()) {
             return 0;
         }
-        Intent intent = new Intent(UUID.randomUUID(), sources, groups);
+        var selections = new HashSet<UUID>();
+        try {
+            for (SourceId source : sources) {
+                Optional<SelectionId> selectedOwner = index.selectedOwner(source);
+                if (selectedOwner.isPresent()) {
+                    Selected<StandardMessage> selected = readSelected(selectedPath(selectedOwner.orElseThrow()));
+                    if (!sources.containsAll(selected.sources())) {
+                        throw new OutboundStorageException(PENDING, OutboundStorageException.Reason.INVALID_TRANSITION,
+                                "pendingCompletion|error|reason:incompleteSelectedSourceSet");
+                    }
+                    selections.add(selected.id().value());
+                }
+            }
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingCompletion|error|reason:selectedOwnerLookupFailed", failure);
+        }
+        Intent intent = new Intent(UUID.randomUUID(), sources, groups, selections);
         try {
             terminal.publish(intent);
             for (UUID group : groups) {
@@ -262,6 +283,12 @@ public final class PendingSpool implements AutoCloseable {
                 if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
                     terminal.forgetGroup(group);
                 }
+            }
+            for (UUID selection : selections) {
+                SelectionId id = new SelectionId(selection);
+                Selected<StandardMessage> selected = readSelected(selectedPath(id));
+                Files.delete(selectedPath(id));
+                index.removeSelected(id, selected.sources());
             }
             terminal.finish(intent.id());
             return retained.size();
@@ -403,7 +430,7 @@ public final class PendingSpool implements AutoCloseable {
                 } else if (name.equals("sources")) {
                     throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingRecovery|error|reason:unsupportedSpoolFormat");
                 } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("accepted") &&
-                        !name.equals("derived") && !name.equals("terminal") && !name.equals("closed-groups")) {
+                        !name.equals("derived") && !name.equals("terminal") && !name.equals("closed-groups") && !name.equals("selected")) {
                     throw unavailable("pendingRecovery|error|reason:unexpectedSpoolEntry", null);
                 }
             }
@@ -412,7 +439,8 @@ public final class PendingSpool implements AutoCloseable {
             // A crash before initial format publication cannot have admitted source files.
             if (Files.exists(root.resolve("accepted"), LinkOption.NOFOLLOW_LINKS) ||
                     Files.exists(root.resolve("terminal"), LinkOption.NOFOLLOW_LINKS) ||
-                    Files.exists(root.resolve("closed-groups"), LinkOption.NOFOLLOW_LINKS)) {
+                    Files.exists(root.resolve("closed-groups"), LinkOption.NOFOLLOW_LINKS) ||
+                    Files.exists(root.resolve("selected"), LinkOption.NOFOLLOW_LINKS)) {
                 throw unavailable("pendingRecovery|error|reason:missingFormatMarker", null);
             }
             publishBytes(format, FORMAT.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -435,6 +463,10 @@ public final class PendingSpool implements AutoCloseable {
         Files.delete(probe);
         terminal = new PendingTerminalJournal(root);
         terminal.validate();
+        Path selected = root.resolve("selected");
+        Files.createDirectories(selected);
+        requireDirectory(selected);
+        visitSelected(path -> readSelected(path));
         // Validate committed intent/source envelopes first; replay precedes cross-record group checks.
         terminal.forEachIntent(this::validateIntentSources);
         // Directory enumeration is weakly consistent while entries are removed: confirm it is empty.
@@ -450,6 +482,9 @@ public final class PendingSpool implements AutoCloseable {
                         requireFile(path);
                         Files.delete(path);
                     }
+                }
+                for (UUID selection : intent.selections()) {
+                    Files.deleteIfExists(selectedPath(new SelectionId(selection)));
                 }
                 terminal.finish(intent.id());
             });
@@ -472,6 +507,15 @@ public final class PendingSpool implements AutoCloseable {
                 throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:indexRebuildFailed", failure);
             }
             recoveredSources++;
+        });
+        visitSelected(path -> {
+            Selected<StandardMessage> record = readSelected(path);
+            validateSelectedSources(record);
+            try {
+                index.addSelected(record.id(), record.sources());
+            } catch (IOException failure) {
+                throw unavailable("selectedRecovery|error|reason:ownershipRebuildFailed", failure);
+            }
         });
         terminal.forEachClosedGroup(group -> {
             if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
@@ -525,12 +569,162 @@ public final class PendingSpool implements AutoCloseable {
     }
 
     private void validateIntentSources(Intent intent) {
+        for (UUID selection : intent.selections()) {
+            Path path = selectedPath(new SelectionId(selection));
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && !intent.sources().containsAll(readSelected(path).sources())) {
+                throw unavailable("selectedCleanup|error|reason:incompleteAuthorization", null);
+            }
+        }
         for (SourceId source : intent.sources()) {
             Path path = sourcePath(source);
             if (!Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
                 PendingSourceRecord record = read(path, source);
                 if (record.multipart() != null && !intent.closedGroups().contains(record.multipart().groupId())) {
                     throw unavailable("pendingTerminalRecovery|error|intentId:" + intent.id() + "|reason:missingGroupClosure", null);
+                }
+            }
+        }
+    }
+
+    synchronized Optional<SelectionId> selectedOwner(SourceId source) {
+        return multipartIndex(() -> index.selectedOwner(source));
+    }
+
+    synchronized List<SelectionId> selectedCandidates(int limit) {
+        return multipartIndex(() -> index.selectedReady(limit));
+    }
+
+    synchronized void unscheduleSelected(SelectionId id) {
+        multipartIndex(() -> {
+            index.unscheduleSelected(id);
+            return null;
+        });
+    }
+
+    synchronized boolean selectedScheduled(SelectionId id) {
+        return multipartIndex(() -> index.selectedScheduled(id));
+    }
+
+    synchronized Optional<Selected<StandardMessage>> findSelected(SelectionId id) {
+        requireReady();
+        Path path = selectedPath(id);
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(readSelected(path));
+        } catch (RuntimeException failure) {
+            ready = false;
+            throw failure;
+        }
+    }
+
+    synchronized void publishSelected(Selected<StandardMessage> selected) {
+        requireReady();
+        byte[] bytes = selectedCodec.encode(selected);
+        try {
+            validateSelectedSources(selected);
+            for (SourceId source : selected.sources()) {
+                if (index.selectedOwner(source).isPresent() || find(source).isEmpty()) {
+                    throw unavailable("selectedPublication|error|reason:invalidSourceOwnership", null);
+                }
+            }
+            Path path = selectedPath(selected.id());
+            Files.createDirectories(path.getParent());
+            requireDirectory(path.getParent());
+            if (!publishBytes(path, bytes)) {
+                throw unavailable("selectedPublication|error|reason:identityConflict", null);
+            }
+            index.addSelected(selected.id(), selected.sources());
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            throw unavailable("selectedPublication|error|reason:commitFailed", failure);
+        }
+    }
+
+    private void validateSelectedSources(Selected<StandardMessage> selected) {
+        SourceId representative = new SourceId(UUID.fromString(selected.message().serial));
+        Path path = sourcePath(representative);
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw unavailable("selectedRecovery|error|reason:missingSource", null);
+        }
+        PendingSourceRecord first = read(path, representative);
+        if (first.multipart() == null) {
+            if (selected.sources().size() != 1 || selected.message().reassembledParts != null) {
+                throw unavailable("selectedRecovery|error|reason:invalidSourceSet", null);
+            }
+            return;
+        }
+        var originals = selected.message().reassembledParts == null ? Set.of(representative) :
+                selected.message().reassembledParts.stream().map(id -> new SourceId(UUID.fromString(id)))
+                        .collect(java.util.stream.Collectors.toSet());
+        for (SourceId source : selected.sources()) {
+            Path accepted = sourcePath(source);
+            if (Files.notExists(accepted, LinkOption.NOFOLLOW_LINKS)) {
+                throw unavailable("selectedRecovery|error|reason:missingSource", null);
+            }
+            MultipartMembership member = read(accepted, source).multipart();
+            if (member == null || !member.groupId().equals(first.multipart().groupId()) || !originals.contains(member.originalSource())) {
+                throw unavailable("selectedRecovery|error|reason:invalidSourceSet", null);
+            }
+        }
+        try {
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = index.multipart().sourcesAfter(first.multipart().groupId(), cursor, 128);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (SourceId source : page) {
+                    MultipartMembership member = read(sourcePath(source), source).multipart();
+                    if (originals.contains(member.originalSource()) && !selected.sources().contains(source)) {
+                        throw unavailable("selectedRecovery|error|reason:incompleteSourceSet", null);
+                    }
+                }
+                cursor = page.getLast();
+            }
+        } catch (IOException failure) {
+            throw unavailable("selectedRecovery|error|reason:membershipLookupFailed", failure);
+        }
+    }
+
+    private Path selectedPath(SelectionId selection) {
+        String id = selection.value().toString();
+        return root.resolve("selected").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+    }
+
+    private Selected<StandardMessage> readSelected(Path path) {
+        try {
+            requireFile(path);
+            Selected<StandardMessage> selected = selectedCodec.decode(Files.readAllBytes(path));
+            if (!selectedPath(selected.id()).equals(path)) {
+                throw unavailable("selectedRecovery|error|reason:identityMismatch", null);
+            }
+            return selected;
+        } catch (IOException failure) {
+            throw unavailable("selectedRecovery|error|reason:readFailed", failure);
+        }
+    }
+
+    private void visitSelected(Consumer<Path> action) throws IOException {
+        Path directory = root.resolve("selected");
+        requireDirectory(directory);
+        try (var buckets = Files.newDirectoryStream(directory)) {
+            for (Path bucket : buckets) {
+                if (!bucket.getFileName().toString().matches("[0-9a-f]{2}")) {
+                    throw unavailable("selectedRecovery|error|reason:invalidBucket", null);
+                }
+                requireDirectory(bucket);
+                try (var records = Files.newDirectoryStream(bucket)) {
+                    for (Path path : records) {
+                        String name = path.getFileName().toString();
+                        if (temporary(name)) {
+                            deleteTemporary(path);
+                        } else {
+                            sourceName(name);
+                            action.accept(path);
+                        }
+                    }
                 }
             }
         }

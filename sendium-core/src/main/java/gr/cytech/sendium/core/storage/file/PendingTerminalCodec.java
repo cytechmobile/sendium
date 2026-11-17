@@ -33,6 +33,8 @@ final class PendingTerminalCodec {
         intent.sources().stream().map(SourceId::value).sorted().forEach(id -> sources.add(id.toString()));
         var groups = node.putArray("closedGroups");
         intent.closedGroups().stream().sorted().forEach(id -> groups.add(id.toString()));
+        var selections = node.putArray("selections");
+        intent.selections().stream().sorted().forEach(id -> selections.add(id.toString()));
         try {
             return mapper.writeValueAsBytes(node);
         } catch (IOException failure) {
@@ -58,7 +60,7 @@ final class PendingTerminalCodec {
             }
             return new Intent(uuid(node.required("intentId")),
                     ids(node.required("sources")).stream().map(SourceId::new).collect(Collectors.toSet()),
-                    ids(node.required("closedGroups")));
+                    ids(node.required("closedGroups")), node.has("selections") ? ids(node.required("selections")) : Set.of());
         } catch (IOException | IllegalArgumentException failure) {
             throw invalid();
         }
@@ -92,11 +94,16 @@ final class PendingTerminalCodec {
         return new OutboundStorageException(PENDING, UNAVAILABLE, "pendingTerminalRecovery|error|reason:invalidIntent");
     }
 
-    record Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups) {
+    record Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups, Set<UUID> selections) {
+        Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups) {
+            this(id, sources, closedGroups, Set.of());
+        }
+
         Intent {
             Objects.requireNonNull(id, "id");
             sources = Set.copyOf(sources);
             closedGroups = Set.copyOf(closedGroups);
+            selections = Set.copyOf(selections);
             if (sources.isEmpty()) {
                 throw new IllegalArgumentException("pendingCompletion|error|reason:emptyIntent");
             }

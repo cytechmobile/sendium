@@ -154,12 +154,14 @@ public final class PendingMessageData {
         return text("serial");
     }
 
-    ObjectNode toNode() {
+    /** Returns a defensive explicit-field representation for the other durable stage codecs. */
+    public ObjectNode toNode() {
         // Restore/capture also copies binary nodes, whose backing arrays deepCopy alone would share.
         return capture(restore()).fields;
     }
 
-    static PendingMessageData fromNode(JsonNode node) {
+    /** Validates and detaches explicit message fields without reflective class deserialization. */
+    public static PendingMessageData fromNode(JsonNode node) {
         if (!node.isObject()) {
             throw PendingRecordFields.corrupt();
         }

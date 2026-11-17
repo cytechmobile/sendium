@@ -119,7 +119,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                     validateMembership(membership);
                     lastGroupOrder = Math.max(lastGroupOrder, membership.groupOrder());
                 }
-                if (record.disposition() == PendingSourceRecord.Disposition.READY) {
+                if (record.disposition() == PendingSourceRecord.Disposition.READY && spool.selectedOwner(record.source()).isEmpty()) {
                     ordinaryWaiting[record.message().priority()]++;
                 }
             });
@@ -210,7 +210,7 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             int[] ordinaryRemoved = new int[4];
             Set<UUID> preparedRemoved = new HashSet<>();
             for (SourceId source : checked) {
-                if (!activeSources.contains(source)) {
+                if (!activeSources.contains(source) && spool.selectedOwner(source).isEmpty()) {
                     spool.find(source).ifPresent(record -> {
                         if (record.disposition() == PendingSourceRecord.Disposition.READY) {
                             ordinaryRemoved[record.message().priority()]++;
@@ -651,6 +651,12 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
         selectorOwner = owner;
     }
 
+    /** Shared physical owner, not a second lock or independently opened spool. */
+    PendingSpool selectedSpool() {
+        requireReady(Role.ROUTER_QUEUE);
+        return spool;
+    }
+
     @Override
     public boolean stageNext(Instant now, Consumer<Selected<StandardMessage>> publication) {
         requireReady(Role.ROUTER_QUEUE);
@@ -671,7 +677,9 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             int priority = prepared.priority();
             publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), prepared.sources(), message));
             spool.removeReady(prepared.representative(), priority);
-            activeSources.addAll(prepared.sources());
+            if (!(selectorOwner instanceof FileSelectedRouterStore)) {
+                activeSources.addAll(prepared.sources());
+            }
             preparedWaiting--;
             return true;
         }
@@ -684,7 +692,8 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
                 // Bound both empty probes and held/active entries; no whole-backlog payload cache.
                 int remaining = 1024;
                 while (remaining > 0 && record == null) {
-                    var page = traversal.pollPriority(ordinaryPriority, 1, remaining, source -> !activeSources.contains(source));
+                    var page = traversal.pollPriority(ordinaryPriority, 1, remaining,
+                            source -> !activeSources.contains(source) && spool.selectedOwner(source).isEmpty());
                     remaining -= page.steps();
                     for (var candidate : page.candidates()) {
                         Optional<PendingSourceRecord> found = spool.findCandidate(candidate);
@@ -705,7 +714,9 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
             throw unsafeSelection("acceptedTraversalFailed", failure);
         }
         publication.accept(new Selected<>(new SelectionId(UUID.randomUUID()), Set.of(record.source()), record.message().restore()));
-        activeSources.add(record.source());
+        if (!(selectorOwner instanceof FileSelectedRouterStore)) {
+            activeSources.add(record.source());
+        }
         ordinaryWaiting[ordinaryPriority]--;
         reservedOrdinary[ordinaryPriority] = null;
         return true;
