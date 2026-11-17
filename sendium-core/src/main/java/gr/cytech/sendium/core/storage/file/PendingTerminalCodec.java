@@ -35,6 +35,8 @@ final class PendingTerminalCodec {
         intent.closedGroups().stream().sorted().forEach(id -> groups.add(id.toString()));
         var selections = node.putArray("selections");
         intent.selections().stream().sorted().forEach(id -> selections.add(id.toString()));
+        var routed = node.putArray("routedWork");
+        intent.routedWork().stream().sorted().forEach(id -> routed.add(id.toString()));
         try {
             return mapper.writeValueAsBytes(node);
         } catch (IOException failure) {
@@ -60,7 +62,8 @@ final class PendingTerminalCodec {
             }
             return new Intent(uuid(node.required("intentId")),
                     ids(node.required("sources")).stream().map(SourceId::new).collect(Collectors.toSet()),
-                    ids(node.required("closedGroups")), node.has("selections") ? ids(node.required("selections")) : Set.of());
+                    ids(node.required("closedGroups")), node.has("selections") ? ids(node.required("selections")) : Set.of(),
+                    node.has("routedWork") ? ids(node.required("routedWork")) : Set.of());
         } catch (IOException | IllegalArgumentException failure) {
             throw invalid();
         }
@@ -94,9 +97,13 @@ final class PendingTerminalCodec {
         return new OutboundStorageException(PENDING, UNAVAILABLE, "pendingTerminalRecovery|error|reason:invalidIntent");
     }
 
-    record Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups, Set<UUID> selections) {
+    record Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups, Set<UUID> selections, Set<UUID> routedWork) {
         Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups) {
-            this(id, sources, closedGroups, Set.of());
+            this(id, sources, closedGroups, Set.of(), Set.of());
+        }
+
+        Intent(UUID id, Set<SourceId> sources, Set<UUID> closedGroups, Set<UUID> selections) {
+            this(id, sources, closedGroups, selections, Set.of());
         }
 
         Intent {
@@ -104,6 +111,7 @@ final class PendingTerminalCodec {
             sources = Set.copyOf(sources);
             closedGroups = Set.copyOf(closedGroups);
             selections = Set.copyOf(selections);
+            routedWork = Set.copyOf(routedWork);
             if (sources.isEmpty()) {
                 throw new IllegalArgumentException("pendingCompletion|error|reason:emptyIntent");
             }
