@@ -182,6 +182,9 @@ The AL2023 node has no preinstalled JRE: the production installer downloads it
 from staged local objects, verifies bytes and expands the exact Temurin Java 25
 archive. Both node roles use one pinned release/build. PKI/passwords are generated
 per run, kept in private volumes/files and excluded from exported artifacts.
+Secret creation passes credential JSON to AWS CLI through stdin rather than an
+additional `secret.json` file or command-line argument. Only the exact production
+RDS global CA bundle URL is substituted with the run's local certificate fixture.
 Plaintext PostgreSQL connections are rejected. Positive cases observe actual TLS
 connections, while `bad-tls` checks wrong-CA rejection before the failed application
 readiness/benchmark outcome.
