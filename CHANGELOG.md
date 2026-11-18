@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/cytechmobile/sendium/compare/v0.8.0...v0.9.0) (2026-11-18)
+
+
+### Features
+
+* **storage:** add durable filesystem pending storage ([#401](https://github.com/cytechmobile/sendium/issues/401)) ([8d0eec5](https://github.com/cytechmobile/sendium/commit/8d0eec5d905024a16a47fdb0c3492501450d0ce3)), closes [#339](https://github.com/cytechmobile/sendium/issues/339)
+* **storage:** add filesystem recovery for selected and routed outbound work ([#406](https://github.com/cytechmobile/sendium/issues/406)) ([8347c21](https://github.com/cytechmobile/sendium/commit/8347c2176447348583974531a07a92f36950a146)), closes [#345](https://github.com/cytechmobile/sendium/issues/345)
+
 ## [0.8.0](https://github.com/cytechmobile/sendium/compare/v0.7.0...v0.8.0) (2026-11-13)
 
 
