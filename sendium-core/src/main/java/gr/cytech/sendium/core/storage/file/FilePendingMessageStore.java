@@ -686,6 +686,11 @@ public final class FilePendingMessageStore implements PendingMessageStore<Standa
 
     @Override
     public boolean stageNext(Instant now, Consumer<Selected<StandardMessage>> publication) {
+        // The memory-selector contract supplies time; file eligibility is already indexed.
+        return stageNext(publication);
+    }
+
+    public boolean stageNext(Consumer<Selected<StandardMessage>> publication) {
         requireReady(Role.ROUTER_QUEUE);
         int ordinaryPriority = 3;
         while (ordinaryPriority > 0 && ordinaryWaiting[ordinaryPriority] == 0) {

@@ -8,7 +8,6 @@ import gr.cytech.sendium.core.storage.SelectedRouterStore;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -26,7 +25,6 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNA
 public final class FileSelectedRouterStore implements SelectedRouterStore<StandardMessage> {
     private final FilePendingMessageStore pending;
     private final int capacity;
-    private final Clock clock;
     private final MeterRegistry metrics;
     private final Map<String, Timer> timers = new ConcurrentHashMap<>();
     private final Map<SelectionId, Entry> active = new HashMap<>();
@@ -35,20 +33,15 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
     private PendingSpool spool;
 
     public FileSelectedRouterStore(FilePendingMessageStore pending, int capacity) {
-        this(pending, capacity, Clock.systemUTC());
+        this(pending, capacity, null);
     }
 
-    public FileSelectedRouterStore(FilePendingMessageStore pending, int capacity, Clock clock) {
-        this(pending, capacity, clock, null);
-    }
-
-    public FileSelectedRouterStore(FilePendingMessageStore pending, int capacity, Clock clock, MeterRegistry metrics) {
+    public FileSelectedRouterStore(FilePendingMessageStore pending, int capacity, MeterRegistry metrics) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("selectedConfiguration|error|reason:nonPositiveCapacity");
         }
         this.pending = Objects.requireNonNull(pending, "pending");
         this.capacity = capacity;
-        this.clock = Objects.requireNonNull(clock, "clock");
         this.metrics = metrics;
     }
 
@@ -108,7 +101,7 @@ public final class FileSelectedRouterStore implements SelectedRouterStore<Standa
             refill();
             int count = 0;
             while (count < limit && active.size() < capacity) {
-                if (!pending.stageNext(clock.instant(), spool::publishSelected)) {
+                if (!pending.stageNext(spool::publishSelected)) {
                     break;
                 }
                 count++;

@@ -87,7 +87,7 @@ public class StandaloneOutboundPipeline implements HealthCheck {
             var filePending = new FilePendingMessageStore(pendingPath(config), sourceCapacity, Clock.systemUTC(), metrics);
             pending = filePending;
             selected = "file".equals(profile.routerQueue()) ?
-                    new FileSelectedRouterStore(filePending, routerCapacity, Clock.systemUTC(), metrics) :
+                    new FileSelectedRouterStore(filePending, routerCapacity, metrics) :
                     new MemorySelectedRouterStore<>(filePending, routerCapacity);
         } else {
             var memoryPending = new MemoryPendingMessageStore<StandardMessage>(sourceCapacity, StandaloneMessageSnapshot::copy);

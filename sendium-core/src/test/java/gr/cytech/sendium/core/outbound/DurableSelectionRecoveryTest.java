@@ -50,7 +50,7 @@ class DurableSelectionRecoveryTest {
         var pending = spy(pending());
         try (var after = coordinator(pending, CLOCK)) {
             after.start();
-            verify(pending, never()).stageNext(any(), any());
+            verify(pending, never()).stageNext(any());
             assertThat(after.takeFromRouted("old-provider", Duration.ZERO)).isEmpty();
             var restored = after.takeForRouting(Duration.ZERO).orElseThrow();
             assertThat(restored.id()).isEqualTo(id);
@@ -70,7 +70,7 @@ class DurableSelectionRecoveryTest {
         var duplicate = message("duplicate", "0500037F0201");
         var second = message("B", "0500037F0202");
         SelectionId id;
-        try (var pending = pending(); var selected = new FileSelectedRouterStore(pending, 2, CLOCK)) {
+        try (var pending = pending(); var selected = new FileSelectedRouterStore(pending, 2)) {
             pending.open();
             selected.open();
             for (var part : new StandardMessage[]{first, duplicate, second}) {
@@ -131,7 +131,7 @@ class DurableSelectionRecoveryTest {
         var first = message("A", "0500037F0301");
         var duplicate = message("duplicate", "0500037F0301");
         var second = message("B", "0500037F0302");
-        try (var pending = pending(); var selected = new FileSelectedRouterStore(pending, 2, CLOCK)) {
+        try (var pending = pending(); var selected = new FileSelectedRouterStore(pending, 2)) {
             pending.open();
             selected.open();
             for (var part : new StandardMessage[]{first, duplicate, second}) {
@@ -156,7 +156,7 @@ class DurableSelectionRecoveryTest {
     }
 
     private DefaultOutboundCoordinator<StandardMessage> coordinator(FilePendingMessageStore pending, Clock clock) {
-        return new DefaultOutboundCoordinator<>(pending, new FileSelectedRouterStore(pending, 2, clock),
+        return new DefaultOutboundCoordinator<>(pending, new FileSelectedRouterStore(pending, 2),
                 new MemoryRoutedWorkStore<>(32, value -> PendingMessageData.capture(value).restore()),
                 100, clock, Executors::newSingleThreadScheduledExecutor);
     }
