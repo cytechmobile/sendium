@@ -53,7 +53,7 @@ class Assets:
         return prepare.read(path)
 
     def download(self, url, target, maximum, checksum=None, size=None):
-        if "truststore.pki.rds.amazonaws.com" in url:
+        if url == "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem":
             name = "wrong-ca.pem" if self.fault == "bad-tls" else "ca.pem"
             source = Path("/state/private") / self.identity / "tls" / name
             origin = "local-fixture://postgresql-verified-tls/" + name

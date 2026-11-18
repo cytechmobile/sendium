@@ -109,10 +109,11 @@ class Lab:
                "--entrypoint", "sh", "sendium-local:node", "-c", "cp -a /state/private/" + identity + "/tls/. /tls/")
         password = (private / "tls/password").read_text()
         self.passwords.append(password)
-        secret_file = private / "secret.json"
-        secret_file.write_text(json.dumps({"username": "sendium_perf", "password": password}))
         secret_name = PREFIX + "/runs/" + identity + "/database"
-        root["secret"] = self.real.call("secretsmanager", "create-secret", name=secret_name, secret_string="file://" + str(secret_file))["ARN"]
+        # This rehearsal runs in Linux; feed credentials through a pipe, not a file or argv.
+        root["secret"] = self.real.call("secretsmanager", "create-secret", name=secret_name,
+                                       secret_string="file:///dev/stdin",
+                                       stdin=json.dumps({"username": "sendium_perf", "password": password}))["ARN"]
         db = short + "-db"
         data = short + "-data"
         docker("volume", "create", *labels, data)

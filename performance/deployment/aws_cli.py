@@ -29,7 +29,7 @@ class AwsCli:
         self.region = region
         self.timeout_seconds = 120
 
-    def call(self, service, operation, **parameters):
+    def call(self, service, operation, *, stdin=None, **parameters):
         with ExitStack() as resources:
             command = ["aws", service, operation, "--region", self.region, "--output", "json", "--no-cli-pager", "--no-paginate"]
             directory = None
@@ -48,11 +48,12 @@ class AwsCli:
                     path.write_text(encoded, encoding="utf-8")
                     encoded = "file://" + str(path)
                 command.append(encoded)
-            return self._request(command, service, operation, parameters)
+            return self._request(command, service, operation, parameters, **({"stdin": stdin} if stdin is not None else {}))
 
-    def _request(self, command, service, operation, parameters):
+    def _request(self, command, service, operation, parameters, *, stdin=None):
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout_seconds, check=True)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout_seconds, check=True,
+                                    **({"input": stdin} if stdin is not None else {}))
             return json.loads(result.stdout) if result.stdout.strip() else {}
         except subprocess.CalledProcessError as error:
             raise failure(service, operation, parameters, error.stderr) from None
