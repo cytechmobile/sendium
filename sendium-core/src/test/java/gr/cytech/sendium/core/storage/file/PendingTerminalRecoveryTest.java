@@ -33,6 +33,37 @@ class PendingTerminalRecoveryTest {
     Path root;
 
     @Test
+    void replaysSelectedCleanupWithoutRescheduling() throws Exception {
+        var source = FileSelectedRouterStoreTest.source(1);
+        var id = new gr.cytech.sendium.core.outbound.OutboundWork.SelectionId(UUID.randomUUID());
+        try (var store = store()) {
+            store.open();
+            store.admit(source, FileSelectedRouterStoreTest.message(1, 2));
+        }
+        FileSelectedRouterStoreTest.writeSelected(root,
+                new gr.cytech.sendium.core.outbound.OutboundWork.Selected<>(id, Set.of(source), FileSelectedRouterStoreTest.message(1, 2)));
+        // Publish physical authorization, then simulate death after deleting the accepted source only.
+        var mapper = new ObjectMapper(new CBORFactory());
+        var node = mapper.createObjectNode();
+        UUID intentId = UUID.randomUUID();
+        node.put("schemaVersion", 1);
+        node.put("intentId", intentId.toString());
+        node.putArray("sources").add(source.value().toString());
+        node.putArray("closedGroups");
+        node.putArray("selections").add(id.value().toString());
+        Files.write(root.resolve("terminal").resolve(intentId + ".cbor"), mapper.writeValueAsBytes(node));
+        Files.delete(root.resolve("accepted/2").resolve(source.value().toString().substring(0, 2)).resolve(source.value() + ".cbor"));
+        try (var store = store(); var router = FileSelectedRouterStoreTest.router(store, 1)) {
+            store.open();
+            router.open();
+            assertThat(router.take(Duration.ZERO)).isEmpty();
+            assertThat(router.selectToRouter(1)).isZero();
+            assertThat(Files.exists(FileSelectedRouterStoreTest.selectedPath(root, id))).isFalse();
+            assertThat(Files.exists(root.resolve("terminal").resolve(intentId + ".cbor"))).isFalse();
+        }
+    }
+
+    @Test
     void replaysPartialDeletionBeforeCheckingDuplicateOriginalsAndPreservesClosure() throws Exception {
         Group group = group();
         Intent intent = intent(group);

@@ -15,6 +15,9 @@ import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
 import gr.cytech.sendium.core.storage.RoutedWorkStore;
 import gr.cytech.sendium.core.storage.SelectedRouterStore;
+import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
+import gr.cytech.sendium.core.storage.file.FileRoutedWorkStore;
+import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
@@ -42,8 +45,8 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNA
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
 
 /**
- * Coordinates fresh volatile stages with optional indexed durable pending recovery. Retained pending
- * sources repeat selection/routing on restart; durable selected/routed stages remain unsupported.
+ * Coordinates volatile or file-backed outbound stages with indexed multipart recovery.
+ * Durable downstream ownership is reconciled before pending reconstruction.
  * Handoff waits and callbacks on returned completion stages never run under the coordinator lock.
  */
 public final class DefaultOutboundCoordinator<M extends StandardMessage> implements OutboundCoordinator<M> {
@@ -62,6 +65,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     private PendingMultipartRecovery<M> multipartRecovery;
     private ScheduledExecutorService recoveryScheduler;
     private Lifecycle lifecycle = Lifecycle.NEW;
+    private volatile boolean startupComplete;
 
     public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed) {
         this(pending, router, routed, 100);
@@ -107,12 +111,17 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 open(pending, Role.PENDING, attempted);
                 open(router, Role.ROUTER_QUEUE, attempted);
                 open(routed, Role.ROUTED_WORK, attempted);
+                if (pending instanceof FilePendingMessageStore filePending) {
+                    filePending.requireRoutedBackend(routed.status().durable());
+                }
+                reconcileTerminalRouted();
                 lifecycle = Lifecycle.RUNNING;
                 if (pending.status().durable()) {
                     recoveryScheduler = Objects.requireNonNull(recoverySchedulers.get(), "outboundStartup|error|reason:missingRecoveryScheduler");
                     multipartRecovery = new PendingMultipartRecovery<>(pending, recoveryClock, recoveryScheduler, this::makeHeldReady);
                     multipartRecovery.reconstruct(recoveryBatchSize);
                 }
+                startupComplete = true;
             } catch (RuntimeException | Error failure) {
                 lifecycle = Lifecycle.CLOSED;
                 startupFailure = failure;
@@ -154,6 +163,9 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     @Override
     public boolean isReady() {
+        if (!startupComplete) {
+            return false;
+        }
         lock.lock();
         try {
             return lifecycle == Lifecycle.RUNNING && pending.status().state() == OutboundStage.State.READY &&
@@ -166,7 +178,10 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     private void open(OutboundStage stage, Role role, List<OutboundStage> attempted) {
         OutboundStage.Status status = stage.status();
-        if (status.durable() && (role != Role.PENDING || !(stage instanceof IndexedMultipartSource))) {
+        boolean supportedDurable = role == Role.PENDING && stage instanceof IndexedMultipartSource ||
+                role == Role.ROUTER_QUEUE && stage instanceof FileSelectedRouterStore && pending.status().durable() ||
+                role == Role.ROUTED_WORK && stage instanceof FileRoutedWorkStore && pending.status().durable();
+        if (status.durable() && !supportedDurable) {
             throw new OutboundStorageException(role, UNSUPPORTED, "outboundStartup|error|reason:unsupportedDurableStage");
         }
         if (status.state() != OutboundStage.State.NEW) {
@@ -176,6 +191,26 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         stage.open();
         if (stage.status().state() != OutboundStage.State.READY) {
             throw unavailable(role, "outboundStartup|error|reason:stageNotReady");
+        }
+    }
+
+    private void reconcileTerminalRouted() {
+        if (!(routed instanceof FileRoutedWorkStore fileRouted)) {
+            return;
+        }
+        WorkId after = null;
+        while (true) {
+            List<WorkId> page = fileRouted.terminalWorkAfter(after, recoveryBatchSize);
+            if (page.isEmpty()) {
+                return;
+            }
+            for (WorkId id : page) {
+                Completed completed = routed.complete(id);
+                pending.complete(completed.sources());
+                router.complete(completed.selection());
+                routed.forget(completed.selection());
+                after = id;
+            }
         }
     }
 
@@ -702,6 +737,20 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     private Execution<M> registerTaken(Routed<M> taken) {
         Execution<M> execution = executions.get(taken.id());
+        if (execution == null && routed instanceof FileRoutedWorkStore fileRouted && !selections.containsKey(taken.selection())) {
+            Context<M> restored = new Context<>(new Selected<>(taken.selection(), fileRouted.sourcesFor(taken.id()), taken.message()));
+            for (SourceId source : restored.sources) {
+                if (sourceSelections.containsKey(source)) {
+                    throw invalid(Role.ROUTED_WORK, "routedRecovery|error|reason:conflictingRuntimeOwner");
+                }
+            }
+            restored.workId = taken.id();
+            restored.markedRouted = true;
+            selections.put(restored.id, restored);
+            restored.sources.forEach(source -> sourceSelections.put(source, restored));
+            execution = new Execution<>(restored, taken.destination());
+            executions.put(taken.id(), execution);
+        }
         if (execution == null) {
             Context<M> context = context(taken.selection());
             if (context.assignment == null || context.workId != null) {

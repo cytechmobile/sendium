@@ -1,10 +1,10 @@
-# Pending accepted-source record — CBOR schema
+# Filesystem outbound records — CBOR schemas
 
 [Outbound storage lifecycle](14-outbound-storage.md) · [Documentation map](DocumentationMap.md)
 
-This documents the explicit pending-source representation introduced by #343.
-It is not Java serialization, a serialization of `StandardMessage`, or a file layout specification.
-The standalone runtime supports `memory/memory/memory` and opt-in `file/memory/memory`;
+This documents the explicit accepted-source and selected/routed stage representations.
+These are explicit field mappings, not Java object serialization. The standalone runtime supports
+the memory default and four opt-in file profiles;
 see [storage configuration](09-configuration-reference.md#outbound-message-storage-profile).
 
 ## API and ownership
@@ -26,9 +26,14 @@ record. The codec has no storage, acknowledgement, routing, or lifecycle side
 effects. Later admission integration must fail before client success if a selected
 durable representation cannot preserve the accepted data. The codec itself does not enable a profile;
 the implemented [file pending backend](16-filesystem-pending-storage.md) owns publication and recovery.
-Its spool marker (`sendium-pending-spool:2`) and disposable source-only recipe schema (version 2) are
+Its spool marker (`sendium-pending-spool:3` followed by a newline) and disposable source-only recipe schema (version 2) are
 separate from the accepted-record schema version 1 documented here. File admission supports priorities
 3, 2 and 1, storing the record under `accepted/<priority>/<UUID-prefix>/<sourceId>.cbor`.
+
+The spool marker versions the shared physical layout; each envelope has its own schema version.
+Selected/routed schema version 1 does not mean an older spool format is compatible. Older formats
+are rejected without automatic conversion or deletion. See the
+[physical layout and recovery guide](16-filesystem-pending-storage.md#physical-layout).
 
 ## Version 1 envelope
 
@@ -57,6 +62,87 @@ records without this key or the required membership `originalSourceId` are rejec
 durable schema. Saved membership does not itself implement process-restart recovery;
 shared reconstruction is described below, and the [physical backend](16-filesystem-pending-storage.md)
 uses these saved facts to rebuild multipart indexes and source-only readiness after restart.
+
+## Durable stage envelopes
+
+Each stage record is immutable once published. Its `message` uses the same explicit field vocabulary
+[documented below](#explicit-message-field-inventory), but captures that stage's values rather than
+rewriting accepted-source values. The execution projection restored from it is mutable and detached.
+This applies to ordinary SMS as well as multipart work.
+
+### Selected execution — schema version 1
+
+Path: `selected/<UUID-prefix>/<SelectionId>.cbor`.
+
+| Field | Type / meaning |
+|---|---|
+| `schemaVersion` | Integer `1` |
+| `selectionId` | Canonical lowercase UUID text; stable selected-work identity |
+| `sources` | Nonempty array of distinct canonical source UUIDs; includes owned multipart duplicates |
+| `message` | Explicit selected execution snapshot; may be the assembled multipart result |
+
+Exactly these four keys are required. The representative `message.serial` must belong to `sources`.
+When `reassembledParts` is present, it contains distinct owned original source IDs and begins with
+the representative serial; duplicate handles remain in `sources`, not independent assembled parts.
+Priority must be 1, 2 or 3. Recovery also validates retained accepted ownership.
+
+### Routed assignment — schema version 1
+
+Path: `routed/<UUID-prefix>/<WorkId>.cbor`.
+
+| Field | Type / meaning |
+|---|---|
+| `schemaVersion` | Integer `1` |
+| `workId` | Canonical lowercase UUID text; stable routed-work identity |
+| `selectionId` | Canonical lowercase UUID text; owning selection |
+| `sources` | Nonempty array of distinct canonical source UUIDs |
+| `destination` | Nonblank text; the single recorded worker destination |
+| `message` | Explicit routing-time execution snapshot |
+
+Exactly these six keys are required. One retained selection has one work identity and destination.
+Recovery checks source/selection ownership and any overlapping selected source set. Destination strings
+are stored as data; disposable destination directory names use SHA-256, never raw worker names.
+Retrying an assignment cannot overwrite its recorded payload or destination.
+
+### Routed terminal fact — schema version 1
+
+Path: `routed-terminal/<UUID-prefix>/<WorkId>.cbor`.
+
+The four required keys are `schemaVersion` (integer `1`), `workId`, `selectionId`, and `sources`, with
+the same identity types as the routed envelope. There is **no message payload**. The identity and source
+set must match the retained routed assignment; an orphan or mismatched fact fails recovery.
+
+This fact means terminal processing and required tracking/DLR handoffs finished. It suppresses sending
+while cleanup is resumed. It does not mean handset delivery occurred, nor does it persist individual
+provider-part outcomes. Assignment and terminal files remain until final routed forget is authorized.
+
+### Cleanup intent — schema version 1
+
+Path: `terminal/<intentId>.cbor`. This is distinct from a routed terminal fact.
+
+| Field | Type / meaning |
+|---|---|
+| `schemaVersion` | Integer `1` |
+| `intentId` | Canonical lowercase UUID text; must match the filename |
+| `sources` | Nonempty array of distinct canonical source UUIDs authorizing source cleanup |
+| `closedGroups` | Array of distinct canonical multipart group UUIDs |
+| `selections` | Array of distinct canonical selection UUIDs authorizing selected-record deletion |
+| `routedWork` | Array of distinct canonical work UUIDs authorizing routed assignment/terminal deletion |
+
+The encoder emits all six keys. The decoder permits absent `selections` and `routedWork` as empty sets;
+that envelope allowance does not make old spool layouts supported. An intent stays present until its
+authorized deletion is finished, so restart can replay interrupted source/stage cleanup. Missing
+accepted files alone are not authorization to discard arbitrary downstream records.
+
+### Validation and disposable state
+
+Stage codecs reject duplicate keys, malformed or trailing CBOR, unsupported versions, invalid source
+sets and noncanonical stage/source IDs. Physical recovery additionally validates file identity, placement,
+ownership and matching terminal facts before allowing scheduling. Diagnostics do not include payloads.
+
+`derived/` references are rebuildable, not an additional message store. Its version-2 publication recipe
+contains `schemaVersion`, `publicationId`, `sources`, ordered `originals`, `priority`, and `assembled`,
+without a message body. Closed-group markers retain multipart closure, not message payloads.
 
 ## Multipart admission and membership
 
@@ -138,10 +224,11 @@ in the same group and ordinal. Missing or conflicting originals fail reconstruct
 - A new part notification carries a source handle. Current membership and payload
   remain authoritative in pending storage, including after reconstruction.
 
-There is **no durable checkpoint of an earlier assembly/publication/release
-decision**. Accepted-source CBOR, membership and deadlines are the reconstruction
-inputs. Pending-only recovery can repeat runtime processing; selected batches and
-destinations survive only under their independently configured stage guarantees.
+For pending-only recovery, accepted-source CBOR, membership and deadlines are the reconstruction
+inputs; disposable publication recipes are rebuilt. With file selected/routed storage, committed
+stage records instead reserve their sources before multipart publication. Selected snapshots preserve
+the committed execution result, and routed snapshots preserve the chosen destination.
+No profile persists later take/release mutations or retry timing/counters.
 Publication retries in a running process use the existing first-binding/idempotence
 contract of `makeHeldReady`. Transient timer-publication failures retry after one
 second without accepting new sources or making provider attempts. Corrupt recovery
@@ -157,10 +244,10 @@ affects new admissions, not saved group deadlines or the active recovery compone
 
 The application owns the scheduler and pending store; closing the recovery component
 cancels its own timers only. The handler owns and stops its scheduler as before.
-Actual durable backend opening, accepted-record indexing, stage reconciliation and
-profile enablement remain with the backend/application assembly in #339 and later
-stage implementations. This entrypoint does not remove the coordinator's current
-guard rejecting unsupported durable profiles. The existing memory backend still
+Durable backend opening, accepted-record indexing, downstream stage reconciliation and
+profile validation belong to the backend/application assembly. File pending uses indexed multipart
+recovery and disk-backed downstream ownership lookups; it does not create a whole-backlog payload map.
+Unsupported profile combinations are rejected. The memory backend still
 loses unfinished records when closed or restarted.
 
 Recovery tests use copied codec-backed source records and a controlled clock/timer.

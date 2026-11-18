@@ -62,6 +62,9 @@ class MessageStorageProfileTest {
         return backends.stream().flatMap(pending -> backends.stream().flatMap(router -> backends.stream()
                 .filter(routed -> !List.of(pending, router, routed).equals(List.of("memory", "memory", "memory")))
                 .filter(routed -> !List.of(pending, router, routed).equals(List.of("file", "memory", "memory")))
+                .filter(routed -> !List.of(pending, router, routed).equals(List.of("file", "file", "memory")))
+                .filter(routed -> !List.of(pending, router, routed).equals(List.of("file", "memory", "file")))
+                .filter(routed -> !List.of(pending, router, routed).equals(List.of("file", "file", "file")))
                 .map(routed -> Arguments.of(pending, router, routed))));
     }
 

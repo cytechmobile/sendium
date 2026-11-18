@@ -34,8 +34,10 @@ public class StandaloneMessageStorage {
     void start(@Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) StartupEvent event, MessageStorageProfile profile) {
         logger.info("messageStorage|configured|profile:{}", profile);
         if ("file".equals(profile.pending())) {
-            logger.warn("messageStorage|durabilityLimited|pending:processRestart|routing:repeatedAfterRestart" +
-                    "|powerLoss:notGuaranteed|exactlyOnce:notGuaranteed");
+            logger.warn("messageStorage|durabilityLimited|pending:processRestart|selection:{}|routing:{}" +
+                    "|powerLoss:notGuaranteed|exactlyOnce:notGuaranteed",
+                    "file".equals(profile.routerQueue()) ? "restoredAfterRestart" : "repeatedAfterRestart",
+                    "file".equals(profile.routedWork()) ? "restoredAfterRestart" : "repeatedAfterRestart");
         } else {
             logger.warn("messageStorage|nonDurable|restart:acceptedAndInFlightMessagesMayBeLost");
         }

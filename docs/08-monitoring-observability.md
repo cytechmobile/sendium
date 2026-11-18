@@ -123,6 +123,33 @@ sum by (provider) (rate(sendium_sms_provider_response_seconds_sum[5m]))
 sum by (provider) (rate(sendium_sms_provider_response_seconds_count[5m]))
 ```
 
+### File-Backed Outbound Storage
+
+File stages use `sendium.sms.storage.operation` timers (Prometheus
+`sendium_sms_storage_operation_seconds_count` / `_sum`) with only `backend`, `operation`, `outcome`
+and `reason` labels. Selected operations use `selected_*`; routed operations use `routed_*`, including
+record, take, release, complete and forget. There are no message/source/work IDs, account IDs or paths
+in these labels. Operation counts are activity, not durable backlog counts.
+
+The memory occupancy gauges above do **not** enumerate file-backed selected/routed records. Missing
+memory series after enabling a file backend are not evidence of zero backlog. A hybrid profile can
+still expose its memory-stage gauges. Pair file operation errors with `sendium-sms-storage` readiness,
+startup recovery diagnostics and disk byte/inode/permission monitoring. Zero accepted sources alone
+does not prove that terminal routed cleanup finished.
+
+```promql
+# File-stage operation failures per second.
+sum by (operation, reason) (
+  rate(sendium_sms_storage_operation_seconds_count{backend="file",outcome="error"}[5m])
+)
+```
+
+Readiness stays DOWN until storage validation, downstream ownership reconciliation and startup terminal
+cleanup finish. Readiness being UP does not mean the backlog is empty or every recorded destination
+has an available worker. A removed destination can retain work/capacity without making storage corrupt.
+Use the [file-storage operations guide](16-filesystem-pending-storage.md#bounds-and-capacity)
+for capacity interpretation and recovery; do not delete records to silence an alert.
+
 ### Implemented Receipt Event Counters
 
 `sendium_dlr_outcomes_total{provider,outcome="delivered|failed|expired"}` counts tracked final provider receipts only when the managed PostgreSQL storage boundary returns a newly committed transition. This covers synchronous resolution and batched processing. A duplicate/unknown receipt returning no transition, failed transaction, admission of a correlation, or provider submission rejection does not increment it. Provider-reported expiry is `expired`; local retention deletion is not a receipt outcome. Delivered includes the existing delivered/seen mappings; other terminal failures use `failed`. The unit is a resolved correlation message record, following existing multipart aggregation, not necessarily one unique customer SMS.

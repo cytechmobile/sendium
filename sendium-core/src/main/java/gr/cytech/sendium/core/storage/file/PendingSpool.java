@@ -1,8 +1,14 @@
 package gr.cytech.sendium.core.storage.file;
 
+import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
+import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.file.PendingTerminalCodec.Intent;
+import gr.cytech.sendium.core.storage.file.RoutedRecordCodec.StoredWork;
+import gr.cytech.sendium.core.storage.file.RoutedRecordCodec.Terminal;
 import gr.cytech.sendium.core.storage.pending.MultipartKey;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
@@ -32,6 +38,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 
 import static gr.cytech.sendium.core.storage.OutboundStage.Role.PENDING;
+import static gr.cytech.sendium.core.storage.OutboundStage.Role.ROUTED_WORK;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.OWNERSHIP_CONFLICT;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNAVAILABLE;
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNSUPPORTED;
@@ -41,7 +48,9 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * Callers must finish recovery/indexing before admission. No host/power-loss durability is claimed.
  */
 public final class PendingSpool implements AutoCloseable {
-    private static final String FORMAT = "sendium-pending-spool:2\n";
+    private static final String FORMAT = "sendium-pending-spool:3\n";
+    private final SelectedRecordCodec selectedCodec = new SelectedRecordCodec();
+    private final RoutedRecordCodec routedCodec = new RoutedRecordCodec();
     private final Path root;
     private final PendingRecordCodec codec = new PendingRecordCodec();
     private FileChannel owner;
@@ -53,6 +62,8 @@ public final class PendingSpool implements AutoCloseable {
     private HeldPendingPublications publications;
     private PendingTerminalJournal terminal;
     private AcceptedSourceTraversal acceptedTraversal;
+    private Object routedOwner;
+    private long routedCount;
 
     public PendingSpool(Path root) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
@@ -238,7 +249,33 @@ public final class PendingSpool implements AutoCloseable {
         if (retained.isEmpty()) {
             return 0;
         }
-        Intent intent = new Intent(UUID.randomUUID(), sources, groups);
+        var selections = new HashSet<UUID>();
+        try {
+            for (SourceId source : sources) {
+                Optional<SelectionId> selectedOwner = index.selectedOwner(source);
+                if (selectedOwner.isPresent()) {
+                    Selected<StandardMessage> selected = readSelected(selectedPath(selectedOwner.orElseThrow()));
+                    if (!sources.containsAll(selected.sources())) {
+                        throw new OutboundStorageException(PENDING, OutboundStorageException.Reason.INVALID_TRANSITION,
+                                "pendingCompletion|error|reason:incompleteSelectedSourceSet");
+                    }
+                    selections.add(selected.id().value());
+                }
+                var routed = index.routedOwner(source);
+                if (routed.isPresent()) {
+                    StoredWork work = readRouted(routedPath(routed.orElseThrow().work()));
+                    if (!sources.containsAll(work.sources()) || !Files.exists(routedTerminalPath(work.work().id()), LinkOption.NOFOLLOW_LINKS)) {
+                        throw new OutboundStorageException(PENDING, OutboundStorageException.Reason.INVALID_TRANSITION,
+                                "pendingCompletion|error|reason:routedWorkNotTerminalOrIncomplete");
+                    }
+                    requireMatchingTerminal(work);
+                }
+            }
+        } catch (IOException failure) {
+            ready = false;
+            throw unavailable("pendingCompletion|error|reason:selectedOwnerLookupFailed", failure);
+        }
+        Intent intent = new Intent(UUID.randomUUID(), sources, groups, selections);
         try {
             terminal.publish(intent);
             for (UUID group : groups) {
@@ -262,6 +299,12 @@ public final class PendingSpool implements AutoCloseable {
                 if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
                     terminal.forgetGroup(group);
                 }
+            }
+            for (UUID selection : selections) {
+                SelectionId id = new SelectionId(selection);
+                Selected<StandardMessage> selected = readSelected(selectedPath(id));
+                Files.delete(selectedPath(id));
+                index.removeSelected(id, selected.sources());
             }
             terminal.finish(intent.id());
             return retained.size();
@@ -403,7 +446,8 @@ public final class PendingSpool implements AutoCloseable {
                 } else if (name.equals("sources")) {
                     throw new OutboundStorageException(PENDING, UNSUPPORTED, "pendingRecovery|error|reason:unsupportedSpoolFormat");
                 } else if (!name.equals("owner.lock") && !name.equals("format") && !name.equals("accepted") &&
-                        !name.equals("derived") && !name.equals("terminal") && !name.equals("closed-groups")) {
+                        !name.equals("derived") && !name.equals("terminal") && !name.equals("closed-groups") && !name.equals("selected") &&
+                        !name.equals("routed") && !name.equals("routed-terminal")) {
                     throw unavailable("pendingRecovery|error|reason:unexpectedSpoolEntry", null);
                 }
             }
@@ -412,7 +456,10 @@ public final class PendingSpool implements AutoCloseable {
             // A crash before initial format publication cannot have admitted source files.
             if (Files.exists(root.resolve("accepted"), LinkOption.NOFOLLOW_LINKS) ||
                     Files.exists(root.resolve("terminal"), LinkOption.NOFOLLOW_LINKS) ||
-                    Files.exists(root.resolve("closed-groups"), LinkOption.NOFOLLOW_LINKS)) {
+                    Files.exists(root.resolve("closed-groups"), LinkOption.NOFOLLOW_LINKS) ||
+                    Files.exists(root.resolve("selected"), LinkOption.NOFOLLOW_LINKS) ||
+                    Files.exists(root.resolve("routed"), LinkOption.NOFOLLOW_LINKS) ||
+                    Files.exists(root.resolve("routed-terminal"), LinkOption.NOFOLLOW_LINKS)) {
                 throw unavailable("pendingRecovery|error|reason:missingFormatMarker", null);
             }
             publishBytes(format, FORMAT.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -435,6 +482,16 @@ public final class PendingSpool implements AutoCloseable {
         Files.delete(probe);
         terminal = new PendingTerminalJournal(root);
         terminal.validate();
+        Path selected = root.resolve("selected");
+        Files.createDirectories(selected);
+        requireDirectory(selected);
+        visitSelected(path -> readSelected(path));
+        for (String namespace : new String[]{"routed", "routed-terminal"}) {
+            Files.createDirectories(root.resolve(namespace));
+            requireDirectory(root.resolve(namespace));
+        }
+        visitStage("routed", path -> readRouted(path));
+        visitStage("routed-terminal", path -> readRoutedTerminal(path));
         // Validate committed intent/source envelopes first; replay precedes cross-record group checks.
         terminal.forEachIntent(this::validateIntentSources);
         // Directory enumeration is weakly consistent while entries are removed: confirm it is empty.
@@ -450,6 +507,13 @@ public final class PendingSpool implements AutoCloseable {
                         requireFile(path);
                         Files.delete(path);
                     }
+                }
+                for (UUID selection : intent.selections()) {
+                    Files.deleteIfExists(selectedPath(new SelectionId(selection)));
+                }
+                for (UUID work : intent.routedWork()) {
+                    Files.deleteIfExists(routedPath(new WorkId(work)));
+                    Files.deleteIfExists(routedTerminalPath(new WorkId(work)));
                 }
                 terminal.finish(intent.id());
             });
@@ -472,6 +536,36 @@ public final class PendingSpool implements AutoCloseable {
                 throw unavailable("pendingRecovery|error|sourceId:" + source.value() + "|reason:indexRebuildFailed", failure);
             }
             recoveredSources++;
+        });
+        visitSelected(path -> {
+            Selected<StandardMessage> record = readSelected(path);
+            validateSelectedSources(record);
+            try {
+                index.addSelected(record.id(), record.sources());
+            } catch (IOException failure) {
+                throw unavailable("selectedRecovery|error|reason:ownershipRebuildFailed", failure);
+            }
+        });
+        visitStage("routed", path -> {
+            StoredWork record = readRouted(path);
+            boolean completed = Files.exists(routedTerminalPath(record.work().id()), LinkOption.NOFOLLOW_LINKS);
+            if (completed) {
+                requireMatchingTerminal(record);
+            }
+            validateRoutedSources(record, completed);
+            try {
+                index.addRouted(record, completed);
+                index.unscheduleSelected(record.work().selection());
+            } catch (IOException failure) {
+                throw routedFailure("ownershipRebuildFailed", failure);
+            }
+            routedCount++;
+        });
+        visitStage("routed-terminal", path -> {
+            Terminal fact = readRoutedTerminal(path);
+            if (Files.notExists(routedPath(fact.id()), LinkOption.NOFOLLOW_LINKS)) {
+                throw routedFailure("orphanTerminalMarker", null);
+            }
         });
         terminal.forEachClosedGroup(group -> {
             if (index.multipart().sourcesAfter(group, null, 1).isEmpty()) {
@@ -525,12 +619,380 @@ public final class PendingSpool implements AutoCloseable {
     }
 
     private void validateIntentSources(Intent intent) {
+        for (UUID work : intent.routedWork()) {
+            WorkId id = new WorkId(work);
+            Path path = routedPath(id);
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && !intent.sources().containsAll(readRouted(path).sources())) {
+                throw routedFailure("incompleteCleanupAuthorization", null);
+            }
+            Path marker = routedTerminalPath(id);
+            if (Files.exists(marker, LinkOption.NOFOLLOW_LINKS) && !intent.sources().containsAll(readRoutedTerminal(marker).sources())) {
+                throw routedFailure("incompleteCleanupAuthorization", null);
+            }
+        }
+        for (UUID selection : intent.selections()) {
+            Path path = selectedPath(new SelectionId(selection));
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && !intent.sources().containsAll(readSelected(path).sources())) {
+                throw unavailable("selectedCleanup|error|reason:incompleteAuthorization", null);
+            }
+        }
         for (SourceId source : intent.sources()) {
             Path path = sourcePath(source);
             if (!Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
                 PendingSourceRecord record = read(path, source);
                 if (record.multipart() != null && !intent.closedGroups().contains(record.multipart().groupId())) {
                     throw unavailable("pendingTerminalRecovery|error|intentId:" + intent.id() + "|reason:missingGroupClosure", null);
+                }
+            }
+        }
+    }
+
+    synchronized Optional<SelectionId> selectedOwner(SourceId source) {
+        // A routed record retains its selection identity even with a volatile selected backend.
+        return multipartIndex(() -> {
+            Optional<SelectionId> selected = index.selectedOwner(source);
+            return selected.isPresent() ? selected : index.routedOwner(source).map(FolderPendingIndex.RoutedOwner::selection);
+        });
+    }
+
+    synchronized List<SelectionId> selectedCandidates(int limit) {
+        return multipartIndex(() -> index.selectedReady(limit));
+    }
+
+    synchronized void unscheduleSelected(SelectionId id) {
+        multipartIndex(() -> {
+            index.unscheduleSelected(id);
+            return null;
+        });
+    }
+
+    synchronized boolean selectedScheduled(SelectionId id) {
+        return multipartIndex(() -> index.selectedScheduled(id));
+    }
+
+    synchronized Optional<Selected<StandardMessage>> findSelected(SelectionId id) {
+        requireReady();
+        Path path = selectedPath(id);
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(readSelected(path));
+        } catch (RuntimeException failure) {
+            ready = false;
+            throw failure;
+        }
+    }
+
+    synchronized void publishSelected(Selected<StandardMessage> selected) {
+        requireReady();
+        byte[] bytes = selectedCodec.encode(selected);
+        try {
+            validateSelectedSources(selected);
+            for (SourceId source : selected.sources()) {
+                if (index.selectedOwner(source).isPresent() || index.routedOwner(source).isPresent() || find(source).isEmpty()) {
+                    throw unavailable("selectedPublication|error|reason:invalidSourceOwnership", null);
+                }
+            }
+            Path path = selectedPath(selected.id());
+            Files.createDirectories(path.getParent());
+            requireDirectory(path.getParent());
+            if (!publishBytes(path, bytes)) {
+                throw unavailable("selectedPublication|error|reason:identityConflict", null);
+            }
+            index.addSelected(selected.id(), selected.sources());
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            throw unavailable("selectedPublication|error|reason:commitFailed", failure);
+        }
+    }
+
+    private void validateSelectedSources(Selected<StandardMessage> selected) {
+        SourceId representative = new SourceId(UUID.fromString(selected.message().serial));
+        Path path = sourcePath(representative);
+        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw unavailable("selectedRecovery|error|reason:missingSource", null);
+        }
+        PendingSourceRecord first = read(path, representative);
+        if (first.multipart() == null) {
+            if (selected.sources().size() != 1 || selected.message().reassembledParts != null) {
+                throw unavailable("selectedRecovery|error|reason:invalidSourceSet", null);
+            }
+            return;
+        }
+        var originals = selected.message().reassembledParts == null ? Set.of(representative) :
+                selected.message().reassembledParts.stream().map(id -> new SourceId(UUID.fromString(id)))
+                        .collect(java.util.stream.Collectors.toSet());
+        for (SourceId source : selected.sources()) {
+            Path accepted = sourcePath(source);
+            if (Files.notExists(accepted, LinkOption.NOFOLLOW_LINKS)) {
+                throw unavailable("selectedRecovery|error|reason:missingSource", null);
+            }
+            MultipartMembership member = read(accepted, source).multipart();
+            if (member == null || !member.groupId().equals(first.multipart().groupId()) || !originals.contains(member.originalSource())) {
+                throw unavailable("selectedRecovery|error|reason:invalidSourceSet", null);
+            }
+        }
+        try {
+            SourceId cursor = null;
+            while (true) {
+                List<SourceId> page = index.multipart().sourcesAfter(first.multipart().groupId(), cursor, 128);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (SourceId source : page) {
+                    MultipartMembership member = read(sourcePath(source), source).multipart();
+                    if (originals.contains(member.originalSource()) && !selected.sources().contains(source)) {
+                        throw unavailable("selectedRecovery|error|reason:incompleteSourceSet", null);
+                    }
+                }
+                cursor = page.getLast();
+            }
+        } catch (IOException failure) {
+            throw unavailable("selectedRecovery|error|reason:membershipLookupFailed", failure);
+        }
+    }
+
+    synchronized void attachRouted(Object claimant) {
+        requireReady();
+        if (routedOwner != null && routedOwner != claimant) {
+            throw new OutboundStorageException(ROUTED_WORK, OWNERSHIP_CONFLICT,
+                    "routedOwnership|error|reason:alreadyOwned");
+        }
+        routedOwner = Objects.requireNonNull(claimant, "claimant");
+    }
+
+    synchronized long routedCount() {
+        requireReady();
+        return routedCount;
+    }
+
+    synchronized boolean hasSelectedRecords() {
+        return multipartIndex(() -> {
+            try (var buckets = Files.newDirectoryStream(root.resolve("selected"))) {
+                for (Path bucket : buckets) {
+                    try (var entries = Files.newDirectoryStream(bucket)) {
+                        if (entries.iterator().hasNext()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+    }
+
+    synchronized Optional<SelectionId> routedSourceOwner(SourceId source) {
+        return routedOperation(() -> index.routedOwner(source).map(FolderPendingIndex.RoutedOwner::selection));
+    }
+
+    synchronized Optional<StoredWork> routedForSelection(SelectionId selection) {
+        return routedOperation(() -> {
+            Optional<WorkId> work = index.routedSelection(selection);
+            if (work.isEmpty()) {
+                return Optional.empty();
+            }
+            StoredWork record = readRouted(routedPath(work.orElseThrow()));
+            if (!record.work().selection().equals(selection)) {
+                throw routedFailure("selectionReferenceMismatch", null);
+            }
+            return Optional.of(record);
+        });
+    }
+
+    synchronized StoredWork routedWork(WorkId id) {
+        return routedOperation(() -> readRouted(routedPath(id)));
+    }
+
+    synchronized Optional<Terminal> routedTerminal(WorkId id) {
+        return routedOperation(() -> Files.notExists(routedTerminalPath(id), LinkOption.NOFOLLOW_LINKS) ?
+                Optional.empty() : Optional.of(readRoutedTerminal(routedTerminalPath(id))));
+    }
+
+    synchronized List<WorkId> routedCandidates(String destination, int limit) {
+        return routedOperation(() -> index.routedReady(destination, limit));
+    }
+
+    synchronized List<WorkId> terminalRoutedAfter(WorkId after, int limit) {
+        return routedOperation(() -> index.terminalRoutedAfter(after, limit));
+    }
+
+    synchronized void unscheduleRouted(StoredWork record) {
+        routedOperation(() -> {
+            index.unscheduleRouted(record);
+            return null;
+        });
+    }
+
+    synchronized void publishRouted(StoredWork record) {
+        requireReady();
+        byte[] bytes = routedCodec.encode(record);
+        routedOperation(() -> {
+            validateRoutedSources(record, false);
+            Path path = routedPath(record.work().id());
+            Files.createDirectories(path.getParent());
+            requireDirectory(path.getParent());
+            if (!publishBytes(path, bytes)) {
+                throw routedFailure("identityConflict", null);
+            }
+            index.addRouted(record, false);
+            index.unscheduleSelected(record.work().selection());
+            routedCount++;
+            return null;
+        });
+    }
+
+    synchronized Terminal completeRouted(StoredWork record) {
+        return routedOperation(() -> {
+            Terminal fact = record.terminal();
+            Path path = routedTerminalPath(fact.id());
+            Files.createDirectories(path.getParent());
+            requireDirectory(path.getParent());
+            if (!publishBytes(path, routedCodec.encodeTerminal(fact))) {
+                requireMatchingTerminal(record);
+            }
+            index.markRoutedTerminal(record);
+            return fact;
+        });
+    }
+
+    synchronized void forgetRouted(StoredWork record) {
+        routedOperation(() -> {
+            // The terminal fact suppresses sending; this intent authorizes deleting that fact too.
+            requireMatchingTerminal(record);
+            Intent intent = new Intent(UUID.randomUUID(), record.sources(), Set.of(), Set.of(), Set.of(record.work().id().value()));
+            terminal.publish(intent);
+            Files.delete(routedPath(record.work().id()));
+            Files.delete(routedTerminalPath(record.work().id()));
+            index.removeRouted(record);
+            terminal.finish(intent.id());
+            routedCount--;
+            return null;
+        });
+    }
+
+    private void validateRoutedSources(StoredWork record, boolean completed) {
+        try {
+            for (SourceId source : record.sources()) {
+                if (!completed && Files.notExists(sourcePath(source), LinkOption.NOFOLLOW_LINKS)) {
+                    throw routedFailure("missingSource", null);
+                }
+                Optional<SelectionId> selected = index.selectedOwner(source);
+                if (selected.isPresent() && !selected.orElseThrow().equals(record.work().selection())) {
+                    throw routedFailure("conflictingSelectedOwner", null);
+                }
+            }
+            Path selected = selectedPath(record.work().selection());
+            if (Files.exists(selected, LinkOption.NOFOLLOW_LINKS) && !readSelected(selected).sources().equals(record.sources())) {
+                throw routedFailure("selectedSourcesMismatch", null);
+            }
+        } catch (IOException failure) {
+            throw routedFailure("sourceLookupFailed", failure);
+        }
+    }
+
+    private void requireMatchingTerminal(StoredWork record) {
+        if (!readRoutedTerminal(routedTerminalPath(record.work().id())).equals(record.terminal())) {
+            throw routedFailure("terminalIdentityMismatch", null);
+        }
+    }
+
+    private StoredWork readRouted(Path path) {
+        try {
+            requireFile(path);
+            StoredWork record = routedCodec.decode(Files.readAllBytes(path));
+            if (!routedPath(record.work().id()).equals(path)) {
+                throw routedFailure("identityMismatch", null);
+            }
+            return record;
+        } catch (IOException failure) {
+            throw routedFailure("recordReadFailed", failure);
+        }
+    }
+
+    private Terminal readRoutedTerminal(Path path) {
+        try {
+            requireFile(path);
+            Terminal fact = routedCodec.decodeTerminal(Files.readAllBytes(path));
+            if (!routedTerminalPath(fact.id()).equals(path)) {
+                throw routedFailure("terminalIdentityMismatch", null);
+            }
+            return fact;
+        } catch (IOException failure) {
+            throw routedFailure("terminalReadFailed", failure);
+        }
+    }
+
+    private Path routedPath(WorkId work) {
+        String id = work.value().toString();
+        return root.resolve("routed").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+    }
+
+    private Path routedTerminalPath(WorkId work) {
+        String id = work.value().toString();
+        return root.resolve("routed-terminal").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+    }
+
+    private <T> T routedOperation(IndexOperation<T> operation) {
+        requireReady();
+        try {
+            return operation.run();
+        } catch (IOException | RuntimeException failure) {
+            ready = false;
+            if (failure instanceof OutboundStorageException storage) {
+                throw storage;
+            }
+            throw routedFailure("spoolOperationFailed", failure);
+        }
+    }
+
+    private static OutboundStorageException routedFailure(String reason, Throwable cause) {
+        return new OutboundStorageException(ROUTED_WORK, UNAVAILABLE,
+                "routedRecovery|error|reason:" + reason, cause);
+    }
+
+    private Path selectedPath(SelectionId selection) {
+        String id = selection.value().toString();
+        return root.resolve("selected").resolve(id.substring(0, 2)).resolve(id + ".cbor");
+    }
+
+    private Selected<StandardMessage> readSelected(Path path) {
+        try {
+            requireFile(path);
+            Selected<StandardMessage> selected = selectedCodec.decode(Files.readAllBytes(path));
+            if (!selectedPath(selected.id()).equals(path)) {
+                throw unavailable("selectedRecovery|error|reason:identityMismatch", null);
+            }
+            return selected;
+        } catch (IOException failure) {
+            throw unavailable("selectedRecovery|error|reason:readFailed", failure);
+        }
+    }
+
+    private void visitSelected(Consumer<Path> action) throws IOException {
+        visitStage("selected", action);
+    }
+
+    private void visitStage(String namespace, Consumer<Path> action) throws IOException {
+        Path directory = root.resolve(namespace);
+        String operation = namespace.equals("selected") ? "selectedRecovery" : "routedRecovery";
+        requireDirectory(directory);
+        try (var buckets = Files.newDirectoryStream(directory)) {
+            for (Path bucket : buckets) {
+                if (!bucket.getFileName().toString().matches("[0-9a-f]{2}")) {
+                    throw unavailable(operation + "|error|reason:invalidBucket", null);
+                }
+                requireDirectory(bucket);
+                try (var records = Files.newDirectoryStream(bucket)) {
+                    for (Path path : records) {
+                        String name = path.getFileName().toString();
+                        if (temporary(name)) {
+                            deleteTemporary(path);
+                        } else {
+                            sourceName(name);
+                            action.accept(path);
+                        }
+                    }
                 }
             }
         }
