@@ -5,11 +5,18 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.quarkus.arc.InjectableInstance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.Optional;
 
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -50,6 +57,67 @@ class ManagedDlrStorageTest {
         assertThatThrownBy(storage::initialize)
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("requires the active 'dlr' datasource and Flyway");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(delimiter = ';', value = {
+        "missing path; file; ; P7D; false; reason:missingPath",
+        "blank path; file; '  '; P7D; false; reason:missingPath",
+        "zero retention; file; dlr; PT0S; false; reason:invalidFailedRetention",
+        "negative retention; file; dlr; -PT1S; false; reason:invalidFailedRetention",
+        "active postgresql override; file; dlr; P7D; true; reason:postgresqlDatasourceActive",
+        "memory selector; memory; dlr; P7D; false; backend:memory|reason:unsupported",
+        "unknown selector; sqlite; dlr; P7D; false; backend:sqlite|reason:unknownBackend",
+        "unsanitized selector; 'x|y'; dlr; P7D; false; backend:x_y|reason:unknownBackend"})
+    void rejectsUnsupportedSelectionsWithoutFallback(String name, String backend, String path, String retention,
+                                                     boolean postgresqlActive, String reason,
+                                                     @TempDir Path root) {
+        when(postgresqlDataSource.getHandle().getBean().isActive()).thenReturn(postgresqlActive);
+        storage.flywayActive = postgresqlActive;
+        storage.flywayMigrateAtStart = postgresqlActive;
+        storage.selectedBackend = backend;
+        storage.filePath = Optional.ofNullable(path).map(value -> value.isBlank() ? value : root.resolve(value).toString());
+        storage.fileFailedRetention = Duration.parse(retention);
+
+        assertThatThrownBy(storage::initialize).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(reason);
+        verify(postgresqlDataSource, never()).get();
+        assertThat(root.resolve("dlr")).doesNotExist();
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource({"same directory, sms, sms", "dlr inside sms, sms/dlr, sms", "sms inside dlr, dlr, dlr/sms"})
+    void rejectsDlrPathOverlappingFilePendingSpool(String name, String dlr, String sms, @TempDir Path root)
+            throws IOException {
+        Path marker = Files.writeString(Files.createDirectories(root.resolve("sms")).resolve("marker"), "sms");
+        storage.selectedBackend = "file";
+        storage.filePath = Optional.of(root.resolve(dlr).toString());
+        storage.pendingBackend = "file";
+        storage.pendingPath = Optional.of(root.resolve(sms).toString());
+
+        assertThatThrownBy(storage::initialize).isInstanceOf(IllegalStateException.class)
+                .hasMessage("dlrStorage|error|backend:file|reason:overlapsPendingPath");
+        assertThat(Files.readString(marker)).isEqualTo("sms");
+        try (var files = Files.list(root.resolve("sms"))) {
+            assertThat(files).containsExactly(marker);
+        }
+    }
+
+    @Test
+    void opensIndependentFileNamespaceBesideFilePendingSpool(@TempDir Path root) {
+        storage.selectedBackend = "file";
+        storage.filePath = Optional.of(root.resolve("dlr").toString());
+        storage.pendingBackend = "file";
+        storage.pendingPath = Optional.of(root.resolve("sms").toString());
+        try {
+            storage.initialize();
+            assertThat(storage.backend()).isEqualTo("file");
+            assertThat(root.resolve("dlr").resolve(FileDlrStorage.DATABASE_FILE)).isRegularFile();
+            assertThat(root.resolve("sms")).doesNotExist();
+            verify(postgresqlDataSource, never()).get();
+        } finally {
+            storage.close();
+        }
     }
 
     @Test
