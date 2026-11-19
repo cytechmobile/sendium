@@ -103,7 +103,9 @@ See the [Docker deployment guide](docs/02-docker-deployment.md) for the complete
 
 For an operational view of SMS traffic, provider activity and application health, use the optional [Prometheus and Grafana setup](monitoring/README.md). It includes **SMS Operations** and **Application Health** dashboards.
 
-Monitoring starts separately from Sendium and is not downloaded or started by `quick-start.sh`. Use the `monitoring/` files from this repository and follow the setup guide to configure a Prometheus target reachable from its container; Docker network addresses can differ from the host's `localhost:8080`. No monitoring services are required to send SMS.
+Run `sh quick-start.sh --monitoring` to include Prometheus and Grafana on the generated Compose network. Both bind to loopback only: [Prometheus targets](http://127.0.0.1:9090/targets) and [Grafana](http://127.0.0.1:3000). Sign in as `admin` using the password in the generated `.grafana.env` file. No monitoring services are required to send SMS.
+
+Add `--no-start` to generate all selected configuration without starting any services. Standalone scripts download dashboard assets from a pinned Git revision; checkout runs reuse `monitoring/`. See the [Quick Start monitoring lifecycle and troubleshooting](docs/02-docker-deployment.md#optional-quick-start-monitoring) before rerunning or disabling monitoring.
 
 ## 💬 Documentation & Support
 

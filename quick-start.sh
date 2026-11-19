@@ -12,6 +12,9 @@ target_dir=$DEFAULT_TARGET_DIR
 image=$DEFAULT_IMAGE
 start_sendium=true
 force=false
+monitoring=false
+# Standalone scripts use one immutable revision for all monitoring assets.
+monitoring_ref=${SENDIUM_MONITORING_REF:-bea3c4a2fdae346d101e4c41a22008e0e2026343}
 provider=''
 allow_windows_mount=false
 upstream_password_from_environment=${SENDIUM_UPSTREAM_PASSWORD-}
@@ -34,7 +37,8 @@ Options:
   --provider MODE  Provider mode: local, prosms, or custom
   --allow-windows-mount
                   Allow secrets on a WSL-mounted Windows directory
-  --no-start       Generate files without starting Sendium
+  --monitoring     Include local Prometheus and Grafana dashboards
+  --no-start       Generate configuration only; do not start any services
   --force          Replace generated files in a non-empty output directory
   -h, --help       Show this help
 
@@ -47,6 +51,11 @@ External PostgreSQL configuration:
   Set SENDIUM_DLR_POSTGRESQL_JDBC_URL, SENDIUM_DLR_POSTGRESQL_USERNAME,
   and SENDIUM_DLR_POSTGRESQL_PASSWORD together. Otherwise Quick Start creates
   a private PostgreSQL 17 service with a persistent Docker volume.
+
+Monitoring assets:
+  Use adjacent checkout assets when available; otherwise download from the
+  script's pinned Git revision. SENDIUM_MONITORING_REF overrides that revision
+  (commit or release tag). Monitoring ports bind to loopback only.
 EOF
 }
 
@@ -215,6 +224,10 @@ while [ "$#" -gt 0 ]; do
             start_sendium=false
             shift
             ;;
+        --monitoring)
+            monitoring=true
+            shift
+            ;;
         --force)
             force=true
             shift
@@ -271,7 +284,15 @@ case "$(uname -r 2>/dev/null || true)" in
         ;;
 esac
 
-for runtime_dir in conf data logs; do
+generated_files='.sendium.env .gitignore compose.yml conf/credentials.yml conf/smsg.properties conf/routingTable.conf'
+monitoring_assets='grafana/dashboards/sms-operations.json grafana/dashboards/application-health.json grafana/provisioning/dashboards/sendium.yml grafana/provisioning/datasources/prometheus.yml'
+if [ "$monitoring" = true ]; then
+    generated_files="$generated_files .grafana.env monitoring/source.txt monitoring/prometheus.yml"
+    for asset in $monitoring_assets; do
+        generated_files="$generated_files monitoring/$asset"
+    done
+fi
+for runtime_dir in conf data logs monitoring monitoring/grafana monitoring/grafana/dashboards monitoring/grafana/provisioning monitoring/grafana/provisioning/dashboards monitoring/grafana/provisioning/datasources; do
     if [ -L "$target_dir/$runtime_dir" ]; then
         fail "generated directory cannot be a symbolic link: $target_dir/$runtime_dir"
     fi
@@ -280,7 +301,7 @@ for runtime_dir in conf data logs; do
     fi
 done
 
-for generated_file in .sendium.env .gitignore compose.yml conf/credentials.yml conf/smsg.properties conf/routingTable.conf; do
+for generated_file in $generated_files; do
     if [ -L "$target_dir/$generated_file" ]; then
         fail "generated file cannot be a symbolic link: $target_dir/$generated_file"
     fi
@@ -454,7 +475,7 @@ backup_dir="$staging_dir/backup"
 
 cleanup_quick_start() {
     if [ "$install_started" = true ] && [ "$install_complete" = false ]; then
-        for generated_file in .sendium.env .gitignore compose.yml conf/credentials.yml conf/smsg.properties conf/routingTable.conf; do
+        for generated_file in $generated_files; do
             if [ -f "$backup_dir/$generated_file" ]; then
                 mv -f "$backup_dir/$generated_file" "$target_dir/$generated_file"
             else
@@ -467,6 +488,58 @@ cleanup_quick_start() {
     fi
 }
 trap cleanup_quick_start 0
+
+if [ "$monitoring" = true ]; then
+    case "$monitoring_ref" in
+        ''|*[!A-Za-z0-9._-]*) fail "SENDIUM_MONITORING_REF must be a commit or release tag" ;;
+    esac
+    script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+    asset_source="https://raw.githubusercontent.com/cytechmobile/sendium/$monitoring_ref/monitoring"
+    if [ -d "$script_dir/monitoring/grafana/dashboards" ]; then
+        asset_source="$script_dir/monitoring"
+        printf 'Monitoring assets: local checkout %s\n' "$asset_source"
+    else
+        command -v curl >/dev/null 2>&1 || fail "curl is required to download monitoring assets"
+        printf 'Monitoring assets: Git reference %s\n' "$monitoring_ref"
+    fi
+    mkdir -p "$staging_dir/monitoring/grafana/dashboards" \
+        "$staging_dir/monitoring/grafana/provisioning/dashboards" \
+        "$staging_dir/monitoring/grafana/provisioning/datasources"
+    for asset in $monitoring_assets; do
+        if [ "$asset_source" = "$script_dir/monitoring" ]; then
+            cp "$asset_source/$asset" "$staging_dir/monitoring/$asset" || fail "required monitoring asset unavailable: $asset"
+        else
+            curl -fsS --connect-timeout 10 --max-time 60 \
+                "$asset_source/$asset" -o "$staging_dir/monitoring/$asset" || fail "could not download monitoring asset: $asset"
+        fi
+        [ -s "$staging_dir/monitoring/$asset" ] || fail "empty monitoring asset: $asset"
+        chmod 644 "$staging_dir/monitoring/$asset"
+    done
+    # Containers must be able to traverse their read-only configuration mounts.
+    find "$staging_dir/monitoring" -type d -exec chmod 755 {} \;
+    printf '%s\n' "$asset_source" > "$staging_dir/monitoring/source.txt"
+    cat > "$staging_dir/monitoring/prometheus.yml" <<'EOF'
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: sendium
+    metrics_path: /q/metrics
+    static_configs:
+      - targets: ['sendium:8080']
+EOF
+    chmod 644 "$staging_dir/monitoring/prometheus.yml"
+    if [ -f "$target_dir/.grafana.env" ]; then
+        grafana_password=$(sed -n "s/^GF_SECURITY_ADMIN_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$target_dir/.grafana.env")
+        [ "${#grafana_password}" -eq 64 ] || fail "restore the existing .grafana.env; Grafana credentials cannot be recovered"
+    elif [ -f "$target_dir/monitoring/source.txt" ] || \
+        { [ -f "$target_dir/compose.yml" ] && grep -q 'grafana-data:' "$target_dir/compose.yml"; }; then
+        fail "restore the existing .grafana.env before regenerating monitoring"
+    else
+        grafana_password=$(generate_secret 32)
+    fi
+    printf "GF_SECURITY_ADMIN_USER='admin'\nGF_SECURITY_ADMIN_PASSWORD='%s'\n" "$grafana_password" > "$staging_dir/.grafana.env"
+    chmod 600 "$staging_dir/.grafana.env"
+fi
 
 http_user='sendium-http'
 smpp_user='sendium-smpp'
@@ -502,6 +575,7 @@ fi
 
 cat > "$staging_dir/.gitignore" <<'EOF'
 .sendium.env
+.grafana.env
 conf/credentials.yml
 conf/smsg.properties
 data/
@@ -625,12 +699,46 @@ cat >> "$staging_dir/compose.yml" <<'EOF'
       - ./logs:/work/logs
 EOF
 
-if [ "$external_database" != true ]; then
+if [ "$monitoring" = true ]; then
     cat >> "$staging_dir/compose.yml" <<'EOF'
 
-volumes:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:12.1.0
+    env_file:
+      - ./.grafana.env
+    environment:
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+EOF
+fi
+
+if [ "$external_database" != true ] || [ "$monitoring" = true ]; then
+    printf '\nvolumes:\n' >> "$staging_dir/compose.yml"
+fi
+if [ "$external_database" != true ]; then
+    cat >> "$staging_dir/compose.yml" <<'EOF'
   postgres-data:
 EOF
+fi
+if [ "$monitoring" = true ]; then
+    printf '  prometheus-data:\n  grafana-data:\n' >> "$staging_dir/compose.yml"
 fi
 
 chmod 600 \
@@ -642,8 +750,9 @@ chmod 600 \
     "$staging_dir/conf/routingTable.conf"
 
 mkdir -p "$backup_dir/conf"
-for generated_file in .sendium.env .gitignore compose.yml conf/credentials.yml conf/smsg.properties conf/routingTable.conf; do
+for generated_file in $generated_files; do
     if [ -f "$target_dir/$generated_file" ]; then
+        mkdir -p "$backup_dir/$(dirname "$generated_file")"
         cp -p "$target_dir/$generated_file" "$backup_dir/$generated_file"
     fi
 done
@@ -658,12 +767,15 @@ fi
 
 install_started=true
 
-mv -f "$staging_dir/.sendium.env" "$target_dir/.sendium.env"
-mv -f "$staging_dir/.gitignore" "$target_dir/.gitignore"
-mv -f "$staging_dir/compose.yml" "$target_dir/compose.yml"
-mv -f "$staging_dir/conf/credentials.yml" "$target_dir/conf/credentials.yml"
-mv -f "$staging_dir/conf/smsg.properties" "$target_dir/conf/smsg.properties"
-mv -f "$staging_dir/conf/routingTable.conf" "$target_dir/conf/routingTable.conf"
+for generated_file in $generated_files; do
+    mkdir -p "$target_dir/$(dirname "$generated_file")"
+    mv -f "$staging_dir/$generated_file" "$target_dir/$generated_file"
+done
+if [ "$monitoring" = true ]; then
+    for runtime_dir in monitoring monitoring/grafana monitoring/grafana/dashboards monitoring/grafana/provisioning monitoring/grafana/provisioning/dashboards monitoring/grafana/provisioning/datasources; do
+        chmod 755 "$target_dir/$runtime_dir"
+    done
+fi
 
 chmod 600 \
     "$target_dir/.sendium.env" \
@@ -679,6 +791,25 @@ trap - 0
 
 printf '\nSendium runtime generated in %s\n' "$absolute_target"
 printf 'Local credentials: %s\n' "$absolute_target/.sendium.env"
+if [ "$monitoring" = true ]; then
+    printf '\nMonitoring (local-only):\n'
+    printf '  Prometheus targets: http://127.0.0.1:9090/targets\n'
+    printf '  SMS Operations: http://127.0.0.1:3000/d/sendium-sms-operations\n'
+    printf '  Application Health: http://127.0.0.1:3000/d/sendium-application-health\n'
+    printf 'Grafana login: admin; password is in %s/.grafana.env (do not share this file).\n' "$absolute_target"
+    printf 'Asset source recorded in %s/monitoring/source.txt\n' "$absolute_target"
+    printf 'Stop monitoring without deleting history:\n'
+    printf '  docker compose -f "%s/compose.yml" --project-directory "%s" stop prometheus grafana\n' "$absolute_target" "$absolute_target"
+    printf 'Restart monitoring:\n'
+    printf '  docker compose -f "%s/compose.yml" --project-directory "%s" up -d prometheus grafana\n' "$absolute_target" "$absolute_target"
+elif [ -f "$target_dir/monitoring/source.txt" ]; then
+    printf '\nMonitoring disabled in generated Compose; its files, credentials and data volumes are retained.\n'
+    if [ "$start_sendium" != true ]; then
+        printf 'Generate-only mode leaves existing containers running; apply the printed recreation command to remove monitoring containers.\n'
+    else
+        printf 'The recreation command removes previous monitoring containers, not their data volumes.\n'
+    fi
+fi
 
 printf '\nAfter startup, submit with the native JSON API (replace sender/recipient):\n'
 printf '  set -a\n  . "%s/.sendium.env"\n  set +a\n' "$absolute_target"
@@ -717,15 +848,33 @@ fi
 
 if [ "$force" = true ]; then
     printf '\nRecreating Sendium to apply the regenerated configuration and credentials...\n'
-    docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d --force-recreate --remove-orphans
+    if ! docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d --force-recreate --remove-orphans; then
+        fail "Compose startup failed; check the Docker error above for port conflicts (Sendium: 8080/27777; monitoring: 3000/9090). Stop only conflicting services and retry; do not delete volumes."
+    fi
 else
     printf '\nStarting Sendium...\n'
-    docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d
+    if ! docker compose -f "$absolute_target/compose.yml" --project-directory "$absolute_target" up -d; then
+        fail "Compose startup failed; check the Docker error above for port conflicts (Sendium: 8080/27777; monitoring: 3000/9090). Stop only conflicting services and retry; do not delete volumes."
+    fi
 fi
 
 attempt=0
 while [ "$attempt" -lt 60 ]; do
     if curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/q/health/ready >/dev/null 2>&1; then
+        if [ "$monitoring" = true ]; then
+            monitoring_attempt=0
+            while ! { curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:9090/-/ready >/dev/null 2>&1 && \
+                curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:3000/api/health >/dev/null 2>&1; }; do
+                monitoring_attempt=$((monitoring_attempt + 1))
+                if [ "$monitoring_attempt" -ge 60 ]; then
+                    printf 'Inspect monitoring logs with:\n' >&2
+                    printf '  docker compose -f "%s/compose.yml" --project-directory "%s" logs prometheus grafana\n' "$absolute_target" "$absolute_target" >&2
+                    fail "monitoring startup check timed out; configuration and data were kept"
+                fi
+                sleep 1
+            done
+            printf '\nMonitoring services are ready; the first Sendium scrape may take 15 seconds.\n'
+        fi
         printf '\nSendium is ready.\n'
         printf 'Swagger UI: http://127.0.0.1:8080/swagger-ui\n'
         printf '\nFollow live logs with:\n'

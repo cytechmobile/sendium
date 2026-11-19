@@ -78,6 +78,70 @@ sh quick-start.sh \
   --image cytechmobile/sendium:latest-native
 ```
 
+### Optional Quick Start monitoring
+
+```sh
+sh quick-start.sh --provider local --monitoring
+# Generate all selected files only: no Docker required and no containers touched
+sh quick-start.sh --provider local --monitoring --no-start --directory preview
+```
+
+`--monitoring` adds Prometheus and Grafana to the same Compose project as Sendium,
+with the existing **SMS Operations** and **Application Health** dashboards.
+Prometheus scrapes `sendium:8080/q/metrics` through the Compose network.
+The normal Quick Start is unchanged without this option.
+
+- Prometheus targets: <http://127.0.0.1:9090/targets>
+- SMS Operations: <http://127.0.0.1:3000/d/sendium-sms-operations>
+- Application Health: <http://127.0.0.1:3000/d/sendium-application-health>
+
+Monitoring ports bind only to `127.0.0.1`. Metrics can contain account identifiers;
+do not expose this development stack publicly. Grafana anonymous access and sign-up
+are disabled. Log in as `admin` with the random password in `.grafana.env` inside
+the generated runtime. This restricted, git-ignored file is separate from
+`.sendium.env`, so unrelated containers do not receive Grafana credentials.
+Protect both files and backups; Quick Start never prints their passwords.
+
+Checkout runs copy assets from the adjacent `monitoring/` directory. A standalone
+script downloads both dashboards and provisioning YAML from one pinned repository
+commit. Set `SENDIUM_MONITORING_REF` to a trusted commit or release tag to override
+that reference. The source is printed and saved in `monitoring/source.txt`.
+Downloads have bounded timeouts and must finish before existing generated files
+are replaced. Local checkout assets take precedence over the override.
+Container images are pinned independently in generated Compose.
+
+Rerun with the same `--directory` and `--force --monitoring` to regenerate.
+HTTP/SMPP credentials rotate as usual; Grafana and bundled database passwords
+are retained. If Grafana credentials are missing or malformed, restore
+`.grafana.env` from backup instead of generating a replacement that cannot reset
+the existing Grafana database.
+
+Stop monitoring without deleting history:
+
+```sh
+docker compose -f sendium/compose.yml --project-directory sendium stop prometheus grafana
+docker compose -f sendium/compose.yml --project-directory sendium up -d prometheus grafana
+```
+
+Rerunning with `--force` **without** `--monitoring` removes monitoring services from
+generated Compose; startup removes their old containers as orphans. It preserves
+monitoring files, `.grafana.env`, and named data volumes. Re-enable with
+`--force --monitoring` in the same directory/project to recover history.
+Never use `down --volumes` unless you intend to erase persistent data.
+
+`--no-start` always means generate only for **all** selected services. It neither
+starts nor stops existing containers, even when disabling monitoring. Apply the
+printed `up -d --force-recreate --remove-orphans` command later.
+
+If startup reports a port conflict, inspect the Docker error for the owner of
+3000/9090 (monitoring) or 8080/27777 (Sendium); stop only the conflicting service
+or deliberately edit generated port bindings before starting manually.
+If monitoring fails readiness, inspect `docker compose ... logs prometheus grafana`.
+Allow at least one 15-second scrape interval for Sendium data; native images may
+not expose JVM panels. See the [dashboard guide](../monitoring/README.md) for
+metric semantics. File download errors leave the prior runtime unchanged;
+check connectivity and the selected Git reference, then retry.
+
 ## Manual Deployment
 
 ### Prerequisites
