@@ -363,7 +363,7 @@ final class FileDlrStorage implements DlrStorageBackend {
                     prepareAccepted(accepted.message(), accepted.providerName(), accepted.providerMessageId());
                 case ProviderDlrEvent.Rejected rejected -> prepareRejected(rejected.message(), rejected.providerName(),
                     rejected.providerMessageId(), rejected.dlrState(), rejected.errorCode());
-                case ProviderDlrEvent.Receipt ignored -> null;
+                case ProviderDlrEvent.Receipt _ -> null;
             });
         }
         return write("persist provider batch", c -> {
