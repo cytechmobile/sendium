@@ -68,6 +68,20 @@ public class NativeE2eSmoke {
     private static final Duration TIMEOUT = Duration.ofSeconds(90);
     private static final boolean PENDING_RESTART = Boolean.parseBoolean(System.getenv("SENDIUM_E2E_PENDING_RESTART"));
     private static final String STORAGE_PROFILE = storageProfile(System.getenv("SENDIUM_E2E_STORAGE_PROFILE"), PENDING_RESTART);
+    // Test-only selector for the harness; file mode runs its own retained-volume DLR scenarios.
+    private static final String DLR_BACKEND = dlrBackend(System.getenv("SENDIUM_E2E_DLR_BACKEND"), PENDING_RESTART);
+    private static final boolean FILE_DLR = DLR_BACKEND.equals("file");
+
+    static String dlrBackend(String configured, boolean pendingRestart) {
+        String backend = configured == null ? "postgresql" : configured;
+        if (!List.of("postgresql", "file").contains(backend)) {
+            throw new IllegalArgumentException("SENDIUM_E2E_DLR_BACKEND must be postgresql or file");
+        }
+        if (backend.equals("file") && pendingRestart) {
+            throw new IllegalArgumentException("File DLR smoke runs its own restart scenarios; unset SENDIUM_E2E_PENDING_RESTART");
+        }
+        return backend;
+    }
 
     static String storageProfile(String configured, boolean restart) {
         String profile = configured == null ? restart ? "file/memory/memory" : "memory/memory/memory" : configured;
@@ -101,15 +115,23 @@ public class NativeE2eSmoke {
     public static void main(String[] args) throws Exception {
         String containerName = "sendium-e2e-" + UUID.randomUUID().toString().substring(0, 8);
         String spoolVolume = containerName + "-pending";
+        String dlrVolume = containerName + "-dlr";
         Process container = null;
 
+        // File mode fails the first HTTP callback so the persisted retry must survive a replacement.
         try (UpstreamSmppServer upstream = new UpstreamSmppServer(UPSTREAM_SMPP_PORT);
-             CallbackServer callbackServer = new CallbackServer()) {
+             CallbackServer callbackServer = new CallbackServer(FILE_DLR ? 1 : 0)) {
             upstream.start();
             callbackServer.start();
 
             Path workDir = Files.createTempDirectory("sendium-e2e-");
             writeRuntimeConfig(workDir);
+            Path helper = null;
+            if (FILE_DLR) {
+                Process volume = run(List.of("docker", "volume", "create", dlrVolume), true);
+                require(volume.waitFor(30, TimeUnit.SECONDS) && volume.exitValue() == 0, "Cannot create retained DLR volume");
+                helper = FileDlrRestartSupport.stageClasspath(workDir.resolve("helper-classpath"));
+            }
             if (PENDING_RESTART) {
                 Process volume = run(List.of("docker", "volume", "create", spoolVolume), true);
                 require(volume.waitFor(30, TimeUnit.SECONDS) && volume.exitValue() == 0, "Cannot create retained spool volume");
@@ -124,12 +146,16 @@ public class NativeE2eSmoke {
                 }
             }
             container = startSendiumContainer(containerName, workDir);
-            waitForPostgresqlReadiness();
+            waitForDlrReadiness();
             waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
             require(upstream.awaitSessionBound(), "Sendium container did not bind to the upstream SMPP server");
 
             if (PENDING_RESTART) {
                 container = verifyPendingSurvivesReplacement(containerName, workDir, upstream, callbackServer);
+            } else if (FILE_DLR) {
+                container = verifyFileHttpRetrySurvivesReplacement(containerName, workDir, upstream, callbackServer,
+                        helper, dlrVolume);
+                container = verifyFileSmppReplaySurvivesReplacement(containerName, workDir, upstream, helper, dlrVolume);
             } else {
                 container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 1);
                 verifySmppSubmitGetsDeliverSm(upstream, 2);
@@ -145,7 +171,104 @@ public class NativeE2eSmoke {
             if (PENDING_RESTART) {
                 run(List.of("docker", "volume", "rm", spoolVolume), true).waitFor(30, TimeUnit.SECONDS);
             }
+            if (FILE_DLR) {
+                run(List.of("docker", "volume", "rm", dlrVolume), true).waitFor(30, TimeUnit.SECONDS);
+            }
         }
+    }
+
+    private static Process verifyFileHttpRetrySurvivesReplacement(String name, Path workDir, UpstreamSmppServer upstream,
+                                                                  CallbackServer callbacks, Path helper,
+                                                                  String volume) throws Exception {
+        upstream.setAutomaticDelivery(false);
+        try {
+            String dlrUrl = "http://host.docker.internal:" + callbacks.port() + "/dlr?status=%d&id=%I";
+            double batches = successfulStorageOperationCount(get("/q/metrics").body(), "provider_batch");
+            var response = get("/sendsms?username=http-user&password=http-pass&dlr-mask=3&from=http-sender&to=306900000002" +
+                    "&text=" + URLEncoder.encode("file dlr http retry", StandardCharsets.UTF_8) +
+                    "&dlr-url=" + URLEncoder.encode(dlrUrl, StandardCharsets.UTF_8));
+            require(response.statusCode() == HttpURLConnection.HTTP_ACCEPTED, "File-mode HTTP admission failed: " + response.statusCode());
+            String gatewayId = response.body().trim();
+            require(upstream.awaitSubmitCount(1), "Upstream did not receive the file-mode HTTP message");
+            // The provider receipt is withheld until the acceptance and its correlation are committed.
+            awaitSuccessfulStorageOperation("provider_batch", batches);
+
+            require(stopContainer(name), "Cannot forcibly remove the container holding the correlation");
+            startReplacement(name, workDir, upstream);
+            upstream.sendDeliveryReceipt(1);
+            require(callbacks.awaitCallbacks(1), "First HTTP DLR callback was not attempted after replacement");
+            awaitSuccessfulStorageOperation("retry_delivery", 0);
+
+            require(stopContainer(name), "Cannot forcibly remove the container holding the HTTP retry");
+            List<String> rows = inspectDlr(helper, volume);
+            require(rows.size() == 1 && rows.getFirst().startsWith(gatewayId + "|HTTP|PENDING|1|") &&
+                    !rows.getFirst().endsWith("|-"), "Persisted HTTP retry was not retained: " + rows);
+            // The retry interval is fixed at one hour; move only the stored due time to simulate it elapsing.
+            var due = FileDlrRestartSupport.runJava(helper, List.of("-v", volume + ":/work/dlr"),
+                    FileDlrRestartSupport.class.getName(), "makeDue", "/work/dlr");
+            require(due.exitCode() == 0 && due.output().contains("madeDue:1"), "Cannot advance the stored retry: " + due.output());
+            startReplacement(name, workDir, upstream);
+            require(callbacks.awaitCallbacks(2), "Persisted HTTP retry was not delivered after replacement");
+            String retried = callbacks.query(1);
+            require(retried.contains("status=1") && retried.contains("id=" + gatewayId), "Unexpected retried callback: " + retried);
+            awaitSuccessfulStorageOperation("complete_delivery", 0);
+
+            require(stopContainer(name), "Cannot stop the container after HTTP completion");
+            require(inspectDlr(helper, volume).isEmpty(), "Completed HTTP receipt remained in file storage");
+            Process container = startReplacement(name, workDir, upstream);
+            System.out.println("fileDlrHttpRetry|success|image:" + IMAGE + "|backend:file|replacements:3" +
+                    "|callbackAttempts:" + callbacks.count() + "|retainedVolume:true");
+            return container;
+        } finally {
+            upstream.setAutomaticDelivery(true);
+        }
+    }
+
+    private static Process verifyFileSmppReplaySurvivesReplacement(String name, Path workDir, UpstreamSmppServer upstream,
+                                                                   Path helper, String volume) throws Exception {
+        upstream.setAutomaticDelivery(false);
+        try {
+            String gatewayId;
+            double batches = successfulStorageOperationCount(get("/q/metrics").body(), "provider_batch");
+            try (var client = new DownstreamSmppClient()) {
+                client.start();
+                var response = client.sendSms("smpp-sender", "306900000001", "file dlr smpp replay");
+                require(response.getCommandStatus() == SmppConstants.STATUS_OK, "File-mode SMPP admission failed");
+                gatewayId = response.getMessageId();
+                require(upstream.awaitSubmitCount(2), "Upstream did not receive the file-mode SMPP message");
+                awaitSuccessfulStorageOperation("provider_batch", batches);
+            }
+            // The client is now unbound; the provider acknowledgement follows durable resolution.
+            upstream.sendDeliveryReceipt(2);
+
+            require(stopContainer(name), "Cannot forcibly remove the container holding the SMPP receipt");
+            List<String> rows = inspectDlr(helper, volume);
+            require(rows.equals(List.of(gatewayId + "|SMPP|PENDING|0|-")), "Unbound SMPP receipt was not retained: " + rows);
+            startReplacement(name, workDir, upstream);
+            try (var client = new DownstreamSmppClient()) {
+                client.start();
+                DeliverSm replayed = client.awaitDeliverSm();
+                require(replayed != null, "Retained SMPP receipt was not replayed on bind");
+                String body = new String(replayed.getShortMessage(), StandardCharsets.UTF_8);
+                require(body.contains("id:" + gatewayId) && body.contains("DELIVRD"), "Unexpected replayed receipt: " + body);
+                awaitSuccessfulStorageOperation("complete_delivery", 0);
+            }
+            require(stopContainer(name), "Cannot stop the container after SMPP acknowledgement");
+            require(inspectDlr(helper, volume).isEmpty(), "Acknowledged SMPP receipt remained in file storage");
+            Process container = startReplacement(name, workDir, upstream);
+            System.out.println("fileDlrSmppReplay|success|image:" + IMAGE + "|backend:file|replacements:2" +
+                    "|unboundAcrossReplacement:true|retainedVolume:true");
+            return container;
+        } finally {
+            upstream.setAutomaticDelivery(true);
+        }
+    }
+
+    private static List<String> inspectDlr(Path helper, String volume) throws Exception {
+        var result = FileDlrRestartSupport.runJava(helper, List.of("-v", volume + ":/work/dlr"),
+                FileDlrRestartSupport.class.getName(), "inspect", "/work/dlr");
+        require(result.exitCode() == 0, "Cannot inspect retained DLR volume: " + result.output());
+        return result.output().lines().filter(line -> line.startsWith("row:")).map(line -> line.substring(4)).toList();
     }
 
     private static void verifySmppSubmitGetsDeliverSm(UpstreamSmppServer upstream, int expectedSubmitCount) throws Exception {
@@ -201,7 +324,7 @@ public class NativeE2eSmoke {
             int boundSessionsBeforeRestart = upstream.boundSessionCount();
             require(stopContainer(containerName), "Failed to remove Sendium container before restart");
             Process restartedContainer = startSendiumContainer(containerName, workDir);
-            waitForPostgresqlReadiness();
+            waitForDlrReadiness();
             waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
             require(upstream.awaitSessionBoundAfter(boundSessionsBeforeRestart),
                     "Sendium container did not rebind before the HTTP DLR replay");
@@ -228,11 +351,17 @@ public class NativeE2eSmoke {
                 "-v", workDir.resolve("conf").toAbsolutePath() + ":/work/conf",
                 "-v", workDir.resolve("logs").toAbsolutePath() + ":/work/logs",
                 "-e", "QUARKUS_LOG_LEVEL=INFO",
-                "-e", "LOG_LEVEL=INFO",
-                "-e", "SENDIUM_DLR_POSTGRESQL_JDBC_URL=" + POSTGRESQL_JDBC_URL,
-                "-e", "SENDIUM_DLR_POSTGRESQL_USERNAME=" + POSTGRESQL_USERNAME,
-                "-e", "SENDIUM_DLR_POSTGRESQL_PASSWORD=" + POSTGRESQL_PASSWORD
+                "-e", "LOG_LEVEL=INFO"
         ));
+        if (FILE_DLR) {
+            // No PostgreSQL settings at all: file mode must not need them.
+            command.addAll(List.of("-v", containerName + "-dlr:/work/dlr",
+                    "-e", "SENDIUM_DLR_STORAGE_BACKEND=file", "-e", "SENDIUM_DLR_STORAGE_FILE_PATH=/work/dlr"));
+        } else {
+            command.addAll(List.of("-e", "SENDIUM_DLR_POSTGRESQL_JDBC_URL=" + POSTGRESQL_JDBC_URL,
+                    "-e", "SENDIUM_DLR_POSTGRESQL_USERNAME=" + POSTGRESQL_USERNAME,
+                    "-e", "SENDIUM_DLR_POSTGRESQL_PASSWORD=" + POSTGRESQL_PASSWORD));
+        }
         if (PENDING_RESTART) {
             command.addAll(List.of("-v", containerName + "-pending:/work/spool",
                     "-e", "SENDIUM_MESSAGE_PENDING_BACKEND=file", "-e", "SENDIUM_MESSAGE_PENDING_PATH=/work/spool"));
@@ -346,7 +475,7 @@ public class NativeE2eSmoke {
     private static Process startReplacement(String name, Path workDir, UpstreamSmppServer upstream) throws Exception {
         int sessions = upstream.boundSessionCount();
         Process container = startSendiumContainer(name, workDir);
-        waitForPostgresqlReadiness();
+        waitForDlrReadiness();
         waitForPort("localhost", SENDIUM_SMPP_PORT, TIMEOUT);
         require(upstream.awaitSessionBoundAfter(sessions), "Replacement did not bind to provider");
         return container;
@@ -474,7 +603,7 @@ public class NativeE2eSmoke {
         throw new IllegalStateException("Timed out waiting for " + host + ':' + port);
     }
 
-    private static void waitForPostgresqlReadiness() throws Exception {
+    private static void waitForDlrReadiness() throws Exception {
         long deadline = System.nanoTime() + TIMEOUT.toNanos();
         while (System.nanoTime() < deadline) {
             try {
@@ -482,14 +611,14 @@ public class NativeE2eSmoke {
                 String body = response.body().replaceAll("\\s", "");
                 if (response.statusCode() == HttpURLConnection.HTTP_OK
                         && body.contains("\"name\":\"sendium-dlr-storage\"")
-                        && body.contains("\"backend\":\"postgresql\"")) {
+                        && body.contains("\"backend\":\"" + DLR_BACKEND + "\"")) {
                     return;
                 }
             } catch (IOException ignored) {
             }
             Thread.sleep(500);
         }
-        throw new IllegalStateException("Timed out waiting for PostgreSQL-backed Sendium readiness");
+        throw new IllegalStateException("Timed out waiting for " + DLR_BACKEND + "-backed Sendium readiness");
     }
 
     private static void awaitSuccessfulStorageOperation(String operation, double countBeforeSubmission) throws Exception {
@@ -510,9 +639,13 @@ public class NativeE2eSmoke {
     }
 
     static double successfulStorageOperationCount(String metrics, String operation) {
+        return successfulStorageOperationCount(metrics, DLR_BACKEND, operation);
+    }
+
+    static double successfulStorageOperationCount(String metrics, String backend, String operation) {
         return metrics.lines()
                 .filter(line -> line.startsWith("sendium_dlr_storage_operation_seconds_count"))
-                .filter(line -> line.contains("backend=\"postgresql\""))
+                .filter(line -> line.contains("backend=\"" + backend + "\""))
                 .filter(line -> line.contains("operation=\"" + operation + "\""))
                 .filter(line -> line.contains("outcome=\"success\""))
                 .map(line -> line.substring(line.lastIndexOf(' ') + 1))
@@ -574,16 +707,33 @@ public class NativeE2eSmoke {
         private final List<String> queries = Collections.synchronizedList(new ArrayList<>());
         private final HttpServer server;
 
-        private CallbackServer() throws IOException {
+        // The first `failures` callbacks receive HTTP 500, so Sendium must persist and retry them.
+        private CallbackServer(int failures) throws IOException {
             server = HttpServer.create(new InetSocketAddress("0.0.0.0", 0), 0);
             server.createContext("/dlr", exchange -> {
                 queries.add(exchange.getRequestURI().getRawQuery());
                 byte[] body = "ok".getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(200, body.length);
+                exchange.sendResponseHeaders(queries.size() <= failures ? 500 : 200, body.length);
                 exchange.getResponseBody().write(body);
                 exchange.close();
                 latch.countDown();
             });
+        }
+
+        private boolean awaitCallbacks(int expected) throws InterruptedException {
+            long deadline = System.nanoTime() + TIMEOUT.toNanos();
+            while (queries.size() < expected && System.nanoTime() < deadline) {
+                Thread.sleep(100);
+            }
+            return queries.size() >= expected;
+        }
+
+        private String query(int index) {
+            return queries.get(index);
+        }
+
+        private int count() {
+            return queries.size();
         }
 
         private void start() {

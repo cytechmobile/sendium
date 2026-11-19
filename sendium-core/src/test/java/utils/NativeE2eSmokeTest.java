@@ -45,6 +45,38 @@ class NativeE2eSmokeTest {
     }
 
     @Test
+    void dlrBackendDefaultsToThePostgresqlSmoke() {
+        assertThat(NativeE2eSmoke.dlrBackend(null, false)).isEqualTo("postgresql");
+        assertThat(NativeE2eSmoke.dlrBackend(null, true)).isEqualTo("postgresql");
+        assertThat(NativeE2eSmoke.dlrBackend("file", false)).isEqualTo("file");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "memory", "FILE", "file|secret\n"})
+    void rejectsUnsupportedDlrBackendsWithoutEchoingTheInput(String backend) {
+        assertThatThrownBy(() -> NativeE2eSmoke.dlrBackend(backend, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("SENDIUM_E2E_DLR_BACKEND must be postgresql or file");
+    }
+
+    @Test
+    void fileDlrScenariosDoNotCombineWithPendingRestart() {
+        assertThatThrownBy(() -> NativeE2eSmoke.dlrBackend("file", true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("File DLR smoke runs its own restart scenarios; unset SENDIUM_E2E_PENDING_RESTART");
+    }
+
+    @Test
+    void storageOperationCountsAreScopedToTheSelectedBackend() {
+        String metrics = """
+                sendium_dlr_storage_operation_seconds_count{backend="postgresql",operation="provider_batch",outcome="success"} 5.0
+                sendium_dlr_storage_operation_seconds_count{backend="file",operation="provider_batch",outcome="success"} 2.0
+                """;
+        assertThat(NativeE2eSmoke.successfulStorageOperationCount(metrics, "file", "provider_batch")).isEqualTo(2);
+        assertThat(NativeE2eSmoke.successfulStorageOperationCount(metrics, "postgresql", "provider_batch")).isEqualTo(5);
+    }
+
+    @Test
     void absentPortOverrideUsesTheDefault() {
         assertThat(NativeE2eSmoke.smppPort(null)).isEqualTo(27777);
     }
