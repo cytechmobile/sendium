@@ -21,6 +21,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -30,8 +32,8 @@ import java.util.UUID;
 
 /**
  * Local SQLite DLR storage owned by one process. Every operation runs under one monitor, so readers never observe
- * a partially applied transaction. Not selectable yet; provider acceptance, terminal outcomes and batches are
- * implemented, delivery and maintenance operations are not.
+ * a partially applied transaction. Not selectable yet; provider acceptance, terminal outcomes, batches and
+ * fenced delivery attempts are implemented; retention and metric snapshots are not.
  * Underlying file corruption is not guaranteed to be detected (accepted file-storage limitation).
  */
 final class FileDlrStorage implements AutoCloseable {
@@ -39,11 +41,33 @@ final class FileDlrStorage implements AutoCloseable {
     static final String LOCK_FILE = "owner.lock";
     static final int APPLICATION_ID = 0x53444C52; // "SDLR"
     static final int SCHEMA_VERSION = 1;
+    static final String CORRELATION_OWNER_SQL =
+            "SELECT gateway_message_id FROM provider_correlation WHERE provider_name = ? AND provider_message_id = ?";
+    static final String CLEAR_PREVIOUS_OWNER_SQL = """
+            UPDATE dlr_message SET provider_name = NULL, provider_message_id = NULL, updated_at = ?
+            WHERE provider_name = ? AND provider_message_id = ? AND gateway_message_id <> ?
+              AND delivery_status = 'WAITING_PROVIDER'
+            """;
+    static final String LIST_PENDING_SMPP_SQL = """
+            SELECT gateway_message_id FROM dlr_message
+            WHERE system_id = ? AND delivery_channel = 'SMPP' AND delivery_status = 'PENDING'
+            ORDER BY resolved_at, created_at, gateway_message_id
+            """;
+    // Live leases inside the due range are skipped while scanning the due index.
+    static final String DUE_HTTP_SQL = """
+            SELECT gateway_message_id FROM dlr_message
+            WHERE delivery_channel = 'HTTP' AND delivery_status = 'PENDING' AND next_attempt_at <= ?
+              AND (claimed_until IS NULL OR claimed_until <= ?)
+            ORDER BY next_attempt_at, gateway_message_id
+            LIMIT ?
+            """;
 
     private static final int SQLITE_CONSTRAINT = 19;
     private static final int MAX_BATCH_SIZE = 1_000;
+    private static final Duration DEFAULT_CLAIM_DURATION = Duration.ofMinutes(5);
     private static final Set<String> REQUIRED_OBJECTS = Set.of(
-            "dlr_meta", "dlr_message", "provider_correlation", "provider_correlation_gateway_idx");
+            "dlr_meta", "dlr_message", "provider_correlation", "provider_correlation_gateway_idx",
+            "dlr_message_provider_idx", "dlr_message_http_due_idx", "dlr_message_smpp_replay_idx");
     private static final List<String> SCHEMA = List.of("""
             CREATE TABLE dlr_meta (
                 meta_key TEXT PRIMARY KEY,
@@ -88,7 +112,22 @@ final class FileDlrStorage implements AutoCloseable {
             ) STRICT
             """, """
             CREATE INDEX provider_correlation_gateway_idx ON provider_correlation (gateway_message_id)
+            """, """
+            CREATE INDEX dlr_message_provider_idx ON dlr_message (provider_name, provider_message_id)
+            WHERE provider_name IS NOT NULL
+            """, """
+            CREATE INDEX dlr_message_http_due_idx ON dlr_message (next_attempt_at, gateway_message_id)
+            WHERE delivery_channel = 'HTTP' AND delivery_status = 'PENDING'
+            """, """
+            CREATE INDEX dlr_message_smpp_replay_idx ON dlr_message (system_id, resolved_at, created_at, gateway_message_id)
+            WHERE delivery_channel = 'SMPP' AND delivery_status = 'PENDING'
             """);
+    private static final String START_ATTEMPT_SQL = """
+            UPDATE dlr_message SET delivery_attempt_count = delivery_attempt_count + 1, last_attempt_at = ?,
+                claimed_until = ?, updated_at = ?
+            WHERE gateway_message_id = ? AND delivery_channel = ? AND delivery_status = 'PENDING'
+              AND (claimed_until IS NULL OR claimed_until <= ?)
+            """;
     private static final String STATE_COLUMNS = """
             gateway_message_id, account_id, system_id, source_address, destination_address, provider_name,
             provider_message_id, forward_dlr_url, http_callback_format, dlr_mask, reassembled_parts, provider_status,
@@ -102,18 +141,31 @@ final class FileDlrStorage implements AutoCloseable {
     private final Path directory;
     private final FileChannel ownerChannel;
     private final FileLock ownerLock;
+    private final Clock clock;
+    private final long claimDurationMillis;
     private Connection connection;
     private DlrStorageException unavailable;
     private boolean closed;
 
-    private FileDlrStorage(Path directory, FileChannel ownerChannel, FileLock ownerLock) {
+    private FileDlrStorage(Path directory, FileChannel ownerChannel, FileLock ownerLock, Clock clock,
+                           long claimDurationMillis) {
         this.directory = directory;
         this.ownerChannel = ownerChannel;
         this.ownerLock = ownerLock;
+        this.clock = clock;
+        this.claimDurationMillis = claimDurationMillis;
+    }
+
+    static FileDlrStorage open(Path directory) {
+        return open(directory, DEFAULT_CLAIM_DURATION, Clock.systemUTC());
     }
 
     // Takes exclusive ownership of the directory, then opens or initializes its database.
-    static FileDlrStorage open(Path directory) {
+    static FileDlrStorage open(Path directory, Duration claimDuration, Clock clock) {
+        Objects.requireNonNull(clock, "clock");
+        if (claimDuration == null || claimDuration.isNegative() || claimDuration.isZero()) {
+            throw new IllegalArgumentException("Delivery claim duration must be positive");
+        }
         Path root = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
         FileChannel channel = null;
         FileDlrStorage storage = null;
@@ -133,7 +185,7 @@ final class FileDlrStorage implements AutoCloseable {
             if (lock == null) {
                 throw new DlrStorageException("fileDlrOpen|error|reason:ownershipConflict");
             }
-            storage = new FileDlrStorage(root, channel, lock);
+            storage = new FileDlrStorage(root, channel, lock, clock, claimDuration.toMillis());
             storage.openDatabase();
             return storage;
         } catch (IOException | SQLException | RuntimeException failure) {
@@ -311,11 +363,7 @@ final class FileDlrStorage implements AutoCloseable {
             correlation.executeUpdate();
         }
         // A reused provider ID transfers ownership; the previous waiting owner no longer claims it.
-        try (PreparedStatement previous = c.prepareStatement("""
-                UPDATE dlr_message SET provider_name = NULL, provider_message_id = NULL, updated_at = ?
-                WHERE provider_name = ? AND provider_message_id = ? AND gateway_message_id <> ?
-                  AND delivery_status = 'WAITING_PROVIDER'
-                """)) {
+        try (PreparedStatement previous = c.prepareStatement(CLEAR_PREVIOUS_OWNER_SQL)) {
             previous.setLong(1, state.getTimestamp());
             previous.setString(2, providerName);
             previous.setString(3, providerMessageId);
@@ -371,8 +419,7 @@ final class FileDlrStorage implements AutoCloseable {
                                              MessageState.MessageStatus status, int dlrState, String errorCode)
             throws SQLException {
         String gatewayId;
-        try (PreparedStatement owner = c.prepareStatement(
-                "SELECT gateway_message_id FROM provider_correlation WHERE provider_name = ? AND provider_message_id = ?")) {
+        try (PreparedStatement owner = c.prepareStatement(CORRELATION_OWNER_SQL)) {
             owner.setString(1, providerName);
             owner.setString(2, providerMessageId);
             try (ResultSet rows = owner.executeQuery()) {
@@ -382,7 +429,7 @@ final class FileDlrStorage implements AutoCloseable {
                 gatewayId = rows.getString(1);
             }
         }
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         try (PreparedStatement resolve = c.prepareStatement("""
                 UPDATE dlr_message SET provider_name = ?, provider_message_id = ?, provider_status = ?, dlr_state = ?,
                     error_code = ?, delivery_status = 'PENDING',
@@ -452,8 +499,7 @@ final class FileDlrStorage implements AutoCloseable {
     /** Current gateway owner of a provider correlation. */
     synchronized Optional<String> correlationOwner(String providerName, String providerMessageId) {
         return read("read provider correlation", c -> {
-            try (PreparedStatement statement = c.prepareStatement(
-                    "SELECT gateway_message_id FROM provider_correlation WHERE provider_name = ? AND provider_message_id = ?")) {
+            try (PreparedStatement statement = c.prepareStatement(CORRELATION_OWNER_SQL)) {
                 statement.setString(1, providerName);
                 statement.setString(2, providerMessageId);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -461,6 +507,140 @@ final class FileDlrStorage implements AutoCloseable {
                 }
             }
         });
+    }
+
+    // Existing contract: returns the complete ordered result for one system; it is not paginated.
+    synchronized List<MessageState> listPendingSmppDeliveries(String systemId) {
+        if (systemId == null || systemId.isBlank()) {
+            return List.of();
+        }
+        return read("list pending SMPP deliveries", c -> {
+            List<String> ids = new ArrayList<>();
+            try (PreparedStatement statement = c.prepareStatement(LIST_PENDING_SMPP_SQL)) {
+                statement.setString(1, systemId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        ids.add(rows.getString(1));
+                    }
+                }
+            }
+            return states(c, ids);
+        });
+    }
+
+    // Each returned receipt's attempt and lease are committed before it is returned.
+    synchronized List<MessageState> claimDueHttpDeliveries(int limit) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("Delivery limit must be positive");
+        }
+        int bounded = Math.min(limit, MAX_BATCH_SIZE);
+        return write("claim due HTTP deliveries", c -> {
+            long now = clock.millis();
+            List<String> ids = new ArrayList<>(bounded);
+            try (PreparedStatement due = c.prepareStatement(DUE_HTTP_SQL)) {
+                due.setLong(1, now);
+                due.setLong(2, now);
+                due.setInt(3, bounded);
+                try (ResultSet rows = due.executeQuery()) {
+                    while (rows.next()) {
+                        ids.add(rows.getString(1));
+                    }
+                }
+            }
+            for (String id : ids) {
+                startAttemptIn(c, id, MessageState.DeliveryChannel.HTTP, now);
+            }
+            return states(c, ids);
+        });
+    }
+
+    synchronized Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
+                                                             MessageState.DeliveryChannel expectedChannel) {
+        Objects.requireNonNull(expectedChannel, "expectedChannel");
+        if (expectedChannel == MessageState.DeliveryChannel.NONE) {
+            throw new IllegalArgumentException("A delivery attempt requires HTTP or SMPP channel");
+        }
+        String gatewayId = parseGatewayId(gatewayMsgId);
+        return write("start DLR delivery attempt", c -> startAttemptIn(c, gatewayId, expectedChannel, clock.millis()) ?
+            stateIn(c, gatewayId) : Optional.empty());
+    }
+
+    // Successful completion of the current attempt removes the record and its correlations (cascade).
+    synchronized boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
+        return finishAttempt("complete DLR delivery", gatewayMsgId, expectedAttempt,
+            "DELETE FROM dlr_message WHERE gateway_message_id = ? AND delivery_status = 'PENDING' " +
+                "AND delivery_attempt_count = ?", null, null);
+    }
+
+    synchronized boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
+        return finishAttempt("retry DLR delivery", gatewayMsgId, expectedAttempt, """
+                UPDATE dlr_message SET last_delivery_result = ?, next_attempt_at = ?, claimed_until = NULL,
+                    updated_at = ?
+                WHERE gateway_message_id = ? AND delivery_status = 'PENDING' AND delivery_attempt_count = ?
+                """, normalizeResult(result), nextAttemptAt);
+    }
+
+    synchronized boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        return finishAttempt("fail DLR delivery", gatewayMsgId, expectedAttempt, """
+                UPDATE dlr_message SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL,
+                    claimed_until = NULL, failed_at = ?, updated_at = ?
+                WHERE gateway_message_id = ? AND delivery_status = 'PENDING' AND delivery_attempt_count = ?
+                """, normalizeResult(result), clock.millis());
+    }
+
+    synchronized boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+        return finishAttempt("mark invalid DLR delivery failed", gatewayMsgId, expectedAttempt, """
+                UPDATE dlr_message SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL,
+                    claimed_until = NULL, failed_at = ?, resolved_at = COALESCE(resolved_at, failed_at), updated_at = ?
+                WHERE gateway_message_id = ? AND delivery_status = 'PENDING' AND delivery_attempt_count = ?
+                """, normalizeResult(result), clock.millis());
+    }
+
+    // Applies an outcome only when the expected attempt is still the current one (stale-attempt fence).
+    private boolean finishAttempt(String operation, String gatewayMsgId, int expectedAttempt, String sql,
+                                  String result, Long timestamp) {
+        if (expectedAttempt < 1) {
+            throw new IllegalArgumentException("Expected attempt must be positive");
+        }
+        String gatewayId = parseGatewayId(gatewayMsgId);
+        return write(operation, c -> {
+            try (PreparedStatement statement = c.prepareStatement(sql)) {
+                int index = 1;
+                if (timestamp != null) {
+                    statement.setString(index++, result);
+                    statement.setLong(index++, timestamp);
+                    statement.setLong(index++, clock.millis());
+                }
+                statement.setString(index++, gatewayId);
+                statement.setInt(index, expectedAttempt);
+                return statement.executeUpdate() == 1;
+            }
+        });
+    }
+
+    private boolean startAttemptIn(Connection c, String gatewayId, MessageState.DeliveryChannel channel, long now)
+            throws SQLException {
+        try (PreparedStatement start = c.prepareStatement(START_ATTEMPT_SQL)) {
+            start.setLong(1, now);
+            start.setLong(2, now + claimDurationMillis);
+            start.setLong(3, now);
+            start.setString(4, gatewayId);
+            start.setString(5, channel.name());
+            start.setLong(6, now);
+            return start.executeUpdate() == 1;
+        }
+    }
+
+    private static List<MessageState> states(Connection c, List<String> ids) throws SQLException {
+        List<MessageState> states = new ArrayList<>(ids.size());
+        for (String id : ids) {
+            stateIn(c, id).ifPresent(states::add);
+        }
+        return List.copyOf(states);
+    }
+
+    private static String normalizeResult(String result) {
+        return result == null || result.isBlank() ? null : result.trim();
     }
 
     @Override
@@ -614,7 +794,7 @@ final class FileDlrStorage implements AutoCloseable {
             state.setProviderMessageId(null);
         }
         final String gatewayId = parseGatewayId(state.getGatewayMsgId());
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         state.setStatus(MessageState.MessageStatus.FAILED);
         state.setDlrState(dlrState);
         state.setErrorCode(errorCode);
@@ -649,7 +829,7 @@ final class FileDlrStorage implements AutoCloseable {
         state.setNextAttemptAt(null);
         state.setLastDeliveryResult(null);
         state.setResolvedAt(null);
-        state.setTimestamp(System.currentTimeMillis());
+        state.setTimestamp(clock.millis());
         validateDeliveryTarget(state);
         return gatewayId;
     }

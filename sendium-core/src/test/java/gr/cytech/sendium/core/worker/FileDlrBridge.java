@@ -46,37 +46,37 @@ final class FileDlrBridge implements DlrStorageBackend {
 
     @Override
     public List<MessageState> listPendingSmppDeliveries(String systemId) {
-        throw new UnsupportedOperationException();
+        return storage.listPendingSmppDeliveries(systemId);
     }
 
     @Override
     public List<MessageState> claimDueHttpDeliveries(int limit) {
-        throw new UnsupportedOperationException();
+        return storage.claimDueHttpDeliveries(limit);
     }
 
     @Override
     public Optional<MessageState> startDeliveryAttempt(String gatewayMsgId, MessageState.DeliveryChannel expectedChannel) {
-        throw new UnsupportedOperationException();
+        return storage.startDeliveryAttempt(gatewayMsgId, expectedChannel);
     }
 
     @Override
     public boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
-        throw new UnsupportedOperationException();
+        return storage.completeDelivery(gatewayMsgId, expectedAttempt);
     }
 
     @Override
     public boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
-        throw new UnsupportedOperationException();
+        return storage.retryDelivery(gatewayMsgId, expectedAttempt, result, nextAttemptAt);
     }
 
     @Override
     public boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
-        throw new UnsupportedOperationException();
+        return storage.failDelivery(gatewayMsgId, expectedAttempt, result);
     }
 
     @Override
     public boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
-        throw new UnsupportedOperationException();
+        return storage.failInvalidDelivery(gatewayMsgId, expectedAttempt, result);
     }
 
     @Override
