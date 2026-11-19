@@ -21,6 +21,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -29,7 +30,8 @@ import java.util.UUID;
 
 /**
  * Local SQLite DLR storage owned by one process. Every operation runs under one monitor, so readers never observe
- * a partially applied transaction. Not selectable yet; only the acceptance/read slice is implemented.
+ * a partially applied transaction. Not selectable yet; provider acceptance, terminal outcomes and batches are
+ * implemented, delivery and maintenance operations are not.
  * Underlying file corruption is not guaranteed to be detected (accepted file-storage limitation).
  */
 final class FileDlrStorage implements AutoCloseable {
@@ -39,6 +41,7 @@ final class FileDlrStorage implements AutoCloseable {
     static final int SCHEMA_VERSION = 1;
 
     private static final int SQLITE_CONSTRAINT = 19;
+    private static final int MAX_BATCH_SIZE = 1_000;
     private static final Set<String> REQUIRED_OBJECTS = Set.of(
             "dlr_meta", "dlr_message", "provider_correlation", "provider_correlation_gateway_idx");
     private static final List<String> SCHEMA = List.of("""
@@ -233,53 +236,217 @@ final class FileDlrStorage implements AutoCloseable {
 
     synchronized void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
         String gatewayId = prepareAccepted(state, providerName, providerMessageId);
-        boolean accepted = write("record provider acceptance", c -> {
-            if (!persistAccepted(c, gatewayId, state, providerName, providerMessageId)) {
-                return false;
-            }
-            try (PreparedStatement correlation = c.prepareStatement("""
-                    INSERT INTO provider_correlation (provider_name, provider_message_id, gateway_message_id, created_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT (provider_name, provider_message_id) DO UPDATE SET
-                        gateway_message_id = excluded.gateway_message_id, created_at = excluded.created_at
-                    """)) {
-                correlation.setString(1, providerName);
-                correlation.setString(2, providerMessageId);
-                correlation.setString(3, gatewayId);
-                correlation.setLong(4, state.getTimestamp());
-                correlation.executeUpdate();
-            }
-            // A reused provider ID transfers ownership; the previous waiting owner no longer claims it.
-            try (PreparedStatement previous = c.prepareStatement("""
-                    UPDATE dlr_message SET provider_name = NULL, provider_message_id = NULL, updated_at = ?
-                    WHERE provider_name = ? AND provider_message_id = ? AND gateway_message_id <> ?
-                      AND delivery_status = 'WAITING_PROVIDER'
-                    """)) {
-                previous.setLong(1, state.getTimestamp());
-                previous.setString(2, providerName);
-                previous.setString(3, providerMessageId);
-                previous.setString(4, gatewayId);
-                previous.executeUpdate();
-            }
-            return true;
-        });
+        boolean accepted = write("record provider acceptance",
+            c -> acceptIn(c, gatewayId, state, providerName, providerMessageId));
         if (!accepted) {
             throw new DlrStorageException("fileDlrAcceptance|error|gatewayMsgId:" + gatewayId +
                 "|reason:terminalStateExists");
         }
     }
 
+    synchronized Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
+                                                               String providerMessageId, int dlrState, String errorCode) {
+        String gatewayId = prepareRejected(state, providerName, providerMessageId, dlrState, errorCode);
+        return write("record provider rejection", c -> rejectIn(c, gatewayId, state));
+    }
+
+    synchronized Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
+                                                   MessageState.MessageStatus status, int dlrState, String errorCode) {
+        Objects.requireNonNull(status, "status");
+        requireCorrelation(providerName, providerMessageId);
+        return write("resolve DLR state",
+            c -> resolveIn(c, providerName, providerMessageId, status, dlrState, errorCode));
+    }
+
+    // Applies events in order as one transaction: either every result is published or none is.
+    synchronized List<ProviderDlrEvent.Result> applyProviderBatch(List<ProviderDlrEvent> events) {
+        List<ProviderDlrEvent> batch = List.copyOf(events);
+        if (batch.isEmpty()) {
+            return List.of();
+        }
+        if (batch.size() > MAX_BATCH_SIZE) {
+            throw new IllegalArgumentException("Provider batch exceeds maximum size");
+        }
+        List<String> gatewayIds = new ArrayList<>(batch.size());
+        for (ProviderDlrEvent event : batch) {
+            gatewayIds.add(switch (event) {
+                case ProviderDlrEvent.Accepted accepted ->
+                    prepareAccepted(accepted.message(), accepted.providerName(), accepted.providerMessageId());
+                case ProviderDlrEvent.Rejected rejected -> prepareRejected(rejected.message(), rejected.providerName(),
+                    rejected.providerMessageId(), rejected.dlrState(), rejected.errorCode());
+                case ProviderDlrEvent.Receipt ignored -> null;
+            });
+        }
+        return write("persist provider batch", c -> {
+            List<ProviderDlrEvent.Result> results = new ArrayList<>(batch.size());
+            for (int i = 0; i < batch.size(); i++) {
+                results.add(switch (batch.get(i)) {
+                    case ProviderDlrEvent.Accepted a -> acceptIn(c, gatewayIds.get(i), a.message(), a.providerName(),
+                        a.providerMessageId()) ? ProviderDlrEvent.Result.success(Optional.empty()) :
+                        ProviderDlrEvent.Result.rejectedAcceptance();
+                    case ProviderDlrEvent.Rejected r -> ProviderDlrEvent.Result.success(rejectIn(c, gatewayIds.get(i), r.message()));
+                    case ProviderDlrEvent.Receipt r -> ProviderDlrEvent.Result.success(resolveIn(c, r.providerName(),
+                        r.providerMessageId(), r.status(), r.dlrState(), r.errorCode()));
+                });
+            }
+            return List.copyOf(results);
+        });
+    }
+
+    private boolean acceptIn(Connection c, String gatewayId, MessageState state, String providerName,
+                             String providerMessageId) throws SQLException {
+        if (!persistAccepted(c, gatewayId, state, providerName, providerMessageId)) {
+            return false;
+        }
+        try (PreparedStatement correlation = c.prepareStatement("""
+                INSERT INTO provider_correlation (provider_name, provider_message_id, gateway_message_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (provider_name, provider_message_id) DO UPDATE SET
+                    gateway_message_id = excluded.gateway_message_id, created_at = excluded.created_at
+                """)) {
+            correlation.setString(1, providerName);
+            correlation.setString(2, providerMessageId);
+            correlation.setString(3, gatewayId);
+            correlation.setLong(4, state.getTimestamp());
+            correlation.executeUpdate();
+        }
+        // A reused provider ID transfers ownership; the previous waiting owner no longer claims it.
+        try (PreparedStatement previous = c.prepareStatement("""
+                UPDATE dlr_message SET provider_name = NULL, provider_message_id = NULL, updated_at = ?
+                WHERE provider_name = ? AND provider_message_id = ? AND gateway_message_id <> ?
+                  AND delivery_status = 'WAITING_PROVIDER'
+                """)) {
+            previous.setLong(1, state.getTimestamp());
+            previous.setString(2, providerName);
+            previous.setString(3, providerMessageId);
+            previous.setString(4, gatewayId);
+            previous.executeUpdate();
+        }
+        return true;
+    }
+
+    private Optional<MessageState> rejectIn(Connection c, String gatewayId, MessageState state) throws SQLException {
+        String existing = deliveryStatus(c, gatewayId);
+        if (existing != null && !MessageState.DeliveryStatus.WAITING_PROVIDER.name().equals(existing)) {
+            return Optional.empty();
+        }
+        String sql = existing == null ? """
+                INSERT INTO dlr_message (gateway_message_id, account_id, system_id, source_address, destination_address,
+                    provider_name, provider_message_id, forward_dlr_url, http_callback_format, dlr_mask, reassembled_parts,
+                    provider_status, dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count,
+                    last_attempt_at, next_attempt_at, last_delivery_result, resolved_at, updated_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """ : """
+                UPDATE dlr_message SET gateway_message_id = ?, account_id = ?, system_id = ?, source_address = ?,
+                    destination_address = ?, provider_name = ?, provider_message_id = ?, forward_dlr_url = ?,
+                    http_callback_format = ?, dlr_mask = ?, reassembled_parts = ?, provider_status = ?, dlr_state = ?,
+                    error_code = ?, delivery_channel = ?, delivery_status = ?, delivery_attempt_count = ?,
+                    last_attempt_at = ?, next_attempt_at = ?, last_delivery_result = ?, resolved_at = ?, updated_at = ?
+                WHERE gateway_message_id = ? AND delivery_status = 'WAITING_PROVIDER'
+                """;
+        try (PreparedStatement statement = c.prepareStatement(sql)) {
+            bindAccepted(statement, gatewayId, state, state.getProviderName(), state.getProviderMessageId());
+            setNullableLong(statement, 13, state.getDlrState() == null ? null : state.getDlrState().longValue());
+            statement.setString(14, state.getErrorCode());
+            statement.setString(15, state.getDeliveryChannel().name());
+            statement.setString(16, state.getDeliveryStatus().name());
+            statement.setInt(17, state.getDeliveryAttemptCount());
+            setNullableLong(statement, 18, state.getLastAttemptAt());
+            setNullableLong(statement, 19, state.getNextAttemptAt());
+            statement.setString(20, state.getLastDeliveryResult());
+            setNullableLong(statement, 21, state.getResolvedAt());
+            statement.setLong(22, state.getTimestamp());
+            if (existing == null) {
+                statement.setLong(23, state.getTimestamp());
+            } else {
+                statement.setString(23, gatewayId);
+            }
+            statement.executeUpdate();
+        }
+        deleteCorrelations(c, gatewayId);
+        return stateIn(c, gatewayId);
+    }
+
+    private Optional<MessageState> resolveIn(Connection c, String providerName, String providerMessageId,
+                                             MessageState.MessageStatus status, int dlrState, String errorCode)
+            throws SQLException {
+        String gatewayId;
+        try (PreparedStatement owner = c.prepareStatement(
+                "SELECT gateway_message_id FROM provider_correlation WHERE provider_name = ? AND provider_message_id = ?")) {
+            owner.setString(1, providerName);
+            owner.setString(2, providerMessageId);
+            try (ResultSet rows = owner.executeQuery()) {
+                if (!rows.next()) {
+                    return Optional.empty();
+                }
+                gatewayId = rows.getString(1);
+            }
+        }
+        long now = System.currentTimeMillis();
+        try (PreparedStatement resolve = c.prepareStatement("""
+                UPDATE dlr_message SET provider_name = ?, provider_message_id = ?, provider_status = ?, dlr_state = ?,
+                    error_code = ?, delivery_status = 'PENDING',
+                    next_attempt_at = CASE WHEN delivery_channel = 'HTTP' THEN ? ELSE NULL END,
+                    resolved_at = ?, updated_at = ?
+                WHERE gateway_message_id = ? AND delivery_status = 'WAITING_PROVIDER'
+                """)) {
+            resolve.setString(1, providerName);
+            resolve.setString(2, providerMessageId);
+            resolve.setString(3, status.name());
+            resolve.setInt(4, dlrState);
+            resolve.setString(5, errorCode);
+            resolve.setLong(6, now);
+            resolve.setLong(7, now);
+            resolve.setLong(8, now);
+            resolve.setString(9, gatewayId);
+            if (resolve.executeUpdate() == 0) {
+                return Optional.empty();
+            }
+        }
+        // First terminal outcome wins: every part correlation of the message is consumed together.
+        deleteCorrelations(c, gatewayId);
+        return stateIn(c, gatewayId);
+    }
+
+    private static void deleteCorrelations(Connection c, String gatewayId) throws SQLException {
+        try (PreparedStatement delete = c.prepareStatement(
+                "DELETE FROM provider_correlation WHERE gateway_message_id = ?")) {
+            delete.setString(1, gatewayId);
+            delete.executeUpdate();
+        }
+    }
+
+    private static String deliveryStatus(Connection c, String gatewayId) throws SQLException {
+        try (PreparedStatement select = c.prepareStatement(
+                "SELECT delivery_status FROM dlr_message WHERE gateway_message_id = ?")) {
+            select.setString(1, gatewayId);
+            try (ResultSet rows = select.executeQuery()) {
+                return rows.next() ? rows.getString(1) : null;
+            }
+        }
+    }
+
+    private static Optional<MessageState> stateIn(Connection c, String gatewayId) throws SQLException {
+        try (PreparedStatement statement = c.prepareStatement(
+                "SELECT " + STATE_COLUMNS + " FROM dlr_message WHERE gateway_message_id = ?")) {
+            statement.setString(1, gatewayId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? Optional.of(readState(rows)) : Optional.empty();
+            }
+        }
+    }
+
+    private static void setNullableLong(PreparedStatement statement, int index, Long value) throws SQLException {
+        if (value == null) {
+            statement.setNull(index, Types.INTEGER);
+        } else {
+            statement.setLong(index, value);
+        }
+    }
+
     synchronized Optional<MessageState> getState(String gatewayMsgId) {
         String gatewayId = parseGatewayId(gatewayMsgId);
-        return read("read DLR state", c -> {
-            try (PreparedStatement statement = c.prepareStatement(
-                    "SELECT " + STATE_COLUMNS + " FROM dlr_message WHERE gateway_message_id = ?")) {
-                statement.setString(1, gatewayId);
-                try (ResultSet rows = statement.executeQuery()) {
-                    return rows.next() ? Optional.of(readState(rows)) : Optional.empty();
-                }
-            }
-        });
+        return read("read DLR state", c -> stateIn(c, gatewayId));
     }
 
     /** Current gateway owner of a provider correlation. */
@@ -329,14 +496,7 @@ final class FileDlrStorage implements AutoCloseable {
 
     private boolean persistAccepted(Connection c, String gatewayId, MessageState state,
                                     String providerName, String providerMessageId) throws SQLException {
-        String existing;
-        try (PreparedStatement select = c.prepareStatement(
-                "SELECT delivery_status FROM dlr_message WHERE gateway_message_id = ?")) {
-            select.setString(1, gatewayId);
-            try (ResultSet rows = select.executeQuery()) {
-                existing = rows.next() ? rows.getString(1) : null;
-            }
-        }
+        String existing = deliveryStatus(c, gatewayId);
         if (existing != null && !MessageState.DeliveryStatus.WAITING_PROVIDER.name().equals(existing)) {
             return false;
         }
@@ -442,11 +602,42 @@ final class FileDlrStorage implements AutoCloseable {
         }
     }
 
-    private String prepareAccepted(MessageState state, String providerName, String providerMessageId) {
+    private String prepareRejected(MessageState state, String providerName, String providerMessageId,
+                                   int dlrState, String errorCode) {
         Objects.requireNonNull(state, "state");
+        if (providerMessageId != null && !providerMessageId.isBlank()) {
+            requireCorrelation(providerName, providerMessageId);
+            state.setProviderName(providerName);
+            state.setProviderMessageId(providerMessageId);
+        } else {
+            state.setProviderName(null);
+            state.setProviderMessageId(null);
+        }
+        final String gatewayId = parseGatewayId(state.getGatewayMsgId());
+        long now = System.currentTimeMillis();
+        state.setStatus(MessageState.MessageStatus.FAILED);
+        state.setDlrState(dlrState);
+        state.setErrorCode(errorCode);
+        state.setDeliveryStatus(MessageState.DeliveryStatus.PENDING);
+        state.setDeliveryAttemptCount(0);
+        state.setLastAttemptAt(null);
+        state.setNextAttemptAt(state.getDeliveryChannel() == MessageState.DeliveryChannel.HTTP ? now : null);
+        state.setLastDeliveryResult("provider_rejected");
+        state.setResolvedAt(now);
+        state.setTimestamp(now);
+        validateDeliveryTarget(state);
+        return gatewayId;
+    }
+
+    private static void requireCorrelation(String providerName, String providerMessageId) {
         if (providerName == null || providerName.isBlank() || providerMessageId == null || providerMessageId.isBlank()) {
             throw new IllegalArgumentException("Provider name and provider message ID must not be blank");
         }
+    }
+
+    private String prepareAccepted(MessageState state, String providerName, String providerMessageId) {
+        Objects.requireNonNull(state, "state");
+        requireCorrelation(providerName, providerMessageId);
         final String gatewayId = parseGatewayId(state.getGatewayMsgId());
         state.setProviderName(providerName);
         state.setProviderMessageId(providerMessageId);
