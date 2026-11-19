@@ -20,6 +20,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
@@ -42,7 +43,7 @@ class DlrStorageMetricsTest {
         assertThat(occupancy("waiting_provider")).isNaN();
         assertThat(metadata("last.success.timestamp.seconds")).isNaN();
         when(storage.readMetricSnapshot(100000, Duration.ofSeconds(2)))
-                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(12, 3, 1)));
+                .thenReturn(Optional.of(new DlrStorageBackend.ReceiptCounts(12, 3, 1)));
         collector.collect();
         clearInvocations(storage);
         for (int scrape = 0; scrape < 10; scrape++) {
@@ -65,7 +66,7 @@ class DlrStorageMetricsTest {
         // Clear meter identities before binding an independent collector to this test registry.
         registry.clear();
         collector = collector(true);
-        when(storage.readMetricSnapshot(anyInt(), any())).thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(0, 0, 0)));
+        when(storage.readMetricSnapshot(anyInt(), any())).thenReturn(Optional.of(new DlrStorageBackend.ReceiptCounts(0, 0, 0)));
         collector.collect();
         assertThat(metadata("available")).isEqualTo(1);
         assertThat(occupancy("pending_forward")).isZero();
@@ -75,10 +76,10 @@ class DlrStorageMetricsTest {
     void failureOverBudgetAndStalenessInvalidateValuesButRetainLastSuccessTime() {
         var collector = collector(true);
         when(storage.readMetricSnapshot(anyInt(), any()))
-                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(1, 2, 3)))
+                .thenReturn(Optional.of(new DlrStorageBackend.ReceiptCounts(1, 2, 3)))
                 .thenReturn(Optional.empty())
                 .thenThrow(new DlrStorageException("timeout"))
-                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(4, 5, 6)));
+                .thenReturn(Optional.of(new DlrStorageBackend.ReceiptCounts(4, 5, 6)));
         collector.collect();
         double firstSuccess = metadata("last.success.timestamp.seconds");
         clock.add(Duration.ofSeconds(1));
@@ -105,7 +106,7 @@ class DlrStorageMetricsTest {
         when(storage.readMetricSnapshot(anyInt(), any())).thenAnswer(call -> {
             entered.countDown();
             assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
-            return Optional.of(new PostgresqlDlrStorage.ReceiptCounts(1, 0, 0));
+            return Optional.of(new DlrStorageBackend.ReceiptCounts(1, 0, 0));
         });
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var first = executor.submit(collector::collect);
@@ -126,8 +127,8 @@ class DlrStorageMetricsTest {
         var first = collector(true);
         registry.counter("unrelated.counter").increment();
         when(storage.readMetricSnapshot(anyInt(), any()))
-                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(1, 0, 0)))
-                .thenReturn(Optional.of(new PostgresqlDlrStorage.ReceiptCounts(7, 0, 0)));
+                .thenReturn(Optional.of(new DlrStorageBackend.ReceiptCounts(1, 0, 0)))
+                .thenReturn(Optional.of(new DlrStorageBackend.ReceiptCounts(7, 0, 0)));
         first.collect();
         assertThat(occupancy("waiting_provider")).isEqualTo(1);
         first.unregister();
@@ -159,11 +160,16 @@ class DlrStorageMetricsTest {
     }
 
     private DlrStorageMetrics collector(boolean enabled) {
+        when(storage.backend()).thenReturn("postgresql");
+        clearInvocations(storage);
         var collector = new DlrStorageMetrics();
         collector.storage = storage;
         collector.metrics = registry;
         collector.enabled = enabled;
         collector.initialize();
+        verify(storage).backend();
+        verifyNoMoreInteractions(storage);
+        clearInvocations(storage);
         return collector;
     }
 

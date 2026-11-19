@@ -43,6 +43,7 @@ public class DlrStorageMetrics {
     int maxRows = 100000;
 
     private long staleAfterNanos;
+    private String backend;
     private final AtomicBoolean collecting = new AtomicBoolean();
     private final List<Meter> ownedMeters = new ArrayList<>();
     private volatile Snapshot snapshot = new Snapshot(null, 0, Double.NaN);
@@ -55,6 +56,7 @@ public class DlrStorageMetrics {
             throw new IllegalArgumentException("Invalid storage metrics interval, whole-second timeout or row budget");
         }
         staleAfterNanos = interval.toNanos() * 2;
+        backend = storage.backend();
         register("sendium.storage.collection.enabled", "Whether receipt storage snapshot collection is enabled", ignored -> enabled ? 1 : 0);
         register("sendium.storage.collection.available", "Whether a complete fresh receipt snapshot is available", ignored -> available(snapshot) ? 1 : 0);
         register("sendium.storage.collection.last.success.timestamp.seconds", "Unix timestamp of last complete receipt snapshot",
@@ -62,13 +64,13 @@ public class DlrStorageMetrics {
         for (String state : new String[]{"waiting_provider", "pending_forward", "failed_forward"}) {
             ownedMeters.add(Gauge.builder("sendium.dlr.storage.messages", this, collector -> collector.occupancy(state))
                     .description("Complete receipt storage snapshot; NaN when unavailable")
-                    .tags("backend", "postgresql", "state", state).register(metrics));
+                    .tags("backend", backend, "state", state).register(metrics));
         }
     }
 
     private void register(String name, String description, ToDoubleFunction<DlrStorageMetrics> value) {
         ownedMeters.add(Gauge.builder(name, this, value).description(description)
-                .tags("backend", "postgresql", "stage", "dlr").register(metrics));
+                .tags("backend", backend, "stage", "dlr").register(metrics));
     }
 
     @PreDestroy
@@ -116,5 +118,5 @@ public class DlrStorageMetrics {
         };
     }
 
-    private record Snapshot(PostgresqlDlrStorage.ReceiptCounts counts, long collectedAt, double timestamp) { }
+    private record Snapshot(DlrStorageBackend.ReceiptCounts counts, long collectedAt, double timestamp) { }
 }

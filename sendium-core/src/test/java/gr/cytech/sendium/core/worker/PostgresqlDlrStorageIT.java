@@ -101,7 +101,7 @@ class PostgresqlDlrStorageIT {
         assertThat(storage.failDelivery(failed.getGatewayMsgId(), attempt.getDeliveryAttemptCount(), "http_failure")).isTrue();
         setCreatedAt(waiting.getGatewayMsgId(), "CURRENT_TIMESTAMP - INTERVAL '8 days'");
         assertThat(storage.readMetricSnapshot(3, Duration.ofSeconds(2)))
-                .contains(new PostgresqlDlrStorage.ReceiptCounts(1, 1, 1));
+                .contains(new DlrStorageBackend.ReceiptCounts(1, 1, 1));
         assertThat(storage.readMetricSnapshot(2, Duration.ofSeconds(2))).isEmpty();
     }
 
@@ -115,7 +115,7 @@ class PostgresqlDlrStorageIT {
                 """);
         assertThat(storage.readMetricSnapshot(100000, Duration.ofSeconds(2))).isEmpty();
         assertThat(storage.readMetricSnapshot(100001, Duration.ofSeconds(2)))
-                .contains(new PostgresqlDlrStorage.ReceiptCounts(100001, 0, 0));
+                .contains(new DlrStorageBackend.ReceiptCounts(100001, 0, 0));
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement();
              ResultSet result = statement.executeQuery("""
