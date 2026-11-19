@@ -39,13 +39,13 @@ assert_file() {
 assert_contains() {
     expected=$1
     file=$2
-    grep -F "$expected" "$file" >/dev/null 2>&1 || fail "expected '$expected' in $file"
+    grep -F -- "$expected" "$file" >/dev/null 2>&1 || fail "expected '$expected' in $file"
 }
 
 assert_not_contains() {
     unexpected=$1
     file=$2
-    if grep -F "$unexpected" "$file" >/dev/null 2>&1; then
+    if grep -F -- "$unexpected" "$file" >/dev/null 2>&1; then
         fail "did not expect '$unexpected' in $file"
     fi
 }
@@ -137,6 +137,155 @@ assert_equals "$http_password" "$(credential_value HTTP password "$local_dir/con
 assert_equals "$smpp_user" "$(credential_value SMPP systemId "$local_dir/conf/credentials.yml")" "SMPP credential username"
 assert_equals "$smpp_password" "$(credential_value SMPP password "$local_dir/conf/credentials.yml")" "SMPP credential password"
 pass "secure local-only generation"
+
+monitoring_dir="$test_root/monitoring"
+sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start > "$test_root/monitoring.out" 2>&1
+assert_file "$monitoring_dir/monitoring/grafana/dashboards/sms-operations.json"
+cmp "$repo_dir/monitoring/grafana/dashboards/sms-operations.json" "$monitoring_dir/monitoring/grafana/dashboards/sms-operations.json" || fail "SMS dashboard differs"
+cmp "$repo_dir/monitoring/grafana/dashboards/application-health.json" "$monitoring_dir/monitoring/grafana/dashboards/application-health.json" || fail "health dashboard differs"
+assert_contains 'sendium:8080' "$monitoring_dir/monitoring/prometheus.yml"
+assert_contains 'sendium-prometheus' "$monitoring_dir/monitoring/grafana/provisioning/datasources/prometheus.yml"
+assert_contains '127.0.0.1:3000:3000' "$monitoring_dir/compose.yml"
+assert_contains '127.0.0.1:9090:9090' "$monitoring_dir/compose.yml"
+assert_contains 'grafana-data:/var/lib/grafana' "$monitoring_dir/compose.yml"
+assert_contains 'prometheus-data:/prometheus' "$monitoring_dir/compose.yml"
+assert_not_contains 'grafana' "$local_dir/compose.yml"
+grafana_password=$(sed -n "s/^GF_SECURITY_ADMIN_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$monitoring_dir/.grafana.env")
+assert_equals 64 "${#grafana_password}" "Grafana password length"
+assert_equals 600 "$(file_mode "$monitoring_dir/.grafana.env")" "Grafana secret permissions"
+assert_equals 644 "$(file_mode "$monitoring_dir/monitoring/prometheus.yml")" "Prometheus config permissions"
+assert_not_contains "$grafana_password" "$monitoring_dir/.sendium.env"
+assert_not_contains "$grafana_password" "$monitoring_dir/compose.yml"
+assert_not_contains "$grafana_password" "$test_root/monitoring.out"
+pass "monitoring generation reuses dashboards with isolated credentials and loopback ports"
+SENDIUM_MONITORING_REF=ignored-test sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start --force > "$test_root/override.out" 2>&1
+assert_contains 'SENDIUM_MONITORING_REF is ignored' "$test_root/override.out"
+pass "explicit asset override reports local checkout precedence"
+
+sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start --force > "$test_root/monitoring-rerun.out" 2>&1
+assert_contains "$grafana_password" "$monitoring_dir/.grafana.env"
+sh "$quick_start" --directory "$monitoring_dir" --provider local --no-start --force > "$test_root/monitoring-disabled.out" 2>&1
+assert_file "$monitoring_dir/monitoring/source.txt"
+assert_contains "$grafana_password" "$monitoring_dir/.grafana.env"
+assert_not_contains 'grafana' "$monitoring_dir/compose.yml"
+sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start --force > "$test_root/monitoring-enabled.out" 2>&1
+assert_contains "$grafana_password" "$monitoring_dir/.grafana.env"
+cp "$monitoring_dir/compose.yml" "$test_root/monitoring-compose.saved"
+mv "$monitoring_dir/.grafana.env" "$test_root/grafana.saved"
+expect_failure "lost Grafana credentials" "$test_root/grafana-missing.out" \
+    sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start --force
+cmp "$test_root/monitoring-compose.saved" "$monitoring_dir/compose.yml" || fail "failed credential recovery changed Compose"
+mv "$test_root/grafana.saved" "$monitoring_dir/.grafana.env"
+pass "monitoring credentials survive reruns and disabling; missing credentials fail closed"
+
+# A standalone copy must download all assets from a single explicit reference.
+mkdir -p "$test_root/standalone" "$test_root/download-bin"
+cp "$quick_start" "$test_root/standalone/quick-start.sh"
+cat > "$test_root/download-bin/curl" <<'EOF'
+#!/bin/sh
+url=''
+destination=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        https://*) url=$1; shift ;;
+        -o) destination=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[ "${FAIL_MONITORING_DOWNLOAD:-false}" != true ] || exit 22
+printf '%s\n' "$url" >> "$DOWNLOAD_TRACE"
+asset=${url#*/monitoring/}
+cp "$MONITORING_FIXTURES/$asset" "$destination"
+EOF
+cat > "$test_root/download-bin/docker" <<'EOF'
+#!/bin/sh
+echo "Docker must not run during generate-only" >&2
+exit 99
+EOF
+chmod +x "$test_root/download-bin/curl" "$test_root/download-bin/docker"
+PATH="$test_root/download-bin:$PATH" MONITORING_FIXTURES="$repo_dir/monitoring" \
+    DOWNLOAD_TRACE="$test_root/download.trace" SENDIUM_MONITORING_REF=v-test \
+    sh "$test_root/standalone/quick-start.sh" --directory "$test_root/downloaded" --provider local --monitoring --no-start > "$test_root/download.out" 2>&1
+assert_equals 4 "$(wc -l < "$test_root/download.trace" | tr -d ' ')" "download count"
+assert_equals 4 "$(grep -c '/v-test/monitoring/' "$test_root/download.trace")" "consistent asset reference"
+cmp "$monitoring_dir/monitoring/grafana/dashboards/sms-operations.json" "$test_root/downloaded/monitoring/grafana/dashboards/sms-operations.json" || fail "downloaded asset differs"
+cp "$test_root/downloaded/compose.yml" "$test_root/downloaded-compose.saved"
+cp "$test_root/downloaded/.sendium.env" "$test_root/downloaded-env.saved"
+expect_failure "asset download failure" "$test_root/download-failure.out" \
+    env PATH="$test_root/download-bin:$PATH" FAIL_MONITORING_DOWNLOAD=true \
+    sh "$test_root/standalone/quick-start.sh" --directory "$test_root/downloaded" --provider local --monitoring --no-start --force
+cmp "$test_root/downloaded-compose.saved" "$test_root/downloaded/compose.yml" || fail "download failure changed Compose"
+cmp "$test_root/downloaded-env.saved" "$test_root/downloaded/.sendium.env" || fail "download failure changed credentials"
+pass "standalone versioned downloads start no services and fail without replacing runtime"
+cp "$quick_start" "$test_root/downloaded/quick-start.sh"
+PATH="$test_root/download-bin:$PATH" MONITORING_FIXTURES="$repo_dir/monitoring" \
+    DOWNLOAD_TRACE="$test_root/rerun-download.trace" SENDIUM_MONITORING_REF=v-rerun \
+    sh "$test_root/downloaded/quick-start.sh" --directory "$test_root/downloaded" --provider local --monitoring --no-start --force > "$test_root/rerun-download.out" 2>&1
+assert_contains '/v-rerun/monitoring' "$test_root/downloaded/monitoring/source.txt"
+assert_equals 4 "$(wc -l < "$test_root/rerun-download.trace" | tr -d ' ')" "generated assets are not checkout assets"
+pass "same-directory standalone reruns retain versioned download semantics"
+
+mkdir -p "$test_root/install-failure-bin"
+cat > "$test_root/install-failure-bin/mv" <<'EOF'
+#!/bin/sh
+case "$*" in *monitoring/source.txt*) exit 1 ;; esac
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$test_root/install-failure-bin/mv"
+mkdir -p "$test_root/install-failure/monitoring"
+printf 'preserve\n' > "$test_root/install-failure/monitoring/user-file"
+expect_failure "monitoring install failure" "$test_root/install-failure.out" \
+    env PATH="$test_root/install-failure-bin:$PATH" REAL_MV="$(command -v mv)" \
+    sh "$quick_start" --directory "$test_root/install-failure" --provider local --monitoring --no-start --force
+assert_contains preserve "$test_root/install-failure/monitoring/user-file"
+[ ! -d "$test_root/install-failure/monitoring/grafana" ] || fail "new empty monitoring directories survived rollback"
+[ ! -f "$test_root/install-failure/compose.yml" ] || fail "partially installed Compose survived rollback"
+pass "failed installation removes newly created empty directories without deleting existing content"
+
+mkdir -p "$test_root/lifecycle-bin"
+cat > "$test_root/lifecycle-bin/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_TRACE"
+case "$*" in
+    *' up -d'*)
+        if [ "${FAIL_COMPOSE_UP:-false}" = true ]; then
+            echo 'port is already allocated' >&2
+            exit 1
+        fi ;;
+esac
+EOF
+cat > "$test_root/lifecycle-bin/curl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$test_root/lifecycle-bin/"*
+PATH="$test_root/lifecycle-bin:$PATH" DOCKER_TRACE="$test_root/lifecycle.trace" \
+    sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --force > "$test_root/lifecycle.out" 2>&1
+assert_contains 'up -d --force-recreate --remove-orphans' "$test_root/lifecycle.trace"
+assert_contains 'Monitoring services are ready' "$test_root/lifecycle.out"
+assert_contains 'http://127.0.0.1:3000/d/sendium-sms-operations' "$test_root/lifecycle.out"
+assert_contains 'http://127.0.0.1:3000/d/sendium-application-health' "$test_root/lifecycle.out"
+assert_contains 'stop prometheus grafana' "$test_root/lifecycle.out"
+assert_not_contains "$grafana_password" "$test_root/lifecycle.out"
+pass "monitoring startup and non-secret service instructions"
+PATH="$test_root/lifecycle-bin:$PATH" DOCKER_TRACE="$test_root/disable.trace" \
+    sh "$quick_start" --directory "$monitoring_dir" --provider local --force > "$test_root/disable.out" 2>&1
+assert_contains '--remove-orphans' "$test_root/disable.trace"
+assert_not_contains '--volumes' "$test_root/disable.trace"
+assert_contains 'files, credentials and data volumes are retained' "$test_root/disable.out"
+assert_contains "$grafana_password" "$monitoring_dir/.grafana.env"
+PATH="$test_root/lifecycle-bin:$PATH" DOCKER_TRACE="$test_root/no-start.trace" \
+    sh "$quick_start" --directory "$monitoring_dir" --provider local --force --no-start > "$test_root/disable-generate.out" 2>&1
+[ ! -e "$test_root/no-start.trace" ] || fail "generate-only touched Docker"
+assert_contains 'leaves existing containers running' "$test_root/disable-generate.out"
+pass "disabling monitoring removes orphans only at startup and preserves data"
+expect_failure "monitoring port conflict" "$test_root/port-conflict.out" \
+    env PATH="$test_root/lifecycle-bin:$PATH" DOCKER_TRACE="$test_root/conflict.trace" FAIL_COMPOSE_UP=true \
+    sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --force
+assert_contains 'port is already allocated' "$test_root/port-conflict.out"
+assert_contains 'monitoring: 3000/9090' "$test_root/port-conflict.out"
+assert_not_contains '--volumes' "$test_root/conflict.trace"
+pass "Compose failures preserve the Docker error and identify conflicting ports"
 
 expect_failure "non-empty target protection" "$test_root/non-empty.out" \
     sh "$quick_start" --directory "$local_dir" --provider local --no-start
@@ -290,11 +439,30 @@ expect_failure "generated destination guard" "$test_root/destination.out" \
 assert_contains 'generated file path is not a regular file' "$test_root/destination.out"
 pass "generated destination guard"
 
+SENDIUM_DLR_POSTGRESQL_JDBC_URL='jdbc:postgresql://db.example.test:5432/sendium' \
+SENDIUM_DLR_POSTGRESQL_USERNAME='operator' \
+SENDIUM_DLR_POSTGRESQL_PASSWORD='test-only-password' \
+SENDIUM_UPSTREAM_HOST='smpp.example.test' \
+SENDIUM_UPSTREAM_USERNAME='custom-user' \
+SENDIUM_UPSTREAM_PASSWORD='pass1234' \
+    sh "$quick_start" --directory "$test_root/monitoring-external" --provider custom --monitoring --no-start > "$test_root/monitoring-external.out" 2>&1
+assert_contains 'grafana-data:' "$test_root/monitoring-external/compose.yml"
+assert_not_contains 'postgres-data:' "$test_root/monitoring-external/compose.yml"
+assert_contains 'outSms.instance.upstream.host = smpp.example.test' "$test_root/monitoring-external/conf/smsg.properties"
+SENDIUM_UPSTREAM_USERNAME='prosms-user' SENDIUM_UPSTREAM_PASSWORD='pass1234' \
+    sh "$quick_start" --directory "$test_root/monitoring-prosms" --provider prosms --monitoring --no-start > "$test_root/monitoring-prosms.out" 2>&1
+assert_contains 'postgres-data:' "$test_root/monitoring-prosms/compose.yml"
+assert_contains 'outSms.instance.upstream.host = smpp.prosms.gr' "$test_root/monitoring-prosms/conf/smsg.properties"
+pass "monitoring supports custom/external-database and ProSMS/bundled-database modes"
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     docker compose -f "$local_dir/compose.yml" --project-directory "$local_dir" config --quiet
     docker compose -f "$prosms_dir/compose.yml" --project-directory "$prosms_dir" config --quiet
     docker compose -f "$custom_dir/compose.yml" --project-directory "$custom_dir" config --quiet
     docker compose -f "$external_dir/compose.yml" --project-directory "$external_dir" config --quiet
+    docker compose -f "$monitoring_dir/compose.yml" --project-directory "$monitoring_dir" config --quiet
+    docker compose -f "$test_root/monitoring-external/compose.yml" config --quiet
+    docker compose -f "$test_root/monitoring-prosms/compose.yml" config --quiet
     pass "Docker Compose parsing"
 else
     printf 'skip - Docker Compose parsing (Docker Compose unavailable)\n'
@@ -306,9 +474,31 @@ if [ -n "${SENDIUM_TEST_IMAGE-}" ]; then
     COMPOSE_PROJECT_NAME="$integration_project" sh "$quick_start" \
         --directory "$integration_dir" \
         --provider local \
+        --monitoring \
         --image "$SENDIUM_TEST_IMAGE" > "$test_root/integration.out" 2>&1
     assert_contains 'Sendium is ready.' "$test_root/integration.out"
     assert_contains 'Follow live logs with:' "$test_root/integration.out"
+    integration_grafana_password=$(sed -n "s/^GF_SECURITY_ADMIN_PASSWORD='\([0-9a-f][0-9a-f]*\)'$/\1/p" "$integration_dir/.grafana.env")
+    for dashboard in sendium-sms-operations sendium-application-health; do
+        attempt=0
+        until curl -fsS --max-time 10 -u "admin:$integration_grafana_password" \
+            "http://127.0.0.1:3000/api/dashboards/uid/$dashboard" > "$test_root/$dashboard.json" 2>/dev/null; do
+            attempt=$((attempt + 1))
+            [ "$attempt" -lt 30 ] || fail "dashboard not provisioned: $dashboard"
+            sleep 1
+        done
+    done
+    attempt=0
+    while :; do
+        curl -fsS --max-time 10 --get --data-urlencode 'query=up{job="sendium",instance="sendium:8080"}' 'http://127.0.0.1:9090/api/v1/query' > "$test_root/scrape.json"
+        if grep -E '"value":[[:space:]]*\[[^]]*,"1"\]' "$test_root/scrape.json" >/dev/null; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 30 ] || fail "Prometheus did not scrape Sendium"
+        sleep 1
+    done
+    pass "live monitoring dashboards and Sendium scrape"
     integration_http_user=$(sed -n "s/^SENDIUM_HTTP_USER='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
     integration_http_password=$(sed -n "s/^SENDIUM_HTTP_PASSWORD='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
     integration_http_api_key=$(sed -n "s/^SENDIUM_HTTP_API_KEY='\([^']*\)'$/\1/p" "$integration_dir/.sendium.env")
@@ -364,6 +554,20 @@ if [ -n "${SENDIUM_TEST_IMAGE-}" ]; then
         --data '{"from":"Sendium","to":"306910000000","text":"New key"}')
     assert_equals 202 "$native_status" "regenerated native API key submission"
     pass "forced regeneration recreates the running container"
+    assert_equals '' "$(docker ps -q --filter "label=com.docker.compose.project=$integration_project" --filter label=com.docker.compose.service=grafana)" "Grafana removed when monitoring disabled"
+    docker volume inspect "${integration_project}_grafana-data" >/dev/null || fail "Grafana data volume removed"
+    COMPOSE_PROJECT_NAME="$integration_project" sh "$quick_start" \
+        --directory "$integration_dir" --provider local --monitoring \
+        --image "$SENDIUM_TEST_IMAGE" --force > "$test_root/integration-reenable.out" 2>&1
+    assert_contains "$integration_grafana_password" "$integration_dir/.grafana.env"
+    attempt=0
+    until curl -fsS --max-time 10 -u "admin:$integration_grafana_password" \
+        'http://127.0.0.1:3000/api/dashboards/uid/sendium-sms-operations' > "$test_root/reenabled-dashboard.json" 2>/dev/null; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 30 ] || fail "dashboard not restored after re-enabling monitoring"
+        sleep 1
+    done
+    pass "live disable/re-enable preserves Grafana credentials and history volume"
 else
     printf 'skip - real container startup (set SENDIUM_TEST_IMAGE to enable)\n'
 fi

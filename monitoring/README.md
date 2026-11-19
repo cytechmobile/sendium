@@ -13,6 +13,12 @@ Standalone memory Pending/Selected/Routed gauges are always enabled. The single 
 
 ## Start
 
+For a generated Sendium runtime, use `sh quick-start.sh --monitoring` instead of
+this standalone Compose stack. It generates loopback-only monitoring services,
+an isolated random Grafana password and the correct Compose scrape target.
+See [Quick Start lifecycle and troubleshooting](../docs/02-docker-deployment.md#optional-quick-start-monitoring).
+The instructions below apply only to the separately managed monitoring stack.
+
 1. Start Sendium separately with its normal configuration, including PostgreSQL if DLR persistence is enabled. Confirm its `/q/metrics` endpoint responds.
 2. Edit the Sendium target in [`prometheus.yml`](prometheus.yml). The default `host.docker.internal:8080` assumes Docker Desktop with Sendium on the host. For a shared Docker network, use the Sendium service's reachable hostname and port. On Linux, use a reachable host address or configure Docker's host-gateway mapping. `localhost` inside the Prometheus container is **not** the host machine. Ensure the endpoint is reachable from that container without opening application ports or changing firewall rules unintentionally.
 3. Review published ports before starting. The existing Compose mappings `9090:9090` and `3000:3000` bind on all host interfaces. For a local-only setup, change them to `127.0.0.1:9090:9090` and `127.0.0.1:3000:3000`. Do not expose this development stack publicly; configure authentication, access restrictions and TLS appropriate to your deployment. Account identifiers are visible through metrics and dashboards.
@@ -54,6 +60,12 @@ Account series are created after the first accepted submission from an authentic
 Counts use full numbers with separators, not `K` abbreviations. Missing series display **No data** or **Unavailable**. JVM panels may be absent with native executables; database-pool/DLR panels may be absent when their subsystem is disabled. A first-start counter that has never observed an event may have no series. Do not interpret every empty panel as a failure.
 
 ## Provisioning and customization
+
+Quick Start maintenance: when dashboard or provisioning assets change, update
+the default `monitoring_ref` in `quick-start.sh` to a published commit containing
+those assets. Standalone scripts otherwise keep downloading the old pinned files.
+Quick Start pins its container versions independently; this standalone Compose
+stack currently uses `latest`.
 
 - Dashboard JSON: [`grafana/dashboards/`](grafana/dashboards/).
 - File provider: [`grafana/provisioning/dashboards/sendium.yml`](grafana/provisioning/dashboards/sendium.yml).
