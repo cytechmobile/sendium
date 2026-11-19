@@ -5,6 +5,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.util.MessageTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.sqlite.ProgressHandler;
 import org.sqlite.SQLiteConfig;
 import org.sqlite.SQLiteDataSource;
 
@@ -32,11 +35,11 @@ import java.util.UUID;
 
 /**
  * Local SQLite DLR storage owned by one process. Every operation runs under one monitor, so readers never observe
- * a partially applied transaction. Not selectable yet; provider acceptance, terminal outcomes, batches and
- * fenced delivery attempts are implemented; retention and metric snapshots are not.
+ * a partially applied transaction. Not selectable yet. Terminal delivery failures expire after
+ * the configured retention in bounded units; active work is never expired. Metric snapshots are read-only.
  * Underlying file corruption is not guaranteed to be detected (accepted file-storage limitation).
  */
-final class FileDlrStorage implements AutoCloseable {
+final class FileDlrStorage implements DlrStorageBackend {
     static final String DATABASE_FILE = "dlr.db";
     static final String LOCK_FILE = "owner.lock";
     static final int APPLICATION_ID = 0x53444C52; // "SDLR"
@@ -61,13 +64,28 @@ final class FileDlrStorage implements AutoCloseable {
             ORDER BY next_attempt_at, gateway_message_id
             LIMIT ?
             """;
+    // Only terminal delivery failures expire; active work is never selected.
+    static final String EXPIRED_FAILURES_SQL = """
+            DELETE FROM dlr_message WHERE gateway_message_id IN (
+                SELECT gateway_message_id FROM dlr_message
+                WHERE delivery_status = 'FAILED' AND failed_at <= ?
+                ORDER BY failed_at, gateway_message_id
+                LIMIT ?
+            )
+            """;
 
+    private static final Logger logger = LoggerFactory.getLogger(FileDlrStorage.class);
     private static final int SQLITE_CONSTRAINT = 19;
     private static final int MAX_BATCH_SIZE = 1_000;
     private static final Duration DEFAULT_CLAIM_DURATION = Duration.ofMinutes(5);
     private static final Set<String> REQUIRED_OBJECTS = Set.of(
             "dlr_meta", "dlr_message", "provider_correlation", "provider_correlation_gateway_idx",
-            "dlr_message_provider_idx", "dlr_message_http_due_idx", "dlr_message_smpp_replay_idx");
+            "dlr_message_provider_idx", "dlr_message_http_due_idx", "dlr_message_smpp_replay_idx",
+            "dlr_message_failed_expiry_idx");
+    private static final Duration DEFAULT_FAILED_RETENTION = Duration.ofDays(7);
+    private static final long EXPIRY_CHECK_INTERVAL_MILLIS = Duration.ofHours(1).toMillis();
+    private static final int CLEANUP_UNIT = 1_000;
+    private static final int SQLITE_INTERRUPT = 9;
     private static final List<String> SCHEMA = List.of("""
             CREATE TABLE dlr_meta (
                 meta_key TEXT PRIMARY KEY,
@@ -121,6 +139,9 @@ final class FileDlrStorage implements AutoCloseable {
             """, """
             CREATE INDEX dlr_message_smpp_replay_idx ON dlr_message (system_id, resolved_at, created_at, gateway_message_id)
             WHERE delivery_channel = 'SMPP' AND delivery_status = 'PENDING'
+            """, """
+            CREATE INDEX dlr_message_failed_expiry_idx ON dlr_message (failed_at, gateway_message_id)
+            WHERE delivery_status = 'FAILED'
             """);
     private static final String START_ATTEMPT_SQL = """
             UPDATE dlr_message SET delivery_attempt_count = delivery_attempt_count + 1, last_attempt_at = ?,
@@ -143,28 +164,40 @@ final class FileDlrStorage implements AutoCloseable {
     private final FileLock ownerLock;
     private final Clock clock;
     private final long claimDurationMillis;
+    private final long failedRetentionMillis;
+    private long lastExpiryCheck;
+    private boolean expiring;
     private Connection connection;
     private DlrStorageException unavailable;
     private boolean closed;
 
     private FileDlrStorage(Path directory, FileChannel ownerChannel, FileLock ownerLock, Clock clock,
-                           long claimDurationMillis) {
+                           long claimDurationMillis, long failedRetentionMillis) {
         this.directory = directory;
         this.ownerChannel = ownerChannel;
         this.ownerLock = ownerLock;
         this.clock = clock;
         this.claimDurationMillis = claimDurationMillis;
+        this.failedRetentionMillis = failedRetentionMillis;
+        this.lastExpiryCheck = clock.millis();
     }
 
     static FileDlrStorage open(Path directory) {
         return open(directory, DEFAULT_CLAIM_DURATION, Clock.systemUTC());
     }
 
-    // Takes exclusive ownership of the directory, then opens or initializes its database.
     static FileDlrStorage open(Path directory, Duration claimDuration, Clock clock) {
+        return open(directory, claimDuration, DEFAULT_FAILED_RETENTION, clock);
+    }
+
+    // Takes exclusive ownership of the directory, then opens or initializes its database.
+    static FileDlrStorage open(Path directory, Duration claimDuration, Duration failedRetention, Clock clock) {
         Objects.requireNonNull(clock, "clock");
         if (claimDuration == null || claimDuration.isNegative() || claimDuration.isZero()) {
             throw new IllegalArgumentException("Delivery claim duration must be positive");
+        }
+        if (failedRetention == null || failedRetention.isNegative() || failedRetention.isZero()) {
+            throw new IllegalArgumentException("Failed DLR retention must be positive");
         }
         Path root = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
         FileChannel channel = null;
@@ -185,7 +218,7 @@ final class FileDlrStorage implements AutoCloseable {
             if (lock == null) {
                 throw new DlrStorageException("fileDlrOpen|error|reason:ownershipConflict");
             }
-            storage = new FileDlrStorage(root, channel, lock, clock, claimDuration.toMillis());
+            storage = new FileDlrStorage(root, channel, lock, clock, claimDuration.toMillis(), failedRetention.toMillis());
             storage.openDatabase();
             return storage;
         } catch (IOException | SQLException | RuntimeException failure) {
@@ -286,7 +319,8 @@ final class FileDlrStorage implements AutoCloseable {
         }
     }
 
-    synchronized void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
+    @Override
+    public synchronized void recordProviderAccepted(MessageState state, String providerName, String providerMessageId) {
         String gatewayId = prepareAccepted(state, providerName, providerMessageId);
         boolean accepted = write("record provider acceptance",
             c -> acceptIn(c, gatewayId, state, providerName, providerMessageId));
@@ -296,13 +330,15 @@ final class FileDlrStorage implements AutoCloseable {
         }
     }
 
-    synchronized Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
+    @Override
+    public synchronized Optional<MessageState> recordProviderRejected(MessageState state, String providerName,
                                                                String providerMessageId, int dlrState, String errorCode) {
         String gatewayId = prepareRejected(state, providerName, providerMessageId, dlrState, errorCode);
         return write("record provider rejection", c -> rejectIn(c, gatewayId, state));
     }
 
-    synchronized Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
+    @Override
+    public synchronized Optional<MessageState> resolveDlr(String providerName, String providerMessageId,
                                                    MessageState.MessageStatus status, int dlrState, String errorCode) {
         Objects.requireNonNull(status, "status");
         requireCorrelation(providerName, providerMessageId);
@@ -311,7 +347,8 @@ final class FileDlrStorage implements AutoCloseable {
     }
 
     // Applies events in order as one transaction: either every result is published or none is.
-    synchronized List<ProviderDlrEvent.Result> applyProviderBatch(List<ProviderDlrEvent> events) {
+    @Override
+    public synchronized List<ProviderDlrEvent.Result> applyProviderBatch(List<ProviderDlrEvent> events) {
         List<ProviderDlrEvent> batch = List.copyOf(events);
         if (batch.isEmpty()) {
             return List.of();
@@ -491,7 +528,8 @@ final class FileDlrStorage implements AutoCloseable {
         }
     }
 
-    synchronized Optional<MessageState> getState(String gatewayMsgId) {
+    @Override
+    public synchronized Optional<MessageState> getState(String gatewayMsgId) {
         String gatewayId = parseGatewayId(gatewayMsgId);
         return read("read DLR state", c -> stateIn(c, gatewayId));
     }
@@ -509,8 +547,113 @@ final class FileDlrStorage implements AutoCloseable {
         });
     }
 
+    @Override
+    public String backend() {
+        return "file";
+    }
+
+    @Override
+    public synchronized void verifyAvailable() {
+        read("verify DLR storage availability", c -> {
+            try (Statement probe = c.createStatement()) {
+                probe.executeQuery("SELECT 1 FROM dlr_message WHERE 0").close();
+            }
+            return null;
+        });
+    }
+
+    // Read-only and side-effect free: no cleanup runs, and an over-budget snapshot is reported unavailable.
+    @Override
+    public synchronized Optional<ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
+        if (maxRows < 1 || maxRows == Integer.MAX_VALUE || timeout == null || timeout.getNano() != 0 ||
+                timeout.getSeconds() < 1 || timeout.getSeconds() > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Storage metric budget must be positive with a whole-second query timeout");
+        }
+        return readMetricSnapshot(maxRows, System.nanoTime() + timeout.toNanos());
+    }
+
+    synchronized Optional<ReceiptCounts> readMetricSnapshot(int maxRows, long deadlineNanos) {
+        requireAvailable();
+        try {
+            // JDBC query timeouts are not an elapsed-execution deadline; SQLite's progress callback is.
+            ProgressHandler.setHandler(connection, 1_000, new ProgressHandler() {
+                @Override
+                protected int progress() {
+                    return System.nanoTime() - deadlineNanos >= 0 ? 1 : 0;
+                }
+            });
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT delivery_status FROM dlr_message LIMIT ?")) {
+                statement.setInt(1, maxRows + 1);
+                try (ResultSet rows = statement.executeQuery()) {
+                    long waiting = 0;
+                    long pending = 0;
+                    long failed = 0;
+                    int seen = 0;
+                    while (rows.next()) {
+                        if (++seen > maxRows) {
+                            return Optional.empty();
+                        }
+                        switch (rows.getString(1)) {
+                            case "WAITING_PROVIDER" -> waiting++;
+                            case "PENDING" -> pending++;
+                            case "FAILED" -> failed++;
+                            default -> throw new SQLException("fileDlrSnapshot|error|reason:unknownState");
+                        }
+                    }
+                    return Optional.of(new ReceiptCounts(waiting, pending, failed));
+                }
+            } finally {
+                ProgressHandler.clearHandler(connection);
+            }
+        } catch (SQLException e) {
+            if ((e.getErrorCode() & 0xff) == SQLITE_INTERRUPT) {
+                return Optional.empty();
+            }
+            throw latch("collect receipt storage metrics", e);
+        }
+    }
+
+    // Deletes at most one bounded unit of expired terminal failures in its own transaction.
+    synchronized int expireFailures(int unit) {
+        if (unit < 1) {
+            throw new IllegalArgumentException("Cleanup unit must be positive");
+        }
+        long cutoff = clock.millis() - failedRetentionMillis;
+        boolean outer = expiring;
+        expiring = true;
+        try {
+            return write("expire failed DLR deliveries", c -> {
+                try (PreparedStatement delete = c.prepareStatement(EXPIRED_FAILURES_SQL)) {
+                    delete.setLong(1, cutoff);
+                    delete.setInt(2, unit);
+                    return delete.executeUpdate();
+                }
+            });
+        } finally {
+            expiring = outer;
+        }
+    }
+
+    // Runs at most once per interval from a write; each full unit commits separately until the backlog drains.
+    private void checkExpiry() {
+        if (expiring || clock.millis() - lastExpiryCheck < EXPIRY_CHECK_INTERVAL_MILLIS) {
+            return;
+        }
+        lastExpiryCheck = clock.millis();
+        try {
+            int deleted;
+            do {
+                deleted = expireFailures(CLEANUP_UNIT);
+            } while (deleted == CLEANUP_UNIT);
+        } catch (DlrStorageException e) {
+            logger.warn("fileDlrRetention|error|reason:{}", reason(e.getCause() == null ? e : e.getCause()), e);
+        }
+    }
+
     // Existing contract: returns the complete ordered result for one system; it is not paginated.
-    synchronized List<MessageState> listPendingSmppDeliveries(String systemId) {
+    @Override
+    public synchronized List<MessageState> listPendingSmppDeliveries(String systemId) {
         if (systemId == null || systemId.isBlank()) {
             return List.of();
         }
@@ -529,7 +672,8 @@ final class FileDlrStorage implements AutoCloseable {
     }
 
     // Each returned receipt's attempt and lease are committed before it is returned.
-    synchronized List<MessageState> claimDueHttpDeliveries(int limit) {
+    @Override
+    public synchronized List<MessageState> claimDueHttpDeliveries(int limit) {
         if (limit < 1) {
             throw new IllegalArgumentException("Delivery limit must be positive");
         }
@@ -554,7 +698,8 @@ final class FileDlrStorage implements AutoCloseable {
         });
     }
 
-    synchronized Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
+    @Override
+    public synchronized Optional<MessageState> startDeliveryAttempt(String gatewayMsgId,
                                                              MessageState.DeliveryChannel expectedChannel) {
         Objects.requireNonNull(expectedChannel, "expectedChannel");
         if (expectedChannel == MessageState.DeliveryChannel.NONE) {
@@ -566,13 +711,15 @@ final class FileDlrStorage implements AutoCloseable {
     }
 
     // Successful completion of the current attempt removes the record and its correlations (cascade).
-    synchronized boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
+    @Override
+    public synchronized boolean completeDelivery(String gatewayMsgId, int expectedAttempt) {
         return finishAttempt("complete DLR delivery", gatewayMsgId, expectedAttempt,
             "DELETE FROM dlr_message WHERE gateway_message_id = ? AND delivery_status = 'PENDING' " +
                 "AND delivery_attempt_count = ?", null, null);
     }
 
-    synchronized boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
+    @Override
+    public synchronized boolean retryDelivery(String gatewayMsgId, int expectedAttempt, String result, long nextAttemptAt) {
         return finishAttempt("retry DLR delivery", gatewayMsgId, expectedAttempt, """
                 UPDATE dlr_message SET last_delivery_result = ?, next_attempt_at = ?, claimed_until = NULL,
                     updated_at = ?
@@ -580,7 +727,8 @@ final class FileDlrStorage implements AutoCloseable {
                 """, normalizeResult(result), nextAttemptAt);
     }
 
-    synchronized boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+    @Override
+    public synchronized boolean failDelivery(String gatewayMsgId, int expectedAttempt, String result) {
         return finishAttempt("fail DLR delivery", gatewayMsgId, expectedAttempt, """
                 UPDATE dlr_message SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL,
                     claimed_until = NULL, failed_at = ?, updated_at = ?
@@ -588,7 +736,8 @@ final class FileDlrStorage implements AutoCloseable {
                 """, normalizeResult(result), clock.millis());
     }
 
-    synchronized boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
+    @Override
+    public synchronized boolean failInvalidDelivery(String gatewayMsgId, int expectedAttempt, String result) {
         return finishAttempt("mark invalid DLR delivery failed", gatewayMsgId, expectedAttempt, """
                 UPDATE dlr_message SET delivery_status = 'FAILED', last_delivery_result = ?, next_attempt_at = NULL,
                     claimed_until = NULL, failed_at = ?, resolved_at = COALESCE(resolved_at, failed_at), updated_at = ?
@@ -870,6 +1019,8 @@ final class FileDlrStorage implements AutoCloseable {
      * any other failure (commit, I/O, disk full, failed rollback) makes it unavailable until reopened.
      */
     private <T> T write(String operation, SqlWork<T> work) {
+        requireAvailable();
+        checkExpiry();
         requireAvailable();
         try {
             connection.setAutoCommit(false);

@@ -47,7 +47,7 @@ class FileDlrOutcomeTest {
         MessageState g = httpState();
         try (var storage = FileDlrStorage.open(root)) {
             var service = new DlrService();
-            service.storage = new FileDlrBridge(storage);
+            service.storage = storage;
             storage.recordProviderAccepted(g, "P", "X");
 
             assertThat(service.resolveDlr("P", "X", StandardMessage.DLR_STAT_ACCEPTD, "0")).isEmpty();

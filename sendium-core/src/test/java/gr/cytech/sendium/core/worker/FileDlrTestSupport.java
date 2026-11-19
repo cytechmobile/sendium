@@ -5,6 +5,7 @@ import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -43,6 +44,37 @@ final class FileDlrTestSupport {
     static void execute(Path directory, String sql) throws SQLException {
         try (Connection connection = raw(directory); Statement statement = connection.createStatement()) {
             statement.execute(sql);
+        }
+    }
+
+    /**
+     * Inserts resolved receipts in one transaction while the store is closed. The timestamp is the due time of
+     * pending HTTP rows and the failure instant of failed rows.
+     */
+    static void seed(Path directory, int count, String channel, String status, String systemId, long timestamp)
+            throws SQLException {
+        try (Connection connection = raw(directory)) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO dlr_message (gateway_message_id, system_id, forward_dlr_url, http_callback_format,
+                        dlr_mask, provider_status, delivery_channel, delivery_status, next_attempt_at, resolved_at,
+                        failed_at, created_at, updated_at)
+                    VALUES (?, ?, 'https://seed.test', 'KANNEL_GET', 3, 'DELIVERED', ?, ?, ?, ?, ?, 0, 0)
+                    """)) {
+                boolean failed = "FAILED".equals(status);
+                for (int i = 0; i < count; i++) {
+                    insert.setString(1, UUID.randomUUID().toString());
+                    insert.setString(2, systemId);
+                    insert.setString(3, channel);
+                    insert.setString(4, status);
+                    insert.setObject(5, !failed && "HTTP".equals(channel) ? timestamp : null);
+                    insert.setLong(6, timestamp);
+                    insert.setObject(7, failed ? timestamp : null);
+                    insert.addBatch();
+                }
+                insert.executeBatch();
+            }
+            connection.commit();
         }
     }
 

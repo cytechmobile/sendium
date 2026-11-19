@@ -63,7 +63,7 @@ class FileDlrBatchTest {
         managed.meterRegistry = metrics;
         Field delegate = ManagedDlrStorage.class.getDeclaredField("delegate");
         delegate.setAccessible(true);
-        delegate.set(managed, new FileDlrBridge(storage));
+        delegate.set(managed, storage);
         var processor = new ProviderDlrProcessor(managed, metrics, 3, Duration.ofSeconds(2), 10, Duration.ofSeconds(5));
         try {
             List<CompletableFuture<?>> futures = List.of(
