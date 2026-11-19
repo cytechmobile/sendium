@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
+import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import java.util.logging.SimpleFormatter;
@@ -48,16 +49,27 @@ class FileDlrDiagnosticsTest {
         }
     };
 
+    // Strong references keep the configured levels; CI runs with QUARKUS_LOG_LEVEL=ERROR, which would
+    // otherwise filter the INFO/WARN events under test before they reach the handler.
+    private final List<Logger> loggers = List.of(Logger.getLogger(ManagedDlrStorage.class.getName()),
+            Logger.getLogger(FileDlrStorage.class.getName()));
+    private final List<Level> previousLevels = new java.util.ArrayList<>();
+
     @BeforeEach
     void attach() {
-        Logger.getLogger(ManagedDlrStorage.class.getName()).addHandler(capture);
-        Logger.getLogger(FileDlrStorage.class.getName()).addHandler(capture);
+        for (Logger logger : loggers) {
+            previousLevels.add(logger.getLevel());
+            logger.setLevel(Level.ALL);
+            logger.addHandler(capture);
+        }
     }
 
     @AfterEach
     void detach() {
-        Logger.getLogger(ManagedDlrStorage.class.getName()).removeHandler(capture);
-        Logger.getLogger(FileDlrStorage.class.getName()).removeHandler(capture);
+        for (int i = 0; i < loggers.size(); i++) {
+            loggers.get(i).removeHandler(capture);
+            loggers.get(i).setLevel(previousLevels.get(i));
+        }
     }
 
     @Test
