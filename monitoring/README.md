@@ -61,6 +61,12 @@ Counts use full numbers with separators, not `K` abbreviations. Missing series d
 
 ## Provisioning and customization
 
+Quick Start maintenance: when dashboard or provisioning assets change, update
+the default `monitoring_ref` in `quick-start.sh` to a published commit containing
+those assets. Standalone scripts otherwise keep downloading the old pinned files.
+Quick Start pins its container versions independently; this standalone Compose
+stack currently uses `latest`.
+
 - Dashboard JSON: [`grafana/dashboards/`](grafana/dashboards/).
 - File provider: [`grafana/provisioning/dashboards/sendium.yml`](grafana/provisioning/dashboards/sendium.yml).
 - Datasource: [`grafana/provisioning/datasources/prometheus.yml`](grafana/provisioning/datasources/prometheus.yml).

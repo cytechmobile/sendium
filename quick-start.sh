@@ -285,6 +285,7 @@ case "$(uname -r 2>/dev/null || true)" in
 esac
 
 generated_files='.sendium.env .gitignore compose.yml conf/credentials.yml conf/smsg.properties conf/routingTable.conf'
+created_monitoring_dirs=''
 monitoring_assets='grafana/dashboards/sms-operations.json grafana/dashboards/application-health.json grafana/provisioning/dashboards/sendium.yml grafana/provisioning/datasources/prometheus.yml'
 if [ "$monitoring" = true ]; then
     generated_files="$generated_files .grafana.env monitoring/source.txt monitoring/prometheus.yml"
@@ -300,6 +301,13 @@ for runtime_dir in conf data logs monitoring monitoring/grafana monitoring/grafa
         fail "generated directory path is not a directory: $target_dir/$runtime_dir"
     fi
 done
+if [ "$monitoring" = true ]; then
+    for runtime_dir in monitoring monitoring/grafana monitoring/grafana/dashboards monitoring/grafana/provisioning monitoring/grafana/provisioning/dashboards monitoring/grafana/provisioning/datasources; do
+        if [ ! -d "$target_dir/$runtime_dir" ]; then
+            created_monitoring_dirs="$runtime_dir $created_monitoring_dirs"
+        fi
+    done
+fi
 
 for generated_file in $generated_files; do
     if [ -L "$target_dir/$generated_file" ]; then
@@ -483,6 +491,11 @@ cleanup_quick_start() {
             fi
         done
     fi
+    if [ "$install_complete" = false ]; then
+        for runtime_dir in $created_monitoring_dirs; do
+            rmdir "$target_dir/$runtime_dir" 2>/dev/null || true
+        done
+    fi
     if [ -d "$staging_dir" ]; then
         rm -rf "$staging_dir"
     fi
@@ -495,9 +508,12 @@ if [ "$monitoring" = true ]; then
     esac
     script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
     asset_source="https://raw.githubusercontent.com/cytechmobile/sendium/$monitoring_ref/monitoring"
-    if [ -d "$script_dir/monitoring/grafana/dashboards" ]; then
+    if [ -f "$script_dir/monitoring/docker-compose.yml" ] && [ -d "$script_dir/monitoring/grafana/dashboards" ]; then
         asset_source="$script_dir/monitoring"
         printf 'Monitoring assets: local checkout %s\n' "$asset_source"
+        if [ "${SENDIUM_MONITORING_REF+x}" = x ]; then
+            printf 'Notice: SENDIUM_MONITORING_REF is ignored because local checkout assets are available.\n'
+        fi
     else
         command -v curl >/dev/null 2>&1 || fail "curl is required to download monitoring assets"
         printf 'Monitoring assets: Git reference %s\n' "$monitoring_ref"

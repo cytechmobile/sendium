@@ -111,6 +111,8 @@ are replaced. Local checkout assets take precedence over the override.
 Container images are pinned independently in generated Compose.
 
 Rerun with the same `--directory` and `--force --monitoring` to regenerate.
+`--force` replaces generated monitoring files, including `monitoring/prometheus.yml`;
+back up extra scrape targets or other manual customizations before regenerating.
 HTTP/SMPP credentials rotate as usual; Grafana and bundled database passwords
 are retained. If Grafana credentials are missing or malformed, restore
 `.grafana.env` from backup instead of generating a replacement that cannot reset
@@ -129,18 +131,30 @@ monitoring files, `.grafana.env`, and named data volumes. Re-enable with
 `--force --monitoring` in the same directory/project to recover history.
 Never use `down --volumes` unless you intend to erase persistent data.
 
+To intentionally reset Grafana only (this erases its saved dashboards/settings):
+stop and remove its container with `docker compose ... stop grafana` and
+`docker compose ... rm -f grafana`, then remove only its named
+`<project>_grafana-data` volume with `docker volume rm`. Verify the exact volume
+name in `docker volume ls` first. Keep `.grafana.env` and run
+`docker compose ... up -d grafana` to initialize the new database with that password.
+Do not delete PostgreSQL or Prometheus volumes. Deleting a runtime directory does
+not delete Docker volumes: reusing its project name may reconnect a Grafana
+database whose original password differs from newly generated credentials.
+
 `--no-start` always means generate only for **all** selected services. It neither
 starts nor stops existing containers, even when disabling monitoring. Apply the
 printed `up -d --force-recreate --remove-orphans` command later.
 
-If startup reports a port conflict, inspect the Docker error for the owner of
+- **Port conflicts:** inspect the Docker error for the owner of
 3000/9090 (monitoring) or 8080/27777 (Sendium); stop only the conflicting service
-or deliberately edit generated port bindings before starting manually.
-If monitoring fails readiness, inspect `docker compose ... logs prometheus grafana`.
-Allow at least one 15-second scrape interval for Sendium data; native images may
+  or deliberately edit generated port bindings before starting manually.
+- **Readiness:** inspect `docker compose ... logs prometheus grafana`.
+- **Missing data:** allow at least one 15-second scrape interval; native images may
 not expose JVM panels. See the [dashboard guide](../monitoring/README.md) for
-metric semantics. File download errors leave the prior runtime unchanged;
-check connectivity and the selected Git reference, then retry.
+  metric semantics. Older application images may lack the SMS dashboard metrics
+  even when Prometheus reports a successful scrape.
+- **Downloads:** errors leave the prior runtime unchanged; check connectivity and
+  the selected Git reference, then retry.
 
 ## Manual Deployment
 

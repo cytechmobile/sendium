@@ -158,6 +158,9 @@ assert_not_contains "$grafana_password" "$monitoring_dir/.sendium.env"
 assert_not_contains "$grafana_password" "$monitoring_dir/compose.yml"
 assert_not_contains "$grafana_password" "$test_root/monitoring.out"
 pass "monitoring generation reuses dashboards with isolated credentials and loopback ports"
+SENDIUM_MONITORING_REF=ignored-test sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start --force > "$test_root/override.out" 2>&1
+assert_contains 'SENDIUM_MONITORING_REF is ignored' "$test_root/override.out"
+pass "explicit asset override reports local checkout precedence"
 
 sh "$quick_start" --directory "$monitoring_dir" --provider local --monitoring --no-start --force > "$test_root/monitoring-rerun.out" 2>&1
 assert_contains "$grafana_password" "$monitoring_dir/.grafana.env"
@@ -214,6 +217,30 @@ expect_failure "asset download failure" "$test_root/download-failure.out" \
 cmp "$test_root/downloaded-compose.saved" "$test_root/downloaded/compose.yml" || fail "download failure changed Compose"
 cmp "$test_root/downloaded-env.saved" "$test_root/downloaded/.sendium.env" || fail "download failure changed credentials"
 pass "standalone versioned downloads start no services and fail without replacing runtime"
+cp "$quick_start" "$test_root/downloaded/quick-start.sh"
+PATH="$test_root/download-bin:$PATH" MONITORING_FIXTURES="$repo_dir/monitoring" \
+    DOWNLOAD_TRACE="$test_root/rerun-download.trace" SENDIUM_MONITORING_REF=v-rerun \
+    sh "$test_root/downloaded/quick-start.sh" --directory "$test_root/downloaded" --provider local --monitoring --no-start --force > "$test_root/rerun-download.out" 2>&1
+assert_contains '/v-rerun/monitoring' "$test_root/downloaded/monitoring/source.txt"
+assert_equals 4 "$(wc -l < "$test_root/rerun-download.trace" | tr -d ' ')" "generated assets are not checkout assets"
+pass "same-directory standalone reruns retain versioned download semantics"
+
+mkdir -p "$test_root/install-failure-bin"
+cat > "$test_root/install-failure-bin/mv" <<'EOF'
+#!/bin/sh
+case "$*" in *monitoring/source.txt*) exit 1 ;; esac
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$test_root/install-failure-bin/mv"
+mkdir -p "$test_root/install-failure/monitoring"
+printf 'preserve\n' > "$test_root/install-failure/monitoring/user-file"
+expect_failure "monitoring install failure" "$test_root/install-failure.out" \
+    env PATH="$test_root/install-failure-bin:$PATH" REAL_MV="$(command -v mv)" \
+    sh "$quick_start" --directory "$test_root/install-failure" --provider local --monitoring --no-start --force
+assert_contains preserve "$test_root/install-failure/monitoring/user-file"
+[ ! -d "$test_root/install-failure/monitoring/grafana" ] || fail "new empty monitoring directories survived rollback"
+[ ! -f "$test_root/install-failure/compose.yml" ] || fail "partially installed Compose survived rollback"
+pass "failed installation removes newly created empty directories without deleting existing content"
 
 mkdir -p "$test_root/lifecycle-bin"
 cat > "$test_root/lifecycle-bin/docker" <<'EOF'
@@ -463,8 +490,8 @@ if [ -n "${SENDIUM_TEST_IMAGE-}" ]; then
     done
     attempt=0
     while :; do
-        curl -fsS --max-time 10 'http://127.0.0.1:9090/api/v1/query?query=up' > "$test_root/scrape.json"
-        if grep -E '"instance":"sendium:8080".*"1"' "$test_root/scrape.json" >/dev/null; then
+        curl -fsS --max-time 10 --get --data-urlencode 'query=up{job="sendium",instance="sendium:8080"}' 'http://127.0.0.1:9090/api/v1/query' > "$test_root/scrape.json"
+        if grep -E '"value":[[:space:]]*\[[^]]*,"1"\]' "$test_root/scrape.json" >/dev/null; then
             break
         fi
         attempt=$((attempt + 1))
