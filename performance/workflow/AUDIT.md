@@ -19,8 +19,8 @@ Passing checks:
   including report publication, sampling, redaction and shutdown. Disposable
   PostgreSQL/container/network resources were removed afterward.
 
-These targeted checks complement the complete topology/TLS/lifecycle rehearsal
-in Task 5.5; they do not replace it.
+These targeted checks complement real AWS topology/TLS/lifecycle runs; they do
+not replace them.
 
 ## Concrete findings fixed
 
@@ -86,7 +86,7 @@ branch and protected environment must therefore follow the repository's
 maintainer-controlled review/admission policy. This audit checks the committed
 definition and exact environment-bound OIDC trust, not repository settings.
 
-After Task 5.5, live validation must confirm actual OIDC/IAM enforcement,
+Live validation must confirm actual OIDC/IAM enforcement,
 environment admission, hosted ARM runner availability, server-side cancellation
 and job scheduling, artifact availability/organization retention limits, SSM/VPC
 endpoint behavior and scheduled expiry. The declared-condition model does not

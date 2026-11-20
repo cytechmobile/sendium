@@ -11,9 +11,6 @@ compatibility and invokes CloudFormation/SSM. Separate [reporting and cleanup](R
 jobs finalize results without cloud credentials and delete run-owned resources.
 The [offline permissions/failure audit](AUDIT.md) records the verified boundaries
 and remaining hosted confirmations. A completed preparation run is not a benchmark observation.
-The [complete local rehearsal](../local/README.md) is implemented and its
-[lifecycle verification](../local/VERIFICATION.md) satisfies the prerequisite before
-AWS validation in Task 6.1.
 
 Only provisioning/execution requires review in `sendium-performance`.
 Diagnostics and cleanup use `sendium-performance-recovery` without required
@@ -198,7 +195,7 @@ performance workloads remain separate verification steps.
 
 The maintained harness uses `-Pperformance -pl
 performance/harness verify`, including its unit/socket tests. Ordinary repository
-CI and the local/AWS scenario checks remain separate acceptance evidence.
+CI and AWS scenario runs remain separate acceptance evidence.
 
 ## Published build inputs
 

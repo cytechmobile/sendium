@@ -116,8 +116,7 @@ inconclusive until diagnostic evidence is finalized separately.
 
 The [reporting and cleanup jobs](REPORTING.md) perform read-only credit collection,
 unprivileged finalization and immediate cleanup for success/failure/cancellation.
-Independent expiry is also required before provisioning. Task 5.5's complete local
-rehearsal remains required before AWS validation in 6.1.
+Independent expiry is also required before provisioning.
 
 ## Offline verification
 
@@ -132,4 +131,4 @@ mixed architectures, AMI-minimum storage, endpoint AZ intersections, unavailable
 settings, pagination bounds, real runtime-metadata formats, checksum/source
 failures, exact staging expiry/template parameter alignment, assumed-role gating,
 altered build inputs and failure retrieval. Hosted OIDC, IAM, capacity, SSM and
-resource lifecycle behavior are verified separately after the local rehearsal.
+resource lifecycle behavior are verified separately by real AWS runs.

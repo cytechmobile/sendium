@@ -159,8 +159,7 @@ To additionally exercise the real packaged JVM finalizer, build the harness and
 set `SENDIUM_PUBLISH_JAR` to its absolute primary JAR path before running tests.
 The test uses an explicitly synthetic one-message observation, verifies unchanged
 measurements and checks that missing resources stay inconclusive. It requires no
-AWS credentials or resources. The complete local rehearsal remains Task 5.5,
-before real AWS validation in 6.1.
+AWS credentials or resources.
 
 See [the permissions/failure audit](AUDIT.md) for fixed findings, outcome coverage
 and the remaining hosted/live confirmations.

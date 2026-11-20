@@ -106,8 +106,7 @@ controller runs the same check; a disabled, modified, disconnected or throttled-
 zero handler blocks new benchmark execution. This proves matching configuration,
 not successful scheduled invocation or live IAM/deletion behavior.
 
-The complete local rehearsal in Task 5.5 remains required before Task 6.1, which
-observes actual AWS scheduled recovery, endpoints, permissions and resource
-deletion. Repository checks do not deploy AWS resources. Keep the bootstrap
+Actual AWS scheduled recovery, endpoints, permissions and resource deletion are
+observed only by real AWS runs. Repository checks do not deploy AWS resources. Keep the bootstrap
 service/control roles and expiry installed until all runs are clean; disable the
 schedule before retiring the bootstrap and inventory its retained bucket/code.

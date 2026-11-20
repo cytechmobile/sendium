@@ -1,4 +1,7 @@
-"""Generate ephemeral local database PKI and password files, never public artifacts."""
+"""Generate ephemeral PostgreSQL PKI and password files for Kannel node verification, never public artifacts.
+
+Usage: python performance/kannel/tls.py <directory>  (default /tls). Files are owned by UID 70 (postgres).
+"""
 
 import os
 from pathlib import Path
