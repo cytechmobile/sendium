@@ -259,10 +259,14 @@ class WorkflowTests(unittest.TestCase):
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 16)
+        self.assertEqual(len(inputs), 14)
+        self.assertNotIn("worker_tps", inputs)
+        self.assertNotIn("drain_seconds", inputs)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)
+        self.assertEqual(normalized["preset"]["workload"]["workerTps"], 0)
+        self.assertEqual(normalized["preset"]["workload"]["drainTimeoutSeconds"], 120)
 
     def test_unprivileged_jobs_do_not_receive_oidc_environments_secrets_or_persisted_checkout_tokens(self):
         for name in ("validate", "application", "harness", "build-ready"):

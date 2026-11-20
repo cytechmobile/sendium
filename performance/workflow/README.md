@@ -23,8 +23,8 @@ reviewers, with separate read-only and deletion-only roles. See
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
-allows 25 top-level dispatch inputs (checked 2026-10-16). All 15 required controls
-therefore have individual fields; durations do not need a grouped string.
+allows 25 top-level dispatch inputs (checked 2026-10-16). The form exposes 14 inputs
+(13 required), with worker TPS and maximum drain controlled by the preset instead.
 
 | Input | Default | Validation |
 |---|---:|---|
@@ -37,13 +37,16 @@ therefore have individual fields; durations do not need a grouped string.
 | `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
 | `offered_rate` | 30 | Finite, positive messages/sec, at most 1,000,000,000; fractional rates supported |
-| `worker_tps` | 0 | Nonnegative Java-compatible integer; 0 means unlimited |
 | `warmup_seconds` | 120 | Integer, 0–600 |
 | `measurement_seconds` | 600 | Integer, 1–3600 |
-| `drain_seconds` | 120 | Integer, 0–600 |
 | `dlr_enabled` | `true` | Boolean; `false` remains false through normalization |
 | `provider_response_delay_ms` | 5 | Integer, 0–10000 |
 | `provider_dlr_delay_ms` | 1000 | Integer, 0–60000 |
+
+The `worker_tps` and `drain_seconds` input blocks are commented out of the workflow.
+Normalization uses the preset defaults: `workerTps: 0` (unlimited) and
+`drainTimeoutSeconds: 120`. Both settings remain active internally; hiding their
+form controls does not disable the outgoing worker limit mechanism or drain phase.
 
 Settings merge into `performance/presets/aws-private-jvm-v1.json` and pass the
 existing workload schema/compatibility/lifecycle-budget checks before builds.
