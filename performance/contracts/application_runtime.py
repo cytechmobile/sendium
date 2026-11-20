@@ -17,6 +17,18 @@ def storage_profile(runtime):
             "Message storage profile conflicts with pending backend")
     return profile
 
+
+DLR_STORAGES = ("postgresql", "file")
+
+
+def dlr_storage(runtime, target="sendium"):
+    """Sendium's startup DLR backend; file storage is a Sendium-only option."""
+    storage = runtime.get("dlrStorage", "postgresql")
+    require(storage in DLR_STORAGES, "DLR storage must be postgresql or file")
+    require(storage == "postgresql" or target == "sendium", "Kannel cannot select Sendium file DLR storage")
+    return storage
+
+
 ELF_MACHINES = {"x86_64": 62, "arm64": 183}
 CREDENTIAL_ENVIRONMENT = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
                           "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",

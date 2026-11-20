@@ -18,7 +18,7 @@ import time
 
 from aws_cli import AwsCli, AwsError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
-from application_runtime import validate_runtime_mode, verify_elf_header, storage_profile
+from application_runtime import validate_runtime_mode, verify_elf_header, storage_profile, dlr_storage
 
 
 ROOT = Path("/var/lib/sendium-benchmark")
@@ -153,6 +153,9 @@ class Node:
         self.mode = validate_runtime_mode(document.get("applicationRuntime", "jvm"))
         self.storage_profile = storage_profile(document)
         self.pending_backend = self.storage_profile.split("/")[0]
+        self.dlr_storage = dlr_storage(document, self.target)
+        if self.dlr_storage == "file" and self.source != "sendium":
+            raise ValueError("File DLR storage belongs only to the Sendium gateway node")
         if self.pending_backend not in ("memory", "file"):
             raise ValueError("Pending backend must be memory or file")
         if self.pending_backend == "file" and (self.target != "sendium" or self.source != "sendium"):
@@ -281,12 +284,19 @@ class Node:
             spool = self.root / "pending"
             spool.mkdir(mode=0o700, exist_ok=True)
             settings["sendium.message.pending.path"] = str(spool)
+        if self.dlr_storage == "file":
+            # A sibling of the spool: Sendium rejects a DLR directory equal to, inside or containing it.
+            dlr = self.root / "dlr"
+            dlr.mkdir(mode=0o700, exist_ok=True)
+            settings["sendium.dlr.storage.backend"] = "file"
+            settings["sendium.dlr.storage.file.path"] = str(dlr)
         environment_path = self.root / "generated/sendium/environment.json"
         environment = read(environment_path)
         environment.update({key.upper().replace(".", "_").replace("-", "_"): value for key, value in settings.items()})
         write(environment_path, environment)
         effective = read(self.root / "generated/harness/effective-configuration.json")
         effective["messageStorageProfile"] = self.storage_profile
+        effective["dlrStorage"] = self.dlr_storage
         effective["applicationProperties"].update(settings)
         for location in ("public", "harness"):
             write(self.root / ("generated/" + location + "/effective-configuration.json"), effective)

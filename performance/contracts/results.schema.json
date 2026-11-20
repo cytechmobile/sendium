@@ -43,7 +43,7 @@
                 "buildArguments": { "const": ["-march=compatibility"] }
               }
             },
-            "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "disabled", "internal"] }
+            "connections": { "type": "object" }, "dlrStorage": { "enum": ["postgresql", "file", "disabled", "internal"] }
           },
           "allOf": [{ "if": { "required": ["runtime"], "properties": { "runtime": { "const": "native" } } },
                       "then": { "required": ["nativeArguments"], "properties": { "jvmArguments": { "maxItems": 0 } } } }]
@@ -96,7 +96,7 @@
         "provenance": { "properties": { "applicationCommit": { "$ref": "#/$defs/commit" } } },
         "configuration": { "properties": {
           "application": { "properties": { "runtime": { "enum": ["jvm", "native"] },
-            "dlrStorage": { "enum": ["postgresql", "disabled"] } } },
+            "dlrStorage": { "enum": ["postgresql", "file", "disabled"] } } },
           "infrastructure": { "required": ["sendium"], "properties": { "kannel": false } }
         } },
         "resources": { "required": ["sendium"], "properties": { "kannel": false } }

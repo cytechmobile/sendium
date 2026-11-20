@@ -67,6 +67,28 @@ class InputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             request({"storage_profile": "file/file/file", "benchmark_target": "kannel"})
 
+    def test_dlr_storage_defaults_to_postgresql_and_accepts_file(self):
+        field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["dlr_storage"]
+        self.assertEqual(field["options"], ["postgresql", "file"])
+        self.assertEqual(field["default"], "postgresql")
+        self.assertEqual(request()["preset"]["runtime"]["dlrStorage"], "postgresql")
+        for runtime in ("jvm", "native"):
+            for ingress in ("http", "smpp"):
+                for profile in ("memory/memory/memory", "file/file/file"):
+                    with self.subTest(runtime=runtime, ingress=ingress, profile=profile):
+                        result = request({"dlr_storage": "file", "application_runtime": runtime,
+                                          "ingress_mode": ingress, "storage_profile": profile})
+                        self.assertEqual(result["preset"]["runtime"]["dlrStorage"], "file")
+
+    def test_dlr_storage_rejects_unknown_values_and_kannel(self):
+        for storage in ("memory", "disabled", "FILE", "", None):
+            with self.subTest(storage=storage), self.assertRaises(ValueError):
+                request({"dlr_storage": storage})
+        with self.assertRaisesRegex(ValueError, "Kannel cannot select Sendium file DLR storage"):
+            request({"dlr_storage": "file", "benchmark_target": "kannel"})
+        self.assertEqual(request({"dlr_storage": "postgresql", "benchmark_target": "kannel"})["preset"]["runtime"]["dlrStorage"],
+                         "postgresql")
+
     def test_legacy_pending_input_is_removed_and_rejected(self):
         self.assertEqual(request()["preset"]["runtime"]["pendingBackend"], "memory")
         self.assertNotIn("pending_backend", WORKFLOW["on"]["workflow_dispatch"]["inputs"])
@@ -237,7 +259,7 @@ class WorkflowTests(unittest.TestCase):
     def test_manual_inputs_match_defaults_and_current_documented_input_limit(self):
         self.assertEqual(set(WORKFLOW["on"]), {"workflow_dispatch"})
         inputs = WORKFLOW["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(len(inputs), 15)
+        self.assertEqual(len(inputs), 16)
         self.assertLessEqual(len(inputs), 25)
         normalized = request({key: value["default"] for key, value in inputs.items()})
         self.assertEqual(normalized["preset"], PRESET)

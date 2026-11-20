@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from jsonschema import Draft202012Validator, ValidationError
 from preset_validation import validate_preset
-from application_runtime import RUNTIMES, runtime_mode, validate_native_build, verify_elf_header, storage_profile
+from application_runtime import RUNTIMES, runtime_mode, validate_native_build, verify_elf_header, storage_profile, dlr_storage
 from kannel_identity import SOURCE as KANNEL_SOURCE, validate_build as validate_kannel_build
 
 
@@ -77,7 +77,7 @@ def boolean(value):
 
 
 def normalize(inputs, context, preset):
-    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "storage_profile", "application_branch"}
+    allowed = set(INPUT_FIELDS) | {"ingress_mode", "sendium_instance_type", "harness_instance_type", "dlr_enabled", "application_runtime", "benchmark_target", "storage_profile", "dlr_storage", "application_branch"}
     require(isinstance(inputs, dict) and set(inputs) <= allowed, "Unknown dispatch input")
     result = json.loads(json.dumps(preset))
     mode = inputs.get("application_runtime", runtime_mode(result))
@@ -88,6 +88,7 @@ def normalize(inputs, context, preset):
     result["runtime"]["messageStorageProfile"] = profile
     result["runtime"]["pendingBackend"] = profile.split("/")[0]
     storage_profile(result["runtime"])
+    result["runtime"]["dlrStorage"] = inputs.get("dlr_storage", dlr_storage(result["runtime"]))
     workload = result["workload"]
     for name, field in INPUT_FIELDS.items():
         workload[field] = number(inputs.get(name, workload[field]), integral=name != "offered_rate")
@@ -98,6 +99,7 @@ def normalize(inputs, context, preset):
     require(target != "kannel" or (workload["ingressMode"] == "http" and mode == "jvm"),
             "Kannel requires HTTP ingress and cannot select Sendium native runtime")
     require(target != "kannel" or result["runtime"]["pendingBackend"] == "memory", "Kannel cannot select Sendium file pending storage")
+    dlr_storage(result["runtime"], target)
     for source in ("sendium", "harness"):
         instance_type = inputs.get(source + "_instance_type", result["aws"]["instanceDefaults"][source])
         require(isinstance(instance_type, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*\.[a-z0-9]+", instance_type), "Invalid EC2 instance type")

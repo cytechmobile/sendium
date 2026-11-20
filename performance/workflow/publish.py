@@ -52,6 +52,8 @@ def validate(document, request):
         prepare.require(application.get("messageStorageProfile", "memory/memory/memory") ==
                         prepare.storage_profile(request["preset"]["runtime"]),
                         "Published message storage profile mismatch")
+        prepare.require(application["dlrStorage"] == prepare.dlr_storage(request["preset"]["runtime"]),
+                        "Published DLR storage mismatch")
     if target == "kannel":
         prepare.require(application["dlrStorage"] == "postgresql" and application["messageStore"] == "spool"
                         and all(application["source"].get(key) == value for key, value in prepare.KANNEL_SOURCE.items()),
@@ -77,7 +79,7 @@ def unavailable(request, code):
                 "application": {"runtime": runtime_mode(preset),
                     "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if runtime_mode(preset) == "jvm" else [],
                     **({"nativeArguments": preset["runtime"]["native"]["arguments"]} if runtime_mode(preset) == "native" else {}),
-                     "connections": {}, "dlrStorage": "postgresql",
+                     "connections": {}, "dlrStorage": prepare.dlr_storage(preset["runtime"]),
                      "messageStorageProfile": prepare.storage_profile(preset["runtime"])},
                 "infrastructure": {"preset": preset["id"], "region": "unresolved",
                     "sendium": {"requestedInstanceType": preset["aws"]["instanceDefaults"]["sendium"]},
@@ -152,6 +154,7 @@ def fallback_markdown(report):
     lines.append("Application runtime: **" + text(application.get("runtime", "jvm")) + "**; harness runtime: **jvm**")
     if gateway == "Sendium":
         lines.append("Message storage profile: **" + text(application.get("messageStorageProfile", "memory/memory/memory")) + "**")
+        lines.append("DLR storage: **" + text(application.get("dlrStorage", "postgresql")) + "**")
     if "nativeBuild" in application:
         lines.extend(["Native builder: <code>" + text(application["nativeBuild"]["builderImage"]) + "</code>",
                       "Native compiler: <code>" + text(application["nativeBuild"]["compilerVersion"]) + "</code>"])

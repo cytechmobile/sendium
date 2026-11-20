@@ -19,7 +19,7 @@ from check_expiry import verify_expiry
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "contracts"))
 from preset_validation import validate_preset
-from application_runtime import runtime_mode, validate_native_build, storage_profile
+from application_runtime import runtime_mode, validate_native_build, storage_profile, dlr_storage
 from kannel_identity import validate_build
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -83,7 +83,8 @@ def validate_plan(plan, preset):
     validate_preset(effective, Draft202012Validator(read(HERE.parent / "contracts/run-config.schema.json")))
     if target == "kannel":
         require(effective["workload"]["ingressMode"] == "http" and runtime_mode(effective) == "jvm"
-                and "nativeBuild" not in plan and storage_profile(effective["runtime"]) == "memory/memory/memory",
+                and "nativeBuild" not in plan and storage_profile(effective["runtime"]) == "memory/memory/memory"
+                and dlr_storage(effective["runtime"]) == "postgresql",
                 "Kannel requires HTTP ingress and its C runtime, without Sendium native/file-pending settings")
         validate_kannel_build(plan.get("kannelBuild"), plan.get("resolution", {}).get("nodes", {}).get("sendium", {}).get("architecture"))
     if runtime_mode(effective) == "native":
@@ -259,7 +260,7 @@ def documents(staged, result, instances, timeout):
     target = benchmark_target(staged)
     mode = runtime_mode(preset)
     application = {"runtime": mode, "jvmArguments": preset["runtime"]["java"]["sendiumArguments"] if mode == "jvm" else [],
-                   "connections": {"outgoingTransceivers": 1}, "dlrStorage": "postgresql",
+                   "connections": {"outgoingTransceivers": 1}, "dlrStorage": dlr_storage(preset["runtime"], target),
                    "messageStorageProfile": storage_profile(preset["runtime"])}
     if mode == "native":
         architecture = instances[result["SendiumInstanceId"]]["Architecture"]
@@ -320,6 +321,7 @@ def documents(staged, result, instances, timeout):
     if target == "sendium":
         result_documents["sendium"]["pendingBackend"] = storage_profile(preset["runtime"]).split("/")[0]
         result_documents["sendium"]["messageStorageProfile"] = storage_profile(preset["runtime"])
+        result_documents["sendium"]["dlrStorage"] = dlr_storage(preset["runtime"])
     if target == "kannel":
         result_documents["sendium"].update(benchmarkTarget="kannel", kannelBuild=staged["kannelBuild"], jvmArguments=[])
         result_documents["harness"]["benchmarkTarget"] = "kannel"

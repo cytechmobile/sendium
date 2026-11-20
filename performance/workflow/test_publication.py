@@ -70,6 +70,24 @@ class PublicationTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "storage profile mismatch"):
                             publish.validate(report, req)
 
+    def test_file_dlr_label_is_preserved(self):
+        for runtime in ("jvm", "native"):
+            with self.subTest(runtime=runtime):
+                req = request({"application_runtime": runtime, "dlr_storage": "file"})
+                report = publish.unavailable(req, "FIXTURE")
+                self.assertEqual(report["configuration"]["application"]["dlrStorage"], "file")
+                publish.validate(report, req)
+                self.assertIn("DLR storage: **file**", publish.fallback_markdown(report))
+
+    def test_mislabelled_dlr_storage_results_are_rejected(self):
+        for requested, published in (("file", "postgresql"), ("postgresql", "file")):
+            with self.subTest(requested=requested, published=published):
+                req = request({"dlr_storage": requested})
+                report = publish.unavailable(req, "FIXTURE")
+                report["configuration"]["application"]["dlrStorage"] = published
+                with self.assertRaisesRegex(ValueError, "Published DLR storage mismatch"):
+                    publish.validate(report, req)
+
     def test_rds_evidence_is_preserved_and_passed_to_offline_finalizer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

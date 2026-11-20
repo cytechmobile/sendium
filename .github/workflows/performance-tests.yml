@@ -33,6 +33,12 @@ on:
         options: [memory/memory/memory, file/memory/memory, file/file/memory, file/memory/file, file/file/file]
         default: memory/memory/memory
         required: true
+      dlr_storage:
+        description: 'Sendium DLR storage (leave postgresql for Kannel)'
+        type: choice
+        options: [postgresql, file]
+        default: postgresql
+        required: true
       sendium_instance_type:
         description: Gateway EC2 instance type (Sendium or Kannel)
         type: string
