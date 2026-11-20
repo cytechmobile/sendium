@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/cytechmobile/sendium/compare/v0.9.0...v0.10.0) (2026-11-20)
+
+
+### Features
+
+* **dlr:** Add opt-in SQLite-backed DLR storage for delivery receipts ([#411](https://github.com/cytechmobile/sendium/issues/411)) ([5960070](https://github.com/cytechmobile/sendium/commit/596007002a0ecbdd58de5cc80b0820ac4642a166))
+
 ## [0.9.0](https://github.com/cytechmobile/sendium/compare/v0.8.0...v0.9.0) (2026-11-18)
 
 
