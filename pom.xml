@@ -50,6 +50,7 @@
         <cloudhopper.smpp.version>7.2.2</cloudhopper.smpp.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.24.0</mockito.version>
+        <sqlite-jdbc.version>3.54.1.0</sqlite-jdbc.version>
     </properties>
 
     <dependencyManagement>
@@ -73,6 +74,11 @@
                 <groupId>com.github.cytechmobile</groupId>
                 <artifactId>cloudhopper-smpp</artifactId>
                 <version>${cloudhopper.smpp.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.xerial</groupId>
+                <artifactId>sqlite-jdbc</artifactId>
+                <version>${sqlite-jdbc.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.mockito</groupId>

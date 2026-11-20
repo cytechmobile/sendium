@@ -21,7 +21,7 @@ Sendium is an open-source, headless SMS gateway for high-throughput messaging. I
 | Start migrating from Kannel config | [Kannel migration converter](https://cytechmobile.github.io/sendium/kannelconverter/) |
 | Understand releases and publishing | [11. Release Process](11-release-process.md) |
 | Review current features and roadmap | [12. Features And Roadmap](12-features-roadmap.md) |
-| Configure PostgreSQL DLR persistence and review durability | [13. DLR Persistence](13-dlr-persistence.md) |
+| Configure PostgreSQL or file DLR persistence, back up file DLR storage and review durability | [13. DLR Persistence](13-dlr-persistence.md) |
 | Understand outbound storage and extension contracts | [14. Outbound Message Storage](14-outbound-storage.md) |
 | Understand source, selected, routed and cleanup record encoding | [15. Filesystem Record Schemas](15-pending-record-schema.md) |
 | Deploy, recover or back up a filesystem outbound spool | [16. Filesystem Outbound Storage](16-filesystem-pending-storage.md) |
@@ -65,7 +65,7 @@ Sendium expects these files in the configured `conf` directory. The Docker quick
 | [10. Troubleshooting](10-troubleshooting.md) | Common startup, authentication, routing, SMPP, webhook, and logging issues. |
 | [11. Release Process](11-release-process.md) | Release Please flow, Conventional Commit rules, release PR handling, GitHub Packages, and Docker publishing. |
 | [12. Features And Roadmap](12-features-roadmap.md) | Current product capabilities, planned roadmap phases, and related feature documentation. |
-| [13. DLR Persistence](13-dlr-persistence.md) | PostgreSQL setup, retention, restart guarantees, and durability limits. |
+| [13. DLR Persistence](13-dlr-persistence.md) | PostgreSQL and local file setup, retention, restart guarantees, diagnostics, stopped file backup, and durability limits. |
 | [14. Outbound Message Storage](14-outbound-storage.md) | Diagram-led lifecycle guide, class responsibilities, capacity bounds, retries, shutdown, profiles, and extension contracts. |
 | [15. Filesystem Record Schemas](15-pending-record-schema.md) | Versioned CBOR accepted/selected/routed/terminal fields, multipart membership, explicit payload vocabulary and validation. |
 | [16. Filesystem Outbound Storage](16-filesystem-pending-storage.md) | Shared-spool architecture, five profiles, retained-volume deployment, bounds, backup/restore, rollback and at-least-once limits. |

@@ -5,7 +5,8 @@ This guide explains how to run Sendium with Docker for local testing or simple d
 Outbound message storage defaults to non-durable memory. For opt-in accepted-source recovery across
 container replacement, use the [filesystem pending deployment guide](16-filesystem-pending-storage.md#deployment)
 and retain a separate writable spool volume. That same spool also holds selected/routed snapshots when
-those stages use file storage. The PostgreSQL DLR volume alone does not retain outbound messages.
+those stages use file storage. The DLR store, whether its PostgreSQL volume or a local file directory,
+does not retain outbound messages.
 
 For `file/file/file`, set `SENDIUM_MESSAGE_PENDING_BACKEND=file`,
 `SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND=file`, `SENDIUM_MESSAGE_ROUTED_WORK_BACKEND=file`, and
@@ -19,6 +20,13 @@ Preserve the entire spool across replacements. Drain it with a compatible binary
 or stop the instance and preserve both binary/configuration and spool for later recovery. Do not edit
 the format marker, selectively remove stage files, or run an older image against incompatible state.
 Back up only a stopped spool; PostgreSQL DLR backup remains a separate, coordinated recovery concern.
+
+A single instance can run without any database service by also selecting file DLR storage in its own
+sibling directory on the retained volume; see the
+[database-free example](13-dlr-persistence.md#deploying-without-a-database-service). Back up that
+directory in the same stopped window as the spool. PostgreSQL remains the recommended DLR backend for
+critical or high-volume production because of the file store's
+[durability limits](13-dlr-persistence.md#durability-and-recovery).
 
 ## Generated Quick Start
 

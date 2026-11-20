@@ -7,7 +7,8 @@
 `file/memory/memory` retains accepted HTTP/SMPP source records across **process/container restart
 when the same spool storage survives**. `memory/memory/memory` remains the default. Selection,
 routing decisions and provider execution are volatile: retained sources are selected and routed again
-after restart. Existing PostgreSQL provider-correlation and downstream DLR storage remain separate.
+after restart. Provider-correlation and downstream DLR storage remain separate, whether PostgreSQL
+or the [local file DLR backend](13-dlr-persistence.md#local-file-storage).
 
 This is **at-least-once provider processing**, not exactly-once delivery, a durable retry scheduler,
 or host-power-loss durability. There is no filesystem/DB/provider transaction. A crash after sending
@@ -310,6 +311,14 @@ Run **one owner per spool**. A second process must fail with an ownership confli
 replace `owner.lock` to bypass a conflict; that can allow different processes to lock different inodes.
 Verify the old process/container has exited and investigate the mount/owner instead.
 
+To run without a DLR database service, select file DLR storage in a sibling directory on the same
+volume, for example `/work/data/spool` and `/work/data/dlr`; see the
+[database-free example](13-dlr-persistence.md#deploying-without-a-database-service). The DLR directory
+must not equal, contain or lie inside the spool path. Both stores share the limits of local files: no
+power-loss certification, no network filesystems, and no guaranteed detection of storage corruption.
+PostgreSQL remains the recommended DLR backend for critical or high-volume production; there is no
+PostgreSQL outbound profile.
+
 ## Bounds and capacity
 
 - Pending capacity defaults to **10,000 retained sources**, including each multipart duplicate and sources
@@ -348,8 +357,10 @@ itself mean corrupt storage. Diagnose the typed failure; do not make the service
    `routed-terminal`, `terminal` and `closed-groups`.
    Preserve ownership, permissions and contents. Including `derived/` is safe; startup rebuilds it.
    Store the backup outside the spool, encrypt/protect it and record the application version/configuration.
-3. Back up PostgreSQL DLR state under its separate operational procedure. There is no atomic joint
-   filesystem/PostgreSQL snapshot: coordinate the recovery point and reconcile provider/DLR ambiguity.
+3. Back up DLR state as well. With file DLR storage, copy its whole directory in the same stopped
+   window ([DLR backup](13-dlr-persistence.md#stopped-backup-and-restore)). With PostgreSQL, use its
+   separate operational procedure; there is no atomic joint filesystem/PostgreSQL snapshot, so
+   coordinate the recovery point and reconcile provider/DLR ambiguity.
 4. Restore into a separate, empty destination while all potential owners are stopped. Do not merge
    source directories from different backups/runs, edit records, or overlay an active spool.
 5. Restore suitable runtime ownership/permissions and start one format-compatible file-profile instance
@@ -371,9 +382,8 @@ Changing the backend selector does **not** migrate or drain retained files. Choo
   expired multipart work, provider outcomes and required handoffs to finish. Stop the owner, then verify
    there are no committed accepted, selected, routed or routed-terminal records and no unfinished
    cleanup intents. Zero accepted sources alone does not prove routed forget finished.
-   Retain a backup and the separate PostgreSQL
-  DLR state before switching. An empty pending spool does not mean PostgreSQL's downstream DLR queue
-  is empty.
+   Retain a backup and the separate DLR state, PostgreSQL or file, before switching. An empty pending
+  spool does not mean the downstream DLR queue is empty.
 - **Preserve for later recovery:** stop the owner and preserve the full spool plus compatible application
   version/configuration. A temporary memory deployment must use its own lifecycle/storage; it cannot
   recover these files. Returning to the retained file spool can repeat earlier provider submissions.

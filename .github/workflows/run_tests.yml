@@ -124,7 +124,7 @@ jobs:
         env:
           SENDIUM_TEST_IMAGE: sendium:quick-start-test
         run: sh tests/quick-start-test.sh
-      - name: Test PostgreSQL restart behavior on JVM
+      - name: Test PostgreSQL and file DLR restart behavior on JVM
         if: needs.classify.outputs.release-only != 'true'
         env:
           SENDIUM_E2E_IMAGE: sendium:quick-start-test
@@ -133,6 +133,11 @@ jobs:
           SENDIUM_DLR_POSTGRESQL_PASSWORD: sendium-test
         run: |
           ./mvnw -B -pl sendium-core -DskipTests test-compile org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
+            -Dexec.classpathScope=test \
+            -Dexec.mainClass=utils.NativeE2eSmoke
+          # File mode passes no PostgreSQL settings to the container and uses a retained DLR volume.
+          SENDIUM_E2E_DLR_BACKEND=file ./mvnw -B -pl sendium-core -DskipTests test-compile \
+            org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
             -Dexec.classpathScope=test \
             -Dexec.mainClass=utils.NativeE2eSmoke
       - id: result

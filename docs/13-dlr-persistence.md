@@ -1,12 +1,12 @@
 # DLR Persistence
 
-Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and durably track terminal HTTP/SMPP delivery in PostgreSQL after an upstream provider outcome.
+Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and durably track terminal HTTP/SMPP delivery after an upstream provider outcome. PostgreSQL is the default backend. A single instance can instead use [local file storage](#local-file-storage) without a database service.
 
 This storage boundary does not make Sendium's message queues or all delivery processing durable. Review [Durability Boundaries](#durability-boundaries) before using restart recovery as a delivery guarantee.
 
 ## Application Boundary
 
-The standalone `sendium-app` enables PostgreSQL DLR persistence and requires it to be available. Applications that embed `sendium-core` default to no Sendium-owned DLR subsystem and can run without a DLR database.
+The standalone `sendium-app` enables DLR persistence and requires the selected backend to be available; PostgreSQL is selected unless `sendium.dlr.storage.backend=file` is configured. Applications that embed `sendium-core` default to no Sendium-owned DLR subsystem and can run without a DLR database.
 
 The `sendium.dlr.persistence.enabled` build-time property controls this boundary. `sendium-core` leaves it undefined and an undefined property means disabled, so an embedding application opts in by declaring it as `true` itself before Quarkus augmentation. When it is not enabled, the DLR services, PostgreSQL datasource, Flyway migration, and storage readiness check are absent; partial or no-op persistence is not provided.
 
@@ -17,6 +17,105 @@ Message paths degrade rather than fail when the subsystem is absent. HTTP and do
 `sendium_dlr.dlr_message` contains one row per tracked gateway UUID. A row is created only when the upstream provider accepts or rejects the submission, never at HTTP or downstream SMPP ingress. It holds body-free return metadata, the provider outcome, the downstream delivery channel and status, the retry schedule, and the monotonically increasing attempt number used for fencing. SMS message bodies are never stored in this schema.
 
 `sendium_dlr.provider_correlation` maps the exact `(provider_name, provider_message_id)` pair to the gateway UUID after provider acceptance. Multiple provider correlations, including multipart provider IDs, can point to one message. Provider rejection creates the terminal `dlr_message` row directly and does not create a correlation. Terminal resolution stores the resolving provider pair and outcome in `dlr_message`, removes every correlation for that gateway message, and retains the message row for HTTP or SMPP delivery.
+
+The local file backend stores the same body-free records and provider correlations in one SQLite database inside its owned directory.
+
+## Local File Storage
+
+### Settings
+
+Select file storage once at startup; there is no runtime switching and no fallback to another backend:
+
+| Property | Default | Purpose |
+| :--- | :--- | :--- |
+| `sendium.dlr.storage.backend` | `postgresql` | Startup-only DLR backend: `postgresql` or `file`. Any other value, including `memory`, fails startup. |
+| `sendium.dlr.storage.file.path` | None | Required for `file`. A directory owned exclusively by one Sendium process. It holds the database, its rollback journal and an ownership lock. |
+| `sendium.dlr.storage.file.failed-retention` | `7D` | Positive time a receipt whose downstream delivery finally failed is kept, measured from that failure. |
+
+The usual environment-variable mapping applies, for example `SENDIUM_DLR_STORAGE_BACKEND=file` and `SENDIUM_DLR_STORAGE_FILE_PATH=/var/lib/sendium/dlr`.
+
+In file mode the PostgreSQL datasource and Flyway migration stay inactive and need no connection settings. Explicitly activating the PostgreSQL datasource while selecting `file` fails startup. Sendium opens one database connection itself and does not create a second datasource or pool.
+
+### Deploying without a database service
+
+This example runs the durable `file/file/file` outbound profile with file DLR storage and no PostgreSQL service. Each store owns its own directory on one retained volume. Add the arguments to your normal JVM or native deployment, keeping its configuration mounts and ports, and omit every `SENDIUM_DLR_POSTGRESQL_*` setting:
+
+```sh
+docker volume create sendium-data
+docker run -d --name sendium \
+  --mount type=volume,source=sendium-data,target=/work/data \
+  -e SENDIUM_MESSAGE_PENDING_BACKEND=file \
+  -e SENDIUM_MESSAGE_PENDING_PATH=/work/data/spool \
+  -e SENDIUM_MESSAGE_ROUTER_QUEUE_BACKEND=file \
+  -e SENDIUM_MESSAGE_ROUTED_WORK_BACKEND=file \
+  -e SENDIUM_DLR_STORAGE_BACKEND=file \
+  -e SENDIUM_DLR_STORAGE_FILE_PATH=/work/data/dlr \
+  ...your configuration mounts, ports and image...
+```
+
+The two paths must be siblings; nesting one inside the other fails startup. File DLR storage works with every supported outbound profile, including the memory default, and does not make volatile outbound stages durable. Keep the volume across container replacements; a new empty volume starts with no receipt state. Wait for readiness to report `backend=file` before sending traffic.
+
+The SQLite driver extracts its native library into the Java temporary directory and loads it from there. If `/tmp` is mounted `noexec`, for example a Docker `--tmpfs` with default options, startup fails with a native-library error. Use an executable temporary directory, or point the driver at one with `-Dorg.sqlite.tmpdir=<directory>`.
+
+The directory contains `dlr.db`, `owner.lock` and, while a transaction is open or after a crash, `dlr.db-journal`. Records are body-free but include callback URLs and addresses, so restrict access to the volume and its backups. Run one Sendium process per directory; a second owner fails with `fileDlrOpen|error|reason:ownershipConflict`. Never delete `owner.lock` or the journal to get past an error: the journal is needed to roll back an interrupted transaction.
+
+### Durability and recovery
+
+Startup fails without changing existing data when:
+
+- the path is missing or overlaps (equals, contains or lies inside) the `file` pending SMS path, `sendium.message.pending.path`;
+- another process owns the directory;
+- the directory is read-only;
+- the database is empty, belongs to another application, has an unsupported schema version or is missing required tables or indexes;
+- SQLite reports that the database is corrupt.
+
+Sendium never resets, repairs or upgrades an existing database automatically. Use a local filesystem; network filesystems are not supported.
+
+Each acknowledged storage operation commits one SQLite transaction with a rollback journal and full synchronization before success is reported. After a process crash or restart, committed provider correlations, pending deliveries, attempt numbers and delivery claims are recovered; uncommitted work is rolled back. Claims still expire after `sendium.dlr.delivery-claim-duration`.
+
+> **Durability notice.** Transactional restart recovery does not protect against storage corruption. Damage to the database or journal from disk, filesystem or host faults, out-of-band edits, or an incomplete copy may be reported as corruption, but it is not guaranteed to be detected. Detected corruption stops startup without repair; undetected damage can lose or alter receipt state. Recover from a backup copied while Sendium was stopped, accepting the loss of later changes. Use PostgreSQL for critical or high-volume DLR production, where its operated backups and replication apply.
+
+### File retention
+
+Pending, retrying and claimed deliveries, and receipts still waiting for a provider outcome, are never deleted by age. A successfully delivered receipt is deleted immediately. A receipt whose delivery has finally failed is deleted after `failed-retention`; storage activity triggers cleanup at most once per hour, in transactions of up to 1,000 records. Deleted space is reused, but the file is not shrunk. Allow disk headroom for the highest expected backlog.
+
+Expiry of failed receipts is one-way. Only a backup taken before the deletion can bring them back, together with the loss of everything that changed after it.
+
+### Diagnosing failures
+
+If a write cannot be committed or rolled back cleanly, the file store becomes unavailable until Sendium is restarted; readiness then reports `DOWN` with `backend=file` and `reason=unavailable`. Liveness is not affected, so an orchestrator stops routing traffic without restarting the process in a loop. The outcome of the failed write is uncertain: it may or may not have been committed. A provider outcome that could not be stored is not resubmitted, and a provider receipt that could not be stored is answered with `STATUS_SYSERR` so the provider retries it. Fix the cause, such as disk space or permissions, then restart; startup rolls back any interrupted transaction from its journal.
+
+Health data and metric labels contain only the backend and a sanitized reason. Details stay in the application log, which uses these events:
+
+| Log event | Meaning |
+| :--- | :--- |
+| `dlrStorage\|selected\|backend:file\|path:...\|failedRetention:...` | File storage opened at startup. |
+| `dlrStorage\|error\|backend:file\|reason:missingPath` | No `sendium.dlr.storage.file.path` is configured. |
+| `dlrStorage\|error\|backend:file\|reason:overlapsPendingPath` | The DLR directory equals, contains or lies inside the pending SMS path. |
+| `dlrStorage\|error\|backend:file\|reason:postgresqlDatasourceActive` | The PostgreSQL datasource was explicitly activated while selecting `file`. |
+| `dlrStorage\|error\|backend:...\|reason:unknownBackend` or `unsupported` | The selector is not `postgresql` or `file`. |
+| `fileDlrOpen\|error\|reason:ownershipConflict` | Another process owns the directory. |
+| `fileDlrOpen\|error\|reason:foreignDatabase`, `unsupportedSchemaVersion`, `missingSchemaObject`, `emptyDatabaseFile` | The database is not a compatible Sendium DLR store. Use a compatible binary or restore a backup. |
+| `fileDlrOpen\|error\|reason:sqliteCode26` or `sqliteCode11` | SQLite reports the file is not a database or is corrupt. Restore a stopped backup. |
+| `fileDlrStorage\|error\|operation:...\|reason:sqliteCode13` | The disk is full. The store stays unavailable until restart. |
+| `fileDlrRetention\|error\|reason:...` | A cleanup run failed. A storage failure also makes the store unavailable. |
+| `dlrStorageReadiness\|error\|backend:file\|reason:unavailable` | Readiness found the store unavailable. |
+
+### Stopped backup and restore
+
+Only a stopped store can be backed up; copying files from a running process can produce an inconsistent copy that is not reliably detected.
+
+1. Fence new HTTP and SMPP submissions, stop the Sendium process or container, and verify it has exited.
+2. Copy the whole DLR directory, including `dlr.db-journal` if present, to storage outside the volume. Preserve permissions, protect the copy, and record the application version and configuration.
+3. If you also use a file outbound spool, back it up in the same stopped window; see [stopped-instance backup](16-filesystem-pending-storage.md#stopped-instance-backup-and-restore). There is no joint snapshot with a PostgreSQL database.
+4. To restore, stop every potential owner and copy the backup into a new, empty directory. Never merge it into an existing DLR directory or edit its files.
+5. Start one instance with a binary that supports the backup's schema, pointing `sendium.dlr.storage.file.path` at the restored directory. Wait for readiness to report `backend=file` before reopening traffic.
+
+A restore brings back the pending receipts, provider correlations, attempt numbers, delivery claims and failure times recorded at backup time. Anything after the backup is lost: provider receipts for later submissions cannot be correlated, and receipts already delivered downstream since the backup can be delivered again. Claims recorded in the backup still hold until they expire. Sendium has no online backup command and does not repair a damaged database.
+
+### Upgrades, rollback and switching backends
+
+Changing the backend does not migrate data in either direction. Switching from `file` to `postgresql`, or back, starts with whatever the selected backend already holds. Before switching away from `file`, either let pending deliveries drain, or stop Sendium and keep the whole directory for a later return. The current schema version is `1`. A binary refuses a database with a schema version it does not support, and Sendium never upgrades or downgrades a database automatically, so keep a compatible binary with a preserved directory.
 
 ## Quick Start PostgreSQL
 
@@ -141,7 +240,7 @@ Check readiness rather than only checking whether the HTTP listener is open:
 curl -fsS http://127.0.0.1:8080/q/health/ready
 ```
 
-The `sendium-dlr-storage` readiness check reports `backend=postgresql`. It returns `DOWN` with a sanitized `unavailable` reason when the PostgreSQL schema cannot be queried.
+The `sendium-dlr-storage` readiness check reports the selected backend, `backend=postgresql` or `backend=file`. It returns `DOWN` with a sanitized `unavailable` reason when the PostgreSQL schema cannot be queried or the file store has become unavailable.
 
 Inspect storage and datasource metrics with:
 
@@ -151,7 +250,7 @@ curl -fsS http://127.0.0.1:8080/q/metrics | grep -E 'sendium_dlr_storage|agroal'
 
 Relevant metrics include storage-operation latency/counts tagged by backend, operation, and success or error outcome. Standard-tracker batched persistence uses operation `provider_batch`: its count is batch operations, not individual messages. `sendium.dlr.batch.pending` measures admitted events still queued, persisting or completing; `sendium.dlr.batch.rejected` counts capacity/shutdown admission rejections. The `sendium.dlr.batch.events` distribution records the number of events in each attempted batch. PostgreSQL pool metrics use the Agroal metric prefix.
 
-PostgreSQL is required when the subsystem is enabled, and startup fails rather than selecting another backend. At runtime, HTTP and downstream SMPP ingress validation, acknowledgement, and routing do not write PostgreSQL and therefore are not blocked by a database outage. The DLR return metadata travels only with the in-memory outbound message until an upstream provider outcome. Readiness still reports `DOWN` while PostgreSQL is unavailable because new provider outcomes cannot be made durable.
+The selected backend is required when the subsystem is enabled, and startup fails rather than selecting another backend. At runtime, HTTP and downstream SMPP ingress validation, acknowledgement, and routing do not write PostgreSQL and therefore are not blocked by a database outage. The DLR return metadata travels only with the in-memory outbound message until an upstream provider outcome. Readiness still reports `DOWN` while PostgreSQL is unavailable because new provider outcomes cannot be made durable.
 
 Provider message IDs are correlated within the outbound provider namespace rather than globally. The worker instance name is the default namespace; workers connected to the same SMSC account can share `msg.hash.prefix` when that SMSC may deliver their receipts interchangeably. Different providers may therefore return the same message ID without overwriting each other's state. The namespace must remain stable while correlations are outstanding: changing `msg.hash.prefix` or renaming a worker using the default makes earlier receipts unresolvable.
 
@@ -190,6 +289,8 @@ and callback retries.
 
 ## Retention
 
+This section describes PostgreSQL. File storage uses its own [retention policy](#file-retention).
+
 The V1 retention thresholds are fixed application behavior, not environment settings:
 
 | DLR lifecycle state | Eligible for cleanup after |
@@ -206,6 +307,8 @@ An HTTP row marked `FAILED` after attempt 10 remains eligible based on the origi
 Cleanup is best-effort maintenance and is isolated from message handling. One caller at a time runs a pass while every other caller proceeds immediately, and a failed pass is logged and left until the next interval rather than rejecting the submission that triggered it.
 
 ## Durability Boundaries
+
+The table describes PostgreSQL. File storage keeps the same ingress, batching, fencing and at-least-once boundaries for a single process, with the [durability notice](#durability-and-recovery) and [stopped backups](#stopped-backup-and-restore) in place of operated database backups.
 
 | State or transition | PostgreSQL guarantee | Remaining limit |
 | :--- | :--- | :--- |

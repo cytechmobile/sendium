@@ -30,8 +30,9 @@ class DlrStorageReadinessCheckTest {
     void reportsSanitizedPostgresqlFailure() throws SQLException {
         ManagedDlrStorage storage = mock(ManagedDlrStorage.class);
         when(storage.backend()).thenReturn("postgresql");
-        doThrow(new SQLException("jdbc:postgresql://secret-host/database"))
-                .when(storage).verifyPostgresqlSchema();
+        doThrow(new DlrStorageException("dlrStorageAvailability|error|backend:postgresql|reason:schemaProbeFailed",
+                new SQLException("jdbc:postgresql://secret-host/database")))
+                .when(storage).verifyAvailable();
         DlrStorageReadinessCheck check = new DlrStorageReadinessCheck();
         check.storage = storage;
 

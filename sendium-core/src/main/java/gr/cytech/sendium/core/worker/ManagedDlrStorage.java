@@ -1,6 +1,7 @@
 package gr.cytech.sendium.core.worker;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.util.MessageTrace;
 import io.agroal.api.AgroalDataSource;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -10,13 +11,18 @@ import io.quarkus.arc.InjectableInstance;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -28,13 +34,8 @@ import java.util.function.Supplier;
 @ApplicationScoped
 @IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class ManagedDlrStorage implements DlrStorage {
+    private static final Logger logger = LoggerFactory.getLogger(ManagedDlrStorage.class);
     private static final String METRIC_NAME = "sendium.dlr.storage.operation";
-    private static final String BACKEND = "postgresql";
-    private static final String POSTGRESQL_PROBE_SQL = """
-            SELECT 1
-            FROM sendium_dlr.dlr_message
-            WHERE FALSE
-            """;
 
     @Inject
     @ConfigProperty(name = "quarkus.flyway.dlr.active", defaultValue = "false")
@@ -55,43 +56,117 @@ public class ManagedDlrStorage implements DlrStorage {
     @ConfigProperty(name = "sendium.dlr.delivery-claim-duration", defaultValue = "5M")
     Duration deliveryClaimDuration;
 
+    // Read once at startup; there is no runtime backend switching or fallback.
+    @Inject
+    @ConfigProperty(name = "sendium.dlr.storage.backend", defaultValue = "postgresql")
+    String selectedBackend = "postgresql";
+
+    @Inject
+    @ConfigProperty(name = "sendium.dlr.storage.file.path")
+    Optional<String> filePath = Optional.empty();
+
+    @Inject
+    @ConfigProperty(name = "sendium.dlr.storage.file.failed-retention", defaultValue = "7D")
+    Duration fileFailedRetention = Duration.ofDays(7);
+
+    @Inject
+    @ConfigProperty(name = "sendium.message.pending.backend", defaultValue = "memory")
+    String pendingBackend = "memory";
+
+    @Inject
+    @ConfigProperty(name = "sendium.message.pending.path")
+    Optional<String> pendingPath = Optional.empty();
+
     private final Map<String, Timer> timers = new ConcurrentHashMap<>();
 
-    private PostgresqlDlrStorage delegate;
-    private AgroalDataSource selectedPostgresqlDataSource;
+    private DlrStorageBackend delegate;
 
     @PostConstruct
     void initialize() {
         boolean postgresqlActive = postgresqlDataSource.getHandle().getBean().isActive();
-        if (!postgresqlActive || !flywayActive || !flywayMigrateAtStart) {
-            throw new IllegalStateException(
-                    "PostgreSQL DLR storage requires the active 'dlr' datasource and Flyway migration");
-        }
-        selectedPostgresqlDataSource = postgresqlDataSource.get();
-        delegate = new PostgresqlDlrStorage(selectedPostgresqlDataSource, deliveryClaimDuration);
+        delegate = switch (selectedBackend) {
+            case "postgresql" -> {
+                if (!postgresqlActive || !flywayActive || !flywayMigrateAtStart) {
+                    throw new IllegalStateException(
+                            "PostgreSQL DLR storage requires the active 'dlr' datasource and Flyway migration");
+                }
+                yield new PostgresqlDlrStorage(postgresqlDataSource.get(), deliveryClaimDuration);
+            }
+            case "file" -> {
+                if (postgresqlActive || flywayActive || flywayMigrateAtStart) {
+                    throw new IllegalStateException(
+                            "dlrStorage|error|backend:file|reason:postgresqlDatasourceActive");
+                }
+                yield openFile();
+            }
+            case "memory" -> throw new IllegalStateException("dlrStorage|error|backend:memory|reason:unsupported");
+            default -> throw new IllegalStateException("dlrStorage|error|backend:" +
+                    MessageTrace.value(selectedBackend) + "|reason:unknownBackend");
+        };
 
         Gauge.builder("sendium.dlr.storage.selected", this, ignored -> 1.0)
                 .description("Active Sendium DLR storage backend")
-                .tag("backend", BACKEND)
+                .tag("backend", backend())
                 .strongReference(true)
                 .register(meterRegistry);
     }
 
-    String backend() {
-        return BACKEND;
+    private FileDlrStorage openFile() {
+        String configured = filePath.map(String::strip).filter(path -> !path.isEmpty())
+                .orElseThrow(() -> new IllegalStateException("dlrStorage|error|backend:file|reason:missingPath"));
+        // Stored with millisecond precision; a positive sub-millisecond value would become zero.
+        if (fileFailedRetention == null || fileFailedRetention.isNegative() || fileFailedRetention.toMillis() < 1) {
+            throw new IllegalStateException("dlrStorage|error|backend:file|reason:invalidFailedRetention");
+        }
+        Path directory = canonical(Path.of(configured));
+        // The DLR namespace is owned independently; it must never share or nest with the SMS pending spool.
+        if ("file".equals(pendingBackend) && pendingPath.isPresent() && !pendingPath.get().isBlank()) {
+            Path pending = canonical(Path.of(pendingPath.get().strip()));
+            if (directory.startsWith(pending) || pending.startsWith(directory)) {
+                throw new IllegalStateException("dlrStorage|error|backend:file|reason:overlapsPendingPath");
+            }
+        }
+        FileDlrStorage file = FileDlrStorage.open(directory, deliveryClaimDuration, fileFailedRetention,
+                Clock.systemUTC());
+        logger.info("dlrStorage|selected|backend:file|path:{}|failedRetention:{}",
+                MessageTrace.value(directory.toString()), fileFailedRetention);
+        return file;
     }
 
-    Optional<PostgresqlDlrStorage.ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
+    // Resolves symbolic links in the nearest existing ancestor, so a not-yet-created path below a linked parent is
+    // compared by its physical location. A dangling link is not skipped: toRealPath fails and startup is refused.
+    private static Path canonical(Path path) {
+        Path absolute = path.toAbsolutePath().normalize();
+        Path existing = absolute;
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = existing.getParent();
+        }
+        if (existing == null) {
+            return absolute;
+        }
+        try {
+            return existing.toRealPath().resolve(existing.relativize(absolute)).normalize();
+        } catch (IOException e) {
+            throw new IllegalStateException("dlrStorage|error|backend:file|reason:unresolvablePath", e);
+        }
+    }
+
+    String backend() {
+        return delegate.backend();
+    }
+
+    Optional<DlrStorageBackend.ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
         return delegate.readMetricSnapshot(maxRows, timeout);
     }
 
-    void verifyPostgresqlSchema() throws SQLException {
-        if (selectedPostgresqlDataSource == null) {
-            return;
-        }
-        try (Connection connection = selectedPostgresqlDataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(POSTGRESQL_PROBE_SQL)) {
-            statement.executeQuery();
+    void verifyAvailable() {
+        delegate.verifyAvailable();
+    }
+
+    @PreDestroy
+    void close() {
+        if (delegate != null) {
+            delegate.close();
         }
     }
 
@@ -209,7 +284,7 @@ public class ManagedDlrStorage implements DlrStorage {
     private Timer timer(String operation, String outcome) {
         return timers.computeIfAbsent(operation + '/' + outcome, ignored -> Timer.builder(METRIC_NAME)
                 .description("Sendium DLR storage operation latency")
-                .tags("backend", BACKEND, "operation", operation, "outcome", outcome)
+                .tags("backend", backend(), "operation", operation, "outcome", outcome)
                 .register(meterRegistry));
     }
 }

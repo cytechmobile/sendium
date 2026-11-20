@@ -409,7 +409,11 @@ existing router/worker startup. A failing coordinated admission never falls back
 | PostgreSQL profiles | Future [#333](https://github.com/cytechmobile/sendium/issues/333) | Only explicitly implemented combinations. |
 
 Future profiles are not selectable today. Memory remains the non-durable default; file profiles
-are opt-in. Durable recovery must reconcile identities and resume the latest recorded stage without
+are opt-in. The DLR subsystem selects its own backend independently: PostgreSQL by default, or
+[local file storage](13-dlr-persistence.md#local-file-storage) for a single instance. Neither DLR
+backend is an outbound profile or makes outbound stages durable. File outbound and file DLR storage share
+the local-file limits: they survive process and container restarts on a retained volume, not host
+power loss or undetected storage corruption, and they are recovered from stopped backups. Durable recovery must reconcile identities and resume the latest recorded stage without
 scheduling earlier retained records independently. It requires surviving storage and remains at least
 once: provider submission before recorded completion may repeat. File selected records share the pending
 spool's exclusive owner and are validated before multipart reconstruction/admission. They retain ownership
@@ -479,9 +483,17 @@ PostgreSQL correlation/restart smoke remains unchanged. The fixture uses ports 1
 Set `SENDIUM_E2E_SMPP_PORT` to override the host-side SMPP port if 27777 is already in use;
 the container's internal SMPP port remains unchanged.
 
+With `SENDIUM_E2E_DLR_BACKEND=file` instead (not combined with `SENDIUM_E2E_PENDING_RESTART`), the
+smoke needs no PostgreSQL fixture. It passes no PostgreSQL settings to the container, keeps DLR state on
+its own retained volume, and separately reports an HTTP scenario (correlation and a failed callback's
+persisted retry across forced replacements) and an SMPP scenario (a receipt for an unbound client
+replayed after replacement). Because callback retries are an hour apart, the harness advances the
+stored retry time in the stopped volume with a helper container instead of waiting; this is a test
+fixture, not an operator procedure.
+
 Rollback from file pending is not code-only: drain accepted sources first or stop and preserve the entire
-spool for later compatible recovery. Switching to memory does not migrate retained work. PostgreSQL DLR
-storage remains independently owned. Follow the [file-profile rollback procedure](16-filesystem-pending-storage.md#rollback-or-switching-back-to-memory).
+spool for later compatible recovery. Switching to memory does not migrate retained work. DLR storage,
+PostgreSQL or file, remains independently owned. Follow the [file-profile rollback procedure](16-filesystem-pending-storage.md#rollback-or-switching-back-to-memory).
 
 ## Embedding and API Reference
 

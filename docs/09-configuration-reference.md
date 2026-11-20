@@ -110,32 +110,35 @@ configured DLR subsystem below.
 | `sendium.metrics.storage.timeout` | `SENDIUM_METRICS_STORAGE_TIMEOUT` | `2s` |
 | `sendium.metrics.storage.max-rows` | `SENDIUM_METRICS_STORAGE_MAX_ROWS` | `100000` |
 
-The single `enabled` switch defaults to `true` and controls only PostgreSQL receipt snapshot reads. Set it to `false` and restart to stop those reads. The standalone memory Pending/Selected/Routed gauges are always bound; admission/provider/receipt event counters, storage operations and normal processing are unchanged. PostgreSQL collection only exists when the DLR persistence subsystem is configured. It reads at most `max-rows + 1` statuses and publishes complete counts only within the budget; disabled, failed, over-budget, uninitialized or stale snapshots are NaN, not zero.
+The single `enabled` switch defaults to `true` and controls only receipt snapshot reads from the selected DLR backend (PostgreSQL or file). Set it to `false` and restart to stop those reads. The standalone memory Pending/Selected/Routed gauges are always bound; admission/provider/receipt event counters, storage operations and normal processing are unchanged. Receipt collection only exists when the DLR persistence subsystem is configured. It reads at most `max-rows + 1` statuses and publishes complete counts only within the budget; disabled, failed, over-budget, uninitialized or stale snapshots are NaN, not zero.
 
-Interval must be at least 1 second, query timeout a positive whole-second duration and row budget between 1 and 2147483646. These settings require restart. Timeout applies to the JDBC statement; connection acquisition retains the existing shared datasource limit (5 seconds by default). No overlapping collection runs or scrape-triggered SQL are used. Memory occupancy stays live rather than following the refresh interval. See [Monitoring And Observability](08-monitoring-observability.md#storage-collection-controls-and-availability) for availability signals, cost limitations and shared-store deployment guidance.
+Interval must be at least 1 second, query timeout a positive whole-second duration and row budget between 1 and 2147483646. These settings require restart. For PostgreSQL, timeout applies to the JDBC statement; connection acquisition retains the existing shared datasource limit (5 seconds by default). For file storage, it is an elapsed deadline that interrupts the snapshot query. No overlapping collection runs or scrape-triggered SQL are used. Memory occupancy stays live rather than following the refresh interval. See [Monitoring And Observability](08-monitoring-observability.md#storage-collection-controls-and-availability) for availability signals, cost limitations and shared-store deployment guidance.
 
 ## DLR Storage Environment Variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `SENDIUM_DLR_STORAGE_BACKEND` | `postgresql` | Startup-only DLR backend: `postgresql` or `file`. Other values fail startup. |
+| `SENDIUM_DLR_STORAGE_FILE_PATH` | None | Required for `file`: a local directory exclusively owned by one Sendium process, separate from the pending SMS path. |
+| `SENDIUM_DLR_STORAGE_FILE_FAILED_RETENTION` | `7D` | File backend: positive retention of finally failed deliveries, measured from the failure. |
 | `SENDIUM_DLR_POSTGRESQL_JDBC_URL` | Empty | PostgreSQL JDBC URL. |
 | `SENDIUM_DLR_POSTGRESQL_USERNAME` | Empty | PostgreSQL role name when required by the database authentication method. |
 | `SENDIUM_DLR_POSTGRESQL_PASSWORD` | Empty | PostgreSQL password when required; provide through an access-controlled environment or secret. |
 | `SENDIUM_DLR_POSTGRESQL_POOL_MIN_SIZE` | `0` | Minimum datasource pool size. |
 | `SENDIUM_DLR_POSTGRESQL_POOL_MAX_SIZE` | `10` | Maximum datasource pool size. |
 | `SENDIUM_DLR_POSTGRESQL_ACQUISITION_TIMEOUT` | `5S` | Maximum wait for a pooled connection. |
-| `SENDIUM_DLR_DELIVERY_CLAIM_DURATION` | `5M` | PostgreSQL lease duration for an active HTTP or SMPP DLR delivery attempt. |
+| `SENDIUM_DLR_DELIVERY_CLAIM_DURATION` | `5M` | Lease duration for an active HTTP or SMPP DLR delivery attempt. |
 | `SENDIUM_DLR_BATCH_SIZE` | `100` | Maximum provider outcomes/receipt events per batch transaction (1–1,000). |
 | `SENDIUM_DLR_BATCH_MAX_DELAY` | `500ms` | Positive maximum batch collection wait; full batches flush earlier. Database/backlog waiting is additional. |
 | `SENDIUM_DLR_BATCH_QUEUE_CAPACITY` | `10000` | Positive bound on provider events queued, persisting or completing per process. |
 
-PostgreSQL is the only DLR persistence backend, and startup is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
+PostgreSQL is the default DLR persistence backend, and startup is fail-closed. Startup requires a valid datasource URL and any username, password, certificates, or tokens required by the database authentication method; a bare launch fails rather than falling back to local or in-memory storage. Selecting `file` leaves the PostgreSQL datasource and migration inactive and requires only the file path. File storage is limited to one process and has documented corruption limits; PostgreSQL is recommended for critical or high-volume DLR production. See [DLR Persistence](13-dlr-persistence.md) for the complete durability contract.
 
 ### Core Embedding
 
 `sendium.dlr.persistence.enabled` is a build-time setting. The `sendium-core` module leaves it undefined, which means disabled; the standalone `sendium-app` sets it to `true`.
 
-When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. Submissions are still accepted and routed, but no gateway DLR state is stored and Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` must declare the property as `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above. The claim duration is configured with `sendium.dlr.delivery-claim-duration`. Enabled persistence is fail-closed at startup, but HTTP and downstream SMPP ingress remain database-independent at runtime. If PostgreSQL is unavailable when an upstream provider outcome arrives, the outbound message is not resubmitted and its later receipt may be unresolvable.
+When disabled, Sendium does not create its DLR services, PostgreSQL datasource, Flyway migration, or storage readiness check. Submissions are still accepted and routed, but no gateway DLR state is stored and Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` must declare the property as `true` before Quarkus augmentation to opt into the complete DLR subsystem, then provide the PostgreSQL settings above or select the file backend. The claim duration is configured with `sendium.dlr.delivery-claim-duration`. Enabled persistence is fail-closed at startup, but HTTP and downstream SMPP ingress remain database-independent at runtime. If PostgreSQL is unavailable when an upstream provider outcome arrives, the outbound message is not resubmitted and its later receipt may be unresolvable.
 
 ## Logs
 
@@ -162,7 +165,7 @@ When the HTTP server is running, Sendium exposes:
 | :--- | :--- |
 | `/swagger-ui` | Interactive Swagger UI. |
 | `/openapi.json` | OpenAPI JSON document. |
-| `/q/health/ready` | Readiness status and PostgreSQL DLR availability. |
+| `/q/health/ready` | Readiness status and selected DLR storage availability. |
 | `/q/metrics` | Prometheus metrics, including DLR storage and datasource metrics. |
 
 ## Related Documentation

@@ -32,7 +32,8 @@ class ManagedDlrOutcomeMetricsTest {
 
     @Test
     void synchronousOutcomesRequireACommittedTransitionAndExcludeSubmissionRejection() {
-        try (var backends = mockConstruction(PostgresqlDlrStorage.class)) {
+        try (var backends = mockConstruction(PostgresqlDlrStorage.class,
+                (backend, context) -> when(backend.backend()).thenReturn("postgresql"))) {
             var storage = storage();
             var backend = backends.constructed().getFirst();
             when(backend.resolveDlr(anyString(), anyString(), any(), anyInt(), anyString()))
@@ -53,7 +54,8 @@ class ManagedDlrOutcomeMetricsTest {
 
     @Test
     void batchCountsOnlyNewReceiptTransitionsAfterSuccessfulReturnNotRollbackOrDuplicates() {
-        try (var backends = mockConstruction(PostgresqlDlrStorage.class)) {
+        try (var backends = mockConstruction(PostgresqlDlrStorage.class,
+                (backend, context) -> when(backend.backend()).thenReturn("postgresql"))) {
             var storage = storage();
             var backend = backends.constructed().getFirst();
             List<ProviderDlrEvent> events = List.of(

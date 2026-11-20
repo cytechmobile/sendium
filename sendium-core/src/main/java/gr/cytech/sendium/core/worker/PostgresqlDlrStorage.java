@@ -1,6 +1,7 @@
 package gr.cytech.sendium.core.worker;
 
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
+import gr.cytech.sendium.util.MessageTrace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,8 +28,13 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class PostgresqlDlrStorage implements DlrStorage {
+public class PostgresqlDlrStorage implements DlrStorageBackend {
     private static final Logger logger = LoggerFactory.getLogger(PostgresqlDlrStorage.class);
+    private static final String SCHEMA_PROBE_SQL = """
+            SELECT 1
+            FROM sendium_dlr.dlr_message
+            WHERE FALSE
+            """;
 
     private static final long EXPIRY_CHECK_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(1);
     private static final Duration DEFAULT_DELIVERY_CLAIM_DURATION = Duration.ofMinutes(5);
@@ -331,6 +337,29 @@ public class PostgresqlDlrStorage implements DlrStorage {
         this.expiryCheckIntervalMillis = expiryCheckIntervalMillis;
     }
 
+    @Override
+    public String backend() {
+        return "postgresql";
+    }
+
+    @Override
+    public void verifyAvailable() {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(SCHEMA_PROBE_SQL)) {
+            statement.executeQuery();
+        } catch (SQLException e) {
+            // Keep the probe's SQL diagnostics in its cause/message without adding another log event.
+            throw new DlrStorageException(
+                    "dlrStorageAvailability|error|backend:postgresql|reason:schemaProbeFailed|sqlState:" +
+                            MessageTrace.value(e.getSQLState()) + "|errorCode:" + e.getErrorCode(), e);
+        }
+    }
+
+    @Override
+    public void close() {
+        // The datasource belongs to the container, not this adapter.
+    }
+
     private UUID prepareAccepted(MessageState state, String providerName, String providerMessageId) {
         Objects.requireNonNull(state, "state");
         requireCorrelation(providerName, providerMessageId);
@@ -429,6 +458,7 @@ public class PostgresqlDlrStorage implements DlrStorage {
         }
     }
 
+    @Override
     public List<ProviderDlrEvent.Result> applyProviderBatch(List<ProviderDlrEvent> events) {
         events = List.copyOf(events);
         for (int attempt = 1; ; attempt++) {
@@ -619,7 +649,8 @@ public class PostgresqlDlrStorage implements DlrStorage {
     }
 
     /** One read-only MVCC statement; no expiry side effects, sorting or unbounded aggregation. */
-    Optional<ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
+    @Override
+    public Optional<ReceiptCounts> readMetricSnapshot(int maxRows, Duration timeout) {
         if (maxRows < 1 || maxRows == Integer.MAX_VALUE || timeout == null || timeout.getNano() != 0 ||
                 timeout.getSeconds() < 1 || timeout.getSeconds() > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Storage metric budget must be positive with a whole-second query timeout");
@@ -1047,8 +1078,6 @@ public class PostgresqlDlrStorage implements DlrStorage {
         logger.debug("DLR storage failure details while attempting to {}", operation, cause);
         return new DlrStorageException("Failed to " + operation, cause);
     }
-
-    record ReceiptCounts(long waitingProvider, long pendingReturn, long failedReturn) { }
 
     private record CorrelationKey(String provider, String messageId) { }
 
