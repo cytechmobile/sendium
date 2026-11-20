@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -113,7 +114,8 @@ public class ManagedDlrStorage implements DlrStorage {
     private FileDlrStorage openFile() {
         String configured = filePath.map(String::strip).filter(path -> !path.isEmpty())
                 .orElseThrow(() -> new IllegalStateException("dlrStorage|error|backend:file|reason:missingPath"));
-        if (fileFailedRetention == null || fileFailedRetention.isNegative() || fileFailedRetention.isZero()) {
+        // Stored with millisecond precision; a positive sub-millisecond value would become zero.
+        if (fileFailedRetention == null || fileFailedRetention.isNegative() || fileFailedRetention.toMillis() < 1) {
             throw new IllegalStateException("dlrStorage|error|backend:file|reason:invalidFailedRetention");
         }
         Path directory = canonical(Path.of(configured));
@@ -131,10 +133,19 @@ public class ManagedDlrStorage implements DlrStorage {
         return file;
     }
 
+    // Resolves symbolic links in the nearest existing ancestor, so a not-yet-created path below a linked parent is
+    // compared by its physical location. A dangling link is not skipped: toRealPath fails and startup is refused.
     private static Path canonical(Path path) {
         Path absolute = path.toAbsolutePath().normalize();
+        Path existing = absolute;
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = existing.getParent();
+        }
+        if (existing == null) {
+            return absolute;
+        }
         try {
-            return Files.exists(absolute) ? absolute.toRealPath() : absolute;
+            return existing.toRealPath().resolve(existing.relativize(absolute)).normalize();
         } catch (IOException e) {
             throw new IllegalStateException("dlrStorage|error|backend:file|reason:unresolvablePath", e);
         }

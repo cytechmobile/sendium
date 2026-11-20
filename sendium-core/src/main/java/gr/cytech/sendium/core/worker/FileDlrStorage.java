@@ -193,11 +193,12 @@ final class FileDlrStorage implements DlrStorageBackend {
     // Takes exclusive ownership of the directory, then opens or initializes its database.
     static FileDlrStorage open(Path directory, Duration claimDuration, Duration failedRetention, Clock clock) {
         Objects.requireNonNull(clock, "clock");
-        if (claimDuration == null || claimDuration.isNegative() || claimDuration.isZero()) {
-            throw new IllegalArgumentException("Delivery claim duration must be positive");
+        // Durations are stored in milliseconds; a positive sub-millisecond value would truncate to zero.
+        if (claimDuration == null || claimDuration.isNegative() || claimDuration.toMillis() < 1) {
+            throw new IllegalArgumentException("Delivery claim duration must be at least one millisecond");
         }
-        if (failedRetention == null || failedRetention.isNegative() || failedRetention.isZero()) {
-            throw new IllegalArgumentException("Failed DLR retention must be positive");
+        if (failedRetention == null || failedRetention.isNegative() || failedRetention.toMillis() < 1) {
+            throw new IllegalArgumentException("Failed DLR retention must be at least one millisecond");
         }
         Path root = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
         FileChannel channel = null;

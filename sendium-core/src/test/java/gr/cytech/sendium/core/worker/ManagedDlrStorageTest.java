@@ -3,6 +3,7 @@ package gr.cytech.sendium.core.worker;
 import io.agroal.api.AgroalDataSource;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.quarkus.arc.InjectableInstance;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -65,6 +66,7 @@ class ManagedDlrStorageTest {
         "blank path; file; '  '; P7D; false; reason:missingPath",
         "zero retention; file; dlr; PT0S; false; reason:invalidFailedRetention",
         "negative retention; file; dlr; -PT1S; false; reason:invalidFailedRetention",
+        "sub-millisecond retention; file; dlr; PT0.0005S; false; reason:invalidFailedRetention",
         "active postgresql override; file; dlr; P7D; true; reason:postgresqlDatasourceActive",
         "memory selector; memory; dlr; P7D; false; backend:memory|reason:unsupported",
         "unknown selector; sqlite; dlr; P7D; false; backend:sqlite|reason:unknownBackend",
@@ -101,6 +103,35 @@ class ManagedDlrStorageTest {
         try (var files = Files.list(root.resolve("sms"))) {
             assertThat(files).containsExactly(marker);
         }
+    }
+
+    @Test
+    void rejectsNewDlrPathBelowSymlinkedParentInsidePendingSpool(@TempDir Path root) throws IOException {
+        Path sms = Files.createDirectories(root.resolve("data/sms"));
+        try {
+            Files.createSymbolicLink(root.resolve("alias"), root.resolve("data"));
+        } catch (UnsupportedOperationException | IOException e) {
+            Assumptions.abort("symbolic links unavailable: " + e.getMessage());
+        }
+        storage.selectedBackend = "file";
+        storage.filePath = Optional.of(root.resolve("alias/sms/dlr").toString());
+        storage.pendingBackend = "file";
+        storage.pendingPath = Optional.of(sms.toString());
+
+        assertThatThrownBy(storage::initialize).isInstanceOf(IllegalStateException.class)
+                .hasMessage("dlrStorage|error|backend:file|reason:overlapsPendingPath");
+        assertThat(sms.resolve("dlr")).doesNotExist();
+    }
+
+    @Test
+    void rejectsSubMillisecondClaimDurationBeforeCreatingStore(@TempDir Path root) {
+        storage.selectedBackend = "file";
+        storage.filePath = Optional.of(root.resolve("dlr").toString());
+        storage.deliveryClaimDuration = Duration.ofNanos(500_000);
+
+        assertThatThrownBy(storage::initialize).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("claim duration must be at least one millisecond");
+        assertThat(root.resolve("dlr")).doesNotExist();
     }
 
     @Test
