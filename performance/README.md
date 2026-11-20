@@ -59,9 +59,7 @@ and cleanup proceed automatically afterward using separate read-only and
 deletion-only roles; cleanup cannot create new benchmark resources.
 
 Run-owned EC2, RDS and networking resources are temporary. The bootstrap roles,
-artifact bucket and expiry service persist between runs. The
-[local rehearsal](local/README.md) runs the traffic against real Sendium and
-PostgreSQL in containers, while explicitly modeling AWS control-plane operations.
+artifact bucket and expiry service persist between runs.
 
 ## Workflow parameters
 
@@ -163,13 +161,10 @@ explains evidence collection, publication and cleanup.
 
 ## Kannel comparison work
 
-The optional Kannel target is being developed locally first. Its
-[build baseline, local benchmark, and protocol findings](kannel/README.md)
-describe the verified x86-64/ARM64 build, HTTP/DLR accounting, combined gateway
-sampling, and full local benchmark lifecycle. Run it with
-`python performance/local/rehearse.py --benchmark-target kannel --output local-load-results`.
-Sendium remains the local launcher's default. AWS/workflow target selection is the
-next phase. Kannel supports HTTP ingress with SMPP forwarding and HTTP delivery
+The optional Kannel target runs through the same AWS workflow. Its
+[build baseline, local smoke check, and protocol findings](kannel/README.md)
+describe the verified x86-64/ARM64 build, HTTP/DLR accounting and combined gateway
+sampling. Kannel supports HTTP ingress with SMPP forwarding and HTTP delivery
 reports; SMPP ingress is deferred.
 
 ## Permanent results archive

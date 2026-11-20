@@ -1,70 +1,20 @@
 # Kannel benchmark baseline
 
-This directory contains the pinned Kannel build, standalone correctness probes,
-and local benchmark controller. Kannel is selectable through the shared local
-launcher. The manual AWS workflow also selects Kannel after the maintained
-controller changes merge to `main`. See the [dispatch instructions](../workflow/README.md#running-kannel-after-merge)
+This directory contains the pinned Kannel build, standalone correctness probes and
+the AWS node runtime. The manual AWS workflow selects Kannel as a benchmark target;
+see the [dispatch instructions](../workflow/README.md#running-kannel-after-merge)
 and [AWS deployment profile](../deployment/README.md#kannel-aws-deployment-profile).
 
-The shared benchmark runner and version-1 report contracts also accept explicitly
+The shared benchmark runner and version-1 report contracts accept explicitly
 prepared Kannel execution inputs. Target-aware readiness, archive-based source
 identity, `kannel` resource labels, and offline resource finalization are described
 in [target-aware execution](../harness/EXECUTION.md#target-aware-execution).
 Named process-group sampling measures bearerbox and smsbox together, with
-per-member identities and contributions. The full local pipeline runs the shared
-workload engine and finalizes both gateway and harness resource evidence.
+per-member identities and contributions.
 
 The initial scenario is **HTTP ingress -> SMPP provider -> HTTP DLR callback**.
 Kannel SMPP ingress is deferred. Sendium retains its existing HTTP/SMPP ingress
 and JVM/native choices. AWS gateway and harness hosts remain `t4g.small`.
-
-## Full local benchmark
-
-Use the existing local launcher to run Kannel through the shared benchmark engine:
-
-```sh
-python performance/local/rehearse.py --benchmark-target kannel --output local-load-results
-```
-
-Defaults come from the shared preset: HTTP with DLR, 30 offered messages/sec,
-worker TPS zero (unlimited), warm-up/measurement/drain budgets 120/600/120 seconds,
-provider response delay 5 ms, and receipt delay 1000 ms. A shorter check crossing
-the first minute boundary is:
-
-```sh
-python performance/local/rehearse.py --benchmark-target kannel --warmup-seconds 2 --measurement-seconds 65 --drain-seconds 5 --output local-load-results
-```
-
-The launcher builds and pins separate controller, harness and gateway images by
-their actual IDs. Build-time metadata captures source/patch hashes, applied patch
-digests, binary hashes, compiler/configure identity, the harness JAR and Java
-identity, and the source revision plus a working-tree fingerprint. Reused images
-retain their original metadata. Mixed source, sampler, supervisor or architecture
-identities are rejected. Runtime workload containers have no Docker socket or AWS
-credentials and communicate on an internal per-case network.
-
-The controller starts the real harness listeners, then Kannel. A bounded local
-readiness file ties the run identity and gateway process IDs to the completed
-sampler baseline. The shared engine then runs warm-up, measurement and drain.
-After the harness finishes, the controller stops Kannel's sampler before its
-processes and imports complete resource evidence through the existing offline
-finalizer. That finalizer sees only public evidence and has no network or Docker
-socket. Workload counts and intervals are checked for preservation.
-
-Canonical results are `<output>/http-dlr/results.json` and `summary.md`; initial
-and finalized reports, raw samples, effective configuration and redacted logs are
-retained alongside them. The normal pipeline keeps valid/inconclusive/failed
-observation status and exposes incomplete drain or rejected traffic. Completion
-checks include bounded drain; they are not sustained-throughput thresholds.
-`http-no-dlr` is explicit; `app-crash` and `interrupted` verify failed-report
-retention and cleanup. A passing fault rehearsal retains a **failed** benchmark
-report. Detached execution and session collection are supported.
-
-See the [local target/parameter reference](../local/README.md#select-sendium-or-kannel).
-The benchmark uses PostgreSQL 17 DLR storage with certificate-verified TLS and
-an ephemeral message spool. It does not reproduce AWS hardware or CPU credits.
-The AWS path is implemented; native architecture CI and a live AWS run remain
-the verification boundary before interpreting AWS results.
 
 ## Local startup and provider-bind smoke run
 
@@ -160,12 +110,6 @@ cleanup of both nodes and networking:
 
 ```sh
 python -m unittest discover -s performance/kannel -p 'test_*.py'
-```
-
-The controller tests use the contract dependencies, available in its built image:
-
-```sh
-docker run --rm --network none --entrypoint python sendium-local:kannel-control -m unittest discover -s /workspace/performance/kannel -p 'test_*.py'
 ```
 
 The Java harness unit suite (including default Sendium HTTP/SMPP adapters and
@@ -283,27 +227,19 @@ database is required to establish HTTP/SMPP/DLR interoperability. Set the messag
 store policy explicitly too: message storage (`store-type`/`store-location`) and
 DLR correlation storage are separate features.
 
-The full local benchmark instead provisions a separate PostgreSQL 17 container,
-private database network, ephemeral data volume and CA/server certificates. It
-sets `dlr-storage = pgsql` and libpq `sslmode=verify-full`, rejects plaintext
-connections, and checks database version and schema before gateway readiness.
-PostgreSQL stays provisioned for the no-DLR scenario too.
+The [AWS deployment profile](../deployment/README.md#kannel-aws-deployment-profile)
+instead uses RDS PostgreSQL 17. It sets `dlr-storage = pgsql` and libpq
+`sslmode=verify-full`, rejects plaintext connections, and checks database version
+and schema before gateway readiness.
 
 `dlr.sql` supplies the mapped correlation fields and an explicitly generated,
 unique `oid` column. Kannel 1.4.5 uses this identifier when updating/deleting one
 record; PostgreSQL 12+ no longer supplies legacy table OIDs automatically. This
 schema compatibility provision preserves Kannel's existing SQL implementation.
 
-`database-evidence.json` retains observed TLS sessions, pending row counts and
-PostgreSQL insert/delete statistics. The controller checks storage activity
-against workload accounting and waits for final database statistics after gateway
-shutdown. These are functional storage checks, not AWS/RDS utilization metrics.
-`database-unavailable` and `bad-tls` rehearse readiness rejection and cleanup.
-
 Using the same database engine does not establish identical durability semantics
 with Sendium. The message spool remains ephemeral, and restart/recovery guarantees
-are not established by these runs. AWS database provisioning and resource
-collection still require integration before the AWS comparison.
+are not established by these runs.
 
 ## License and packaging
 

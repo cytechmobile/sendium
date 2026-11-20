@@ -13,7 +13,7 @@ version-1 reports. Absence retains the existing Sendium contract. Kannel reports
 must use HTTP ingress, runtime `kannel`, empty `jvmArguments`, explicit
 `messageStore`, and `dlrStorage: internal` or `postgresql`. PostgreSQL requires
 explicit provisioned database metadata with engine `postgresql` and SSL mode
-`verify-full`; the full local launcher verifies database readiness before traffic.
+`verify-full`; the gateway verifies database readiness before traffic.
 Mandrel/native heap metadata
 does not describe the Kannel C build and is rejected for that target.
 

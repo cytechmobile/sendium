@@ -52,7 +52,7 @@ jobs:
         run: |
           SENDIUM_PUBLISH_JAR="$(python -c 'from pathlib import Path; jars = [p for p in Path("performance/harness/target").glob("sendium-performance-harness-*.jar") if not p.name.endswith(("-shaded.jar", "-sources.jar", "-javadoc.jar", "-tests.jar"))]; assert len(jars) == 1; print(jars[0].resolve())')"
           export SENDIUM_PUBLISH_JAR
-          for suite in contracts resources deployment workflow kannel local; do
+          for suite in contracts resources deployment workflow kannel; do
             python -m unittest discover -s "performance/$suite" -p 'test_*.py'
           done
 

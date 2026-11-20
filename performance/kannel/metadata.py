@@ -30,37 +30,33 @@ def version(*command, cwd=None):
 def build(role):
     result = {"schemaVersion": 1, "role": role, "architecture": platform.machine(),
               "samplerSha256": digest("/opt/probe/sample_process.py")}
-    if role == "harness":
-        result.update(sourceContext=json.loads(Path("/opt/probe/source-context.json").read_text()),
-                      harnessSha256=digest("/opt/probe/harness.jar"), javaVersion=version("java", "--version"))
-    else:
-        source = Path("/opt/kannel-source")
-        reported = version("/opt/kannel/sbin/bearerbox", "--version")
-        match = re.search(r"Kannel bearerbox version `([^']+)'", reported)
-        if match is None:
-            raise ValueError("Missing Kannel version identity")
-        patches = (source / "applied-patches.txt").read_text().splitlines()
-        result.update(source={"version": match[1],
-                              "archiveSha256": (source / "source-archive.sha256").read_text().split()[0],
-                              "patchArchiveSha256": (source / "patch-archive.sha256").read_text().split()[0],
-                              "patches": patches,
-                              "patchDigests": {name: digest(source / "debian/patches" / name) for name in patches}},
-                      binarySha256={name: digest("/opt/kannel/sbin/" + name) for name in ("bearerbox", "smsbox")},
-                      supervisorSha256=digest("/opt/probe/gateway.py"),
-                      postgresqlProbeSha256=digest("/opt/probe/postgresql_probe.py"),
-                      compilerVersion=version("gcc", "--version").splitlines()[0],
-                      configureArguments=version("./config.status", "--config", cwd=source),
-                      postgresqlSupport=bool(re.search(r"^#define HAVE_PGSQL 1$", (source / "gw-config.h").read_text(), re.MULTILINE)),
-                      postgresqlClientVersion=version("pg_config", "--version"),
-                      packageInventorySha256=digest("/opt/kannel/build-packages.txt"),
-                      osRelease=Path("/etc/os-release").read_text())
+    source = Path("/opt/kannel-source")
+    reported = version("/opt/kannel/sbin/bearerbox", "--version")
+    match = re.search(r"Kannel bearerbox version `([^']+)'", reported)
+    if match is None:
+        raise ValueError("Missing Kannel version identity")
+    patches = (source / "applied-patches.txt").read_text().splitlines()
+    result.update(source={"version": match[1],
+                          "archiveSha256": (source / "source-archive.sha256").read_text().split()[0],
+                          "patchArchiveSha256": (source / "patch-archive.sha256").read_text().split()[0],
+                          "patches": patches,
+                          "patchDigests": {name: digest(source / "debian/patches" / name) for name in patches}},
+                  binarySha256={name: digest("/opt/kannel/sbin/" + name) for name in ("bearerbox", "smsbox")},
+                  supervisorSha256=digest("/opt/probe/gateway.py"),
+                  postgresqlProbeSha256=digest("/opt/probe/postgresql_probe.py"),
+                  compilerVersion=version("gcc", "--version").splitlines()[0],
+                  configureArguments=version("./config.status", "--config", cwd=source),
+                  postgresqlSupport=bool(re.search(r"^#define HAVE_PGSQL 1$", (source / "gw-config.h").read_text(), re.MULTILINE)),
+                  postgresqlClientVersion=version("pg_config", "--version"),
+                  packageInventorySha256=digest("/opt/kannel/build-packages.txt"),
+                  osRelease=Path("/etc/os-release").read_text())
     OUTPUT.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["show"]:
         print(OUTPUT.read_text(encoding="utf-8"))
-    elif len(sys.argv) == 2 and sys.argv[1] in ("harness", "gateway"):
-        build(sys.argv[1])
+    elif sys.argv[1:] == ["gateway"]:
+        build("gateway")
     else:
-        raise SystemExit("Expected harness, gateway, or show")
+        raise SystemExit("Expected gateway or show")
