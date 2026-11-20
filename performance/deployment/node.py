@@ -251,8 +251,10 @@ class Node:
                 str(self.install / "application/quarkus-app/quarkus-run.jar")]
 
     def configure(self):
-        secret = self.aws.call("secretsmanager", "get-secret-value", secret_id=self.document["databaseSecretArn"])
-        credentials = json.loads(secret["SecretString"])
+        credentials = None
+        if self.dlr_storage == "postgresql":
+            secret = self.aws.call("secretsmanager", "get-secret-value", secret_id=self.document["databaseSecretArn"])
+            credentials = json.loads(secret["SecretString"])
         if self.target == "kannel":
             self.kannel().configure(self, {key: credentials[key] for key in ("username", "password")})
             for name in ("runtime-settings.json", "run-config.json", "effective-configuration.json"):
@@ -261,7 +263,8 @@ class Node:
             self.status("configured")
             return
         deployment = dict(self.document["deployment"])
-        deployment["database"] = {**deployment["database"], "username": credentials["username"], "password": credentials["password"]}
+        if credentials is not None:
+            deployment["database"] = {**deployment["database"], "username": credentials["username"], "password": credentials["password"]}
         write(self.root / "deployment-private.json", deployment)
         write(self.root / "workload.json", self.document["workload"])
         completed = subprocess.run([self.java(), "-jar", str(self.root / "harness"), "generate-config",

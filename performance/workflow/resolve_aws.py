@@ -1,6 +1,7 @@
 """Read-only regional compatibility resolution; no guessed EC2 architecture or disk sizing."""
 
 import re
+from application_runtime import dlr_storage
 
 
 def require(condition, message):
@@ -86,20 +87,24 @@ def resolve(aws, preset, region):
         if service != "s3":
             require(info.get("PrivateDnsName") or info.get("PrivateDnsNames"), "Private endpoint DNS is unavailable")
             common &= set(info["AvailabilityZones"])
-    database = preset["database"]
-    versions = pages(aws, "rds", "describe-db-engine-versions", "DBEngineVersions", token="Marker", parameter="marker", engine="postgres",
-                     filters=[{"Name": "status", "Values": ["available"]}])
-    available_versions = {item["EngineVersion"] for item in versions if item["Status"] == "available"
-                          and re.fullmatch(r"17\.[0-9]+(?:\.[0-9]+)?", item["EngineVersion"])}
-    require(available_versions, "No available PostgreSQL 17 engine version")
-    version = database["engineVersion"] or max(available_versions, key=lambda value: tuple(int(part) for part in value.split(".")))
-    require(version in available_versions, "Pinned database version is unavailable")
-    options = pages(aws, "rds", "describe-orderable-db-instance-options", "OrderableDBInstanceOptions", token="Marker", parameter="marker",
-                    engine="postgres", engine_version=version, db_instance_class=database["instanceType"])
-    options = [item for item in options if item["StorageType"] == "gp3" and item["SupportsStorageEncryption"] and item["Vpc"]
-               and item["MinStorageSize"] <= database["allocatedStorageGiB"] <= item["MaxStorageSize"]]
-    common &= {zone["Name"] for item in options for zone in item["AvailabilityZones"]}
-    require(common, "No common AZ supports both EC2 types, required endpoints and PostgreSQL sizing")
+    database = {"provisioned": False, "resourceMetricsRequired": False}
+    if dlr_storage(preset["runtime"]) == "postgresql":
+        settings = preset["database"]
+        versions = pages(aws, "rds", "describe-db-engine-versions", "DBEngineVersions", token="Marker", parameter="marker", engine="postgres",
+                         filters=[{"Name": "status", "Values": ["available"]}])
+        available_versions = {item["EngineVersion"] for item in versions if item["Status"] == "available"
+                              and re.fullmatch(r"17\.[0-9]+(?:\.[0-9]+)?", item["EngineVersion"])}
+        require(available_versions, "No available PostgreSQL 17 engine version")
+        version = settings["engineVersion"] or max(available_versions, key=lambda value: tuple(int(part) for part in value.split(".")))
+        require(version in available_versions, "Pinned database version is unavailable")
+        options = pages(aws, "rds", "describe-orderable-db-instance-options", "OrderableDBInstanceOptions", token="Marker", parameter="marker",
+                        engine="postgres", engine_version=version, db_instance_class=settings["instanceType"])
+        options = [item for item in options if item["StorageType"] == "gp3" and item["SupportsStorageEncryption"] and item["Vpc"]
+                   and item["MinStorageSize"] <= settings["allocatedStorageGiB"] <= item["MaxStorageSize"]]
+        common &= {zone["Name"] for item in options for zone in item["AvailabilityZones"]}
+        database = {"engine": "postgres", "engineVersion": version, "instanceType": settings["instanceType"],
+                    "allocatedStorageGiB": settings["allocatedStorageGiB"], "storageType": "gp3"}
+    require(common, "No common AZ supports both EC2 types, required endpoints and selected DLR storage")
     primary = sorted(common)[0]
     secondary = sorted(set(available) - {primary})[0]
     prefixes = aws.call("ec2", "describe-managed-prefix-lists", filters=[{"Name": "prefix-list-name", "Values": ["com.amazonaws." + region + ".s3"]}])["PrefixLists"]
@@ -107,8 +112,7 @@ def resolve(aws, preset, region):
     prefix, = prefixes
     result = {"schemaVersion": 1, "region": region, "nodes": nodes,
             "placement": {"primary": primary, "primaryZoneId": available[primary]["ZoneId"], "secondary": secondary},
-            "database": {"engine": "postgres", "engineVersion": version, "instanceType": database["instanceType"],
-                         "allocatedStorageGiB": database["allocatedStorageGiB"], "storageType": "gp3"},
+            "database": database,
             "s3PrefixListId": prefix["PrefixListId"], "endpointServices": sorted(services)}
     if getattr(aws, "execution_kind", None) == "container-jvm":
         result.update(executionKind="container-jvm", localRehearsal=aws.simulation)

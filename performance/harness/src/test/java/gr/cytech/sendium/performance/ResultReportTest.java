@@ -36,6 +36,28 @@ class ResultReportTest {
     }
 
     @Test
+    void fileDlrReportStatesNoDatabaseWasProvisioned() throws Exception {
+        var context = context();
+        context.application().put("dlrStorage", "file");
+        context.infrastructure().putObject("database").put("provisioned", false).put("resourceMetricsRequired", false);
+        var config = config(true);
+        var ledger = ledger(config); ledger.freeze();
+        var report = writer.build(config, ledger, context, List.of(), false);
+        assertTrue(report.markdown().contains("No database provisioned"));
+        assertFalse(report.markdown().contains("Database resources (RDS)"));
+        assertFalse(report.json().path("resources").has("database"));
+        assertFalse(report.json().at("/configuration/infrastructure/database/resourceMetricsRequired").asBoolean());
+        assertFalse(report.json().path("validity").path("reasons").toString().contains("RDS_RESOURCES_MISSING"));
+        report.json().withObject("/measurementMetadata").put("resourceFinalizationVersion", 1).put("observedDurationNanos", 0)
+                .putNull("measurementStartUtc");
+        var finalized = writer.finalizeResources(report.json(), ResourceEvidence.empty());
+        assertTrue(finalized.markdown().contains("No database provisioned"));
+        assertFalse(finalized.markdown().contains("Database resources (RDS)"));
+        assertEquals(report.json().path("configuration"), finalized.json().path("configuration"));
+        saveFixture("file-dlr", finalized);
+    }
+
+    @Test
     void selectedStorageProfileIsVisibleInJsonAndMarkdown() {
         var context = context();
         context.application().put("messageStorageProfile", "file/memory/memory");

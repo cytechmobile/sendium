@@ -242,16 +242,17 @@ def inspect_run(aws, staged):
         volume, = aws.call("ec2", "describe-volumes", volume_ids=[mappings[0]["Ebs"]["VolumeId"]])["Volumes"]
         require(volume["Encrypted"] and volume["VolumeType"] == "gp3", "Unexpected root disk settings")
         instance["resolvedRootVolume"] = {key: volume[key] for key in ("VolumeId", "VolumeType", "Size", "Encrypted")}
-    database, = aws.call("rds", "describe-db-instances", db_instance_identifier=result["DatabaseIdentifier"])["DBInstances"]
-    require(database["DBInstanceStatus"] == "available" and not database["PubliclyAccessible"]
-            and database["StorageEncrypted"] and not database["MultiAZ"] and database["BackupRetentionPeriod"] == 0,
-            "Database is not ready/private/disposable")
-    require(database["Endpoint"]["Address"] == result["DatabaseAddress"]
-            and database["AvailabilityZone"] == result["PrimaryAvailabilityZone"], "Database placement differs")
-    require(database["Engine"] == "postgres" and database["EngineVersion"].startswith("17.")
-            and database["StorageType"] == "gp3" and database["AllocatedStorage"] == 20,
-            "Database engine/storage differs from V1 contract")
-    result["resolvedDatabase"] = {key: database[key] for key in ("Engine", "EngineVersion", "DBInstanceClass", "AllocatedStorage", "StorageType", "AvailabilityZone")}
+    if dlr_storage(staged["preset"]["runtime"]) == "postgresql":
+        database, = aws.call("rds", "describe-db-instances", db_instance_identifier=result["DatabaseIdentifier"])["DBInstances"]
+        require(database["DBInstanceStatus"] == "available" and not database["PubliclyAccessible"]
+                and database["StorageEncrypted"] and not database["MultiAZ"] and database["BackupRetentionPeriod"] == 0,
+                "Database is not ready/private/disposable")
+        require(database["Endpoint"]["Address"] == result["DatabaseAddress"]
+                and database["AvailabilityZone"] == result["PrimaryAvailabilityZone"], "Database placement differs")
+        require(database["Engine"] == "postgres" and database["EngineVersion"].startswith("17.")
+                and database["StorageType"] == "gp3" and database["AllocatedStorage"] == 20,
+                "Database engine/storage differs from V1 contract")
+        result["resolvedDatabase"] = {key: database[key] for key in ("Engine", "EngineVersion", "DBInstanceClass", "AllocatedStorage", "StorageType", "AvailabilityZone")}
     return result, actual, timeout
 
 
@@ -266,10 +267,13 @@ def documents(staged, result, instances, timeout):
         architecture = instances[result["SendiumInstanceId"]]["Architecture"]
         validate_native_build(staged.get("nativeBuild"), preset, architecture)
         application.update(nativeArguments=preset["runtime"]["native"]["arguments"], nativeBuild=staged["nativeBuild"])
-    infrastructure = {"preset": preset["id"], "region": staged["region"], "database": {
-        **preset["database"], "identifier": result["DatabaseIdentifier"], "availabilityZone": result["PrimaryAvailabilityZone"],
-        "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"],
-        "resourceMetricsRequired": True}}
+    infrastructure = {"preset": preset["id"], "region": staged["region"],
+                      "database": {"provisioned": False, "resourceMetricsRequired": False}}
+    if application["dlrStorage"] == "postgresql":
+        infrastructure["database"] = {
+            **preset["database"], "identifier": result["DatabaseIdentifier"], "availabilityZone": result["PrimaryAvailabilityZone"],
+            "resolved": result["resolvedDatabase"], "version": result["resolvedDatabase"]["EngineVersion"],
+            "resourceMetricsRequired": True}
     if target == "kannel":
         validate_kannel_build(staged.get("kannelBuild"), instances[result["SendiumInstanceId"]]["Architecture"])
         application = {"benchmarkTarget": "kannel", "runtime": "kannel", "jvmArguments": [], "connections": {},
@@ -298,12 +302,14 @@ def documents(staged, result, instances, timeout):
                      "infrastructure": infrastructure, "diagnostics": ["lifecycle.jsonl", "process.log"]},
                  "resources": {"schemaVersion": 1, "sendiumSamples": None, "harnessSamples": None,
                                "cpuCredits": None, "sampleBudget": preset["measurement"]["sampleBudgetPerSource"]}, "sampling": None}
-    db = preset["database"]
     deployment = {**preset["deployment"], "runIdentity": staged["runIdentity"], "preset": preset["id"],
-                  "sendiumHost": result["SendiumPrivateAddress"], "harnessHost": result["HarnessPrivateAddress"],
-                  "database": {"jdbcUrl": "jdbc:postgresql://" + result["DatabaseAddress"] + ":" + result["DatabasePort"] + "/" + result["DatabaseName"]
-                               + "?sslmode=verify-full&sslrootcert=" + db["caBundlePath"],
-                               **{key: db[key] for key in ("poolMinSize", "poolMaxSize", "acquisitionTimeoutMillis", "claimDurationSeconds")}}}
+                  "sendiumHost": result["SendiumPrivateAddress"], "harnessHost": result["HarnessPrivateAddress"]}
+    if application["dlrStorage"] == "postgresql":
+        db = preset["database"]
+        deployment["database"] = {
+            "jdbcUrl": "jdbc:postgresql://" + result["DatabaseAddress"] + ":" + result["DatabasePort"] + "/" + result["DatabaseName"]
+                       + "?sslmode=verify-full&sslrootcert=" + db["caBundlePath"],
+            **{key: db[key] for key in ("poolMinSize", "poolMaxSize", "acquisitionTimeoutMillis", "claimDurationSeconds")}}
     result_documents = {}
     for source in ("sendium", "harness"):
         artifact_names = {"harness": "harness", "sampler": "sampler", "rdsCa": "rdsCa", "jre": source + "Jre"}
@@ -316,7 +322,9 @@ def documents(staged, result, instances, timeout):
             "bucket": staged["bucket"], "source": source, "artifacts": {name: staged["artifacts"][key] for name, key in artifact_names.items()},
             "jvmArguments": preset["runtime"]["java"][source + "Arguments"], "timeoutSeconds": timeout,
             "sampleIntervalSeconds": preset["measurement"]["sampleIntervalSeconds"], "sampleBudget": preset["measurement"]["sampleBudgetPerSource"]}
-    result_documents["sendium"].update(databaseSecretArn=result["DatabaseCredentialsArn"], deployment=deployment, workload=preset["workload"])
+    result_documents["sendium"].update(deployment=deployment, workload=preset["workload"])
+    if application["dlrStorage"] == "postgresql":
+        result_documents["sendium"]["databaseSecretArn"] = result["DatabaseCredentialsArn"]
     result_documents["sendium"]["applicationRuntime"] = mode
     if target == "sendium":
         result_documents["sendium"]["pendingBackend"] = storage_profile(preset["runtime"]).split("/")[0]

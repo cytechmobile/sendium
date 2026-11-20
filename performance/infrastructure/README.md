@@ -270,8 +270,10 @@ remain part of Tasks 4.5/6.1.
 ## Per-run benchmark stack
 
 `run.yaml` owns the network child, two private EC2s, separate runtime IAM
-roles/profiles, PostgreSQL subnet/parameter groups, a private RDS instance, and a
-generated database secret. Create a fresh root stack named
+roles/profiles and, for `DlrStorage=postgresql` (the default), PostgreSQL subnet/parameter
+groups, a private RDS instance and a generated database secret. `DlrStorage=file`
+creates none of those database resources or outputs and grants no database-secret
+access to the Sendium role. The shared network is unchanged. Create a fresh root stack named
 `<ResourcePrefix>-run-<RunIdentity>` using bootstrap's CloudFormation execution
 role and `CAPABILITY_NAMED_IAM`. Apply the four required stack tags. These are
 create/run/delete stacks; the bootstrap orchestration policy intentionally does
@@ -288,8 +290,9 @@ not grant stack updates. Do not reuse names for simultaneous attempts.
 | `SendiumInstanceType`, `HarnessInstanceType` | Default `t4g.small` each; preflight verifies memory, architecture, offerings and capacity assumptions. |
 | `SendiumRootDeviceName`, `HarnessRootDeviceName` | Exact AMI `RootDeviceName`; no padded/hardcoded disk default. |
 | `SendiumRootVolumeGiB`, `HarnessRootVolumeGiB` | Corresponding root EBS mapping's minimum `VolumeSize`, generally 8 GiB; validate integer values and sufficient space for staged files. |
-| `DatabaseInstanceType` | Default `db.t4g.small`; validate PostgreSQL 17/gp3 support in the chosen AZ. |
-| `DatabaseEngineVersion` | Exact available PostgreSQL 17 minor; template requires an explicit value and `postgres17` parameter family. |
+| `DlrStorage` | `postgresql` (default) or `file`; the protected controller takes it from the normalized preset. File is Sendium-only. |
+| `DatabaseInstanceType` | PostgreSQL only: default `db.t4g.small`; validate PostgreSQL 17/gp3 support in the chosen AZ. Omitted for file runs. |
+| `DatabaseEngineVersion` | PostgreSQL only: exact available PostgreSQL 17 minor and `postgres17` parameter family. Defaults to empty so file runs can omit it; a template rule rejects an empty version for PostgreSQL. |
 
 The resource prefix must also be valid for RDS identifiers (single hyphen
 separators). Reject unsupported additional AMI disks or other launch-time mappings
@@ -311,7 +314,7 @@ Standard credits. Non-burstable overrides omit `CreditSpecification`. Preflight
 must reject an unknown burstable family until its handling is defined and record
 the observed mode rather than assuming this conditional proves effective state.
 
-RDS is Single-AZ, in the primary AZ, with 20 GiB encrypted gp3, no storage
+For PostgreSQL runs, RDS is Single-AZ, in the primary AZ, with 20 GiB encrypted gp3, no storage
 autoscaling, no automatic minor/major upgrades, no backups, enhanced monitoring or
 Performance Insights, and no deletion protection. The parameter group requires
 TLS. Deployment must stage the RDS CA bundle and use `sslmode=verify-full`; the
@@ -327,7 +330,7 @@ Runtime role policies remain below the bootstrap boundary:
 | Node | Reads | Writes |
 |---|---|---|
 | Both | Own `inputs/<node>/*`, shared `inputs/common/*`, managed SSM shell document | Own `outputs/<node>/*` |
-| Sendium only | Exact database secret | `inputs/harness/generated/*` |
+| Sendium only | Exact database secret (PostgreSQL runs only) | `inputs/harness/generated/*` |
 
 All object paths are beneath `runs/<RunIdentity>/` in the bootstrap bucket. The
 shared input prefix is for non-secret dependencies/scripts such as runtime
@@ -338,7 +341,8 @@ registration and command receipt. The default AWS-managed Secrets Manager key
 avoids introducing a customer-managed runtime decryption grant.
 
 The Sendium deployment stage generates the existing paired configuration bundles
-with the database secret locally, keeps the Sendium bundle private, and publishes
+with the database secret locally for PostgreSQL runs (without a database section or
+datasource credentials for file runs), keeps the Sendium bundle private, and publishes
 only the generated harness bundle beneath `inputs/harness/generated/`. This is a
 deliberate one-way handoff for matching ingress/provider credentials. The harness
 has no database network access or secret permission. Generated private bundles
@@ -348,7 +352,7 @@ must not enter downloadable report artifacts; upload sanitized settings instead.
 
 Outputs include run identity/expiry, network stack/VPC/subnet IDs, primary AZ,
 instance IDs and private addresses, database identifier/address/port/name, database
-secret **ARN**, and the artifact run prefix. These identifiers let the protected
+secret **ARN** (database outputs exist only for PostgreSQL), and the artifact run prefix. These identifiers let the protected
 controller deploy via SSM and render inputs without retrieving secret values in
 GitHub Actions. Successful stack creation is infrastructure readiness only;
 SSM registration, staged runtime checks, application/database/provider readiness

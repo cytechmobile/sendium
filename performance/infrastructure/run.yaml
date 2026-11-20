@@ -57,15 +57,27 @@ Parameters:
   HarnessRootVolumeGiB:
     Type: Number
     MinValue: 1
+  DlrStorage:
+    Type: String
+    Default: postgresql
+    AllowedValues: [postgresql, file]
   DatabaseInstanceType:
     Type: String
     Default: db.t4g.small
     AllowedPattern: 'db\.[a-z0-9]+[a-z0-9-]*\.[a-z0-9]+'
   DatabaseEngineVersion:
     Type: String
+    Default: ''
     Description: Exact available PostgreSQL 17 minor resolved by preflight.
-    AllowedPattern: '17\.[0-9]+(\.[0-9]+)?'
+    AllowedPattern: '(|17\.[0-9]+(\.[0-9]+)?)'
+Rules:
+  PostgreSQLRequiresEngineVersion:
+    RuleCondition: !Equals [!Ref DlrStorage, postgresql]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref DatabaseEngineVersion, '']]
+        AssertDescription: PostgreSQL requires an exact engine version resolved by preflight.
 Conditions:
+  PostgreSQL: !Equals [!Ref DlrStorage, postgresql]
   SendiumBurstable: !Or
     - !Equals [!Select [0, !Split ['.', !Ref SendiumInstanceType]], t2]
     - !Equals [!Select [0, !Split ['.', !Ref SendiumInstanceType]], t3]
@@ -97,6 +109,7 @@ Resources:
         - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
   DatabaseCredentials:
     Type: AWS::SecretsManager::Secret
+    Condition: PostgreSQL
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
@@ -114,6 +127,7 @@ Resources:
         - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
   DatabaseSubnets:
     Type: AWS::RDS::DBSubnetGroup
+    Condition: PostgreSQL
     Properties:
       DBSubnetGroupName: !Sub '${ResourcePrefix}-run-${RunIdentity}'
       DBSubnetGroupDescription: Two private AZs; database placed in primary AZ.
@@ -125,6 +139,7 @@ Resources:
         - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
   DatabaseParameters:
     Type: AWS::RDS::DBParameterGroup
+    Condition: PostgreSQL
     Properties:
       DBParameterGroupName: !Sub '${ResourcePrefix}-run-${RunIdentity}'
       Description: Require TLS for the disposable PostgreSQL benchmark.
@@ -137,6 +152,7 @@ Resources:
         - {Key: 'sendium:expires-at', Value: !Ref ExpiresAt}
   Database:
     Type: AWS::RDS::DBInstance
+    Condition: PostgreSQL
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
@@ -209,10 +225,13 @@ Resources:
                 Effect: Allow
                 Action: s3:PutObject
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/${RunIdentity}/inputs/harness/generated/*'
-              - Sid: ReadOwnDatabaseCredentials
-                Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource: !Ref DatabaseCredentials
+              - !If
+                - PostgreSQL
+                - Sid: ReadOwnDatabaseCredentials
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref DatabaseCredentials
+                - !Ref 'AWS::NoValue'
       Tags:
         - {Key: 'sendium:managed-by', Value: performance-tests}
         - {Key: 'sendium:repository', Value: !Ref Repository}
@@ -349,14 +368,19 @@ Outputs:
   HarnessPrivateAddress:
     Value: !GetAtt Harness.PrivateIp
   DatabaseIdentifier:
+    Condition: PostgreSQL
     Value: !Ref Database
   DatabaseAddress:
+    Condition: PostgreSQL
     Value: !GetAtt Database.Endpoint.Address
   DatabasePort:
+    Condition: PostgreSQL
     Value: !GetAtt Database.Endpoint.Port
   DatabaseName:
+    Condition: PostgreSQL
     Value: sendium_benchmark
   DatabaseCredentialsArn:
+    Condition: PostgreSQL
     Value: !Ref DatabaseCredentials
   ArtifactRunPrefix:
     Value: !Sub 'runs/${RunIdentity}/'

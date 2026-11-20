@@ -144,6 +144,14 @@ run that uses otherwise identical inputs. Kannel rejects Sendium's `file` choice
 application revision must include the file DLR backend; choosing `file` does not retrofit older
 builds. The DLR files live on the temporary instance's root volume and are deleted with it.
 
+File-DLR runs provision no RDS instance, database secret, subnet group or parameter group.
+The controller skips PostgreSQL availability checks, the Sendium node reads no database secret
+and the generator emits no datasource settings or PostgreSQL credentials. Reports record
+`database.provisioned: false` and `resourceMetricsRequired: false`, state "No database provisioned",
+and omit the RDS resources section. Diagnostics still collect both EC2 nodes' resource evidence.
+PostgreSQL runs (including Kannel) retain their database, verified TLS and RDS metrics.
+The shared private network and CA bundle download are unchanged.
+
 To benchmark the filesystem-stage feature branch, first merge this workflow/controller change to
 `main`. Run **Performance Tests** using workflow branch `main`, set
 `application_branch=feat/345-filesystem-stages` and `storage_profile=file/file/file`, then choose

@@ -101,6 +101,8 @@ def unavailable(request, code):
         infrastructure["kannel"] = infrastructure.pop("sendium")
         infrastructure["database"].update(provisioned=None, engine="postgresql", sslMode="verify-full", state="unresolved")
         result["resources"]["kannel"] = result["resources"].pop("sendium")
+    elif prepare.dlr_storage(preset["runtime"]) == "file":
+        result["configuration"]["infrastructure"]["database"] = {"provisioned": False, "resourceMetricsRequired": False}
     return result
 
 
@@ -155,6 +157,8 @@ def fallback_markdown(report):
     if gateway == "Sendium":
         lines.append("Message storage profile: **" + text(application.get("messageStorageProfile", "memory/memory/memory")) + "**")
         lines.append("DLR storage: **" + text(application.get("dlrStorage", "postgresql")) + "**")
+        if report["configuration"]["infrastructure"]["database"].get("provisioned") is False:
+            lines.append("No database provisioned; DLR storage is local to the Sendium node.")
     if "nativeBuild" in application:
         lines.extend(["Native builder: <code>" + text(application["nativeBuild"]["builderImage"]) + "</code>",
                       "Native compiler: <code>" + text(application["nativeBuild"]["compilerVersion"]) + "</code>"])
