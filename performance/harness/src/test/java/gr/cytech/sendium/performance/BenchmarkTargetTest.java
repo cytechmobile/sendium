@@ -19,16 +19,27 @@ class BenchmarkTargetTest {
 
     @Test
     void readinessRequiresActualTargetWireSemanticsAndSendiumStorageHealth() throws Exception {
-        assertTrue(BenchmarkTarget.KANNEL.ready(403, "Authorization failed for sendsms\n", mapper));
-        assertFalse(BenchmarkTarget.KANNEL.ready(403, "Forbidden", mapper));
-        assertFalse(BenchmarkTarget.KANNEL.ready(200, "Authorization failed for sendsms", mapper));
+        assertTrue(BenchmarkTarget.KANNEL.ready(403, "Authorization failed for sendsms\n", mapper, "postgresql"));
+        assertFalse(BenchmarkTarget.KANNEL.ready(403, "Forbidden", mapper, "postgresql"));
+        assertFalse(BenchmarkTarget.KANNEL.ready(200, "Authorization failed for sendsms", mapper, "postgresql"));
         String healthy = """
                 {"status":"UP","checks":[{"name":"sendium-dlr-storage","status":"UP","data":{"backend":"postgresql"}}]}
                 """;
-        assertTrue(BenchmarkTarget.SENDIUM.ready(200, healthy, mapper));
-        assertFalse(BenchmarkTarget.SENDIUM.ready(200, healthy.replace("postgresql", "internal"), mapper));
-        assertFalse(BenchmarkTarget.SENDIUM.ready(200, "{\"status\":\"UP\"}", mapper));
-        assertFalse(BenchmarkTarget.SENDIUM.ready(403, "Authorization failed for sendsms", mapper));
+        assertTrue(BenchmarkTarget.SENDIUM.ready(200, healthy, mapper, "postgresql"));
+        assertFalse(BenchmarkTarget.SENDIUM.ready(200, healthy.replace("postgresql", "internal"), mapper, "postgresql"));
+        assertFalse(BenchmarkTarget.SENDIUM.ready(200, "{\"status\":\"UP\"}", mapper, "postgresql"));
+        assertFalse(BenchmarkTarget.SENDIUM.ready(403, "Authorization failed for sendsms", mapper, "postgresql"));
+    }
+
+    @Test
+    void readinessRequiresTheSelectedDlrBackend() throws Exception {
+        String health = """
+                {"status":"UP","checks":[{"name":"sendium-dlr-storage","status":"UP","data":{"backend":"%s"}}]}
+                """;
+        assertFalse(BenchmarkTarget.SENDIUM.ready(200, health.formatted("postgresql"), mapper, "file"));
+        assertTrue(BenchmarkTarget.SENDIUM.ready(200, health.formatted("file"), mapper, "file"));
+        assertTrue(BenchmarkTarget.SENDIUM.ready(200, health.formatted("postgresql"), mapper, "postgresql"));
+        assertFalse(BenchmarkTarget.SENDIUM.ready(200, health.formatted("file"), mapper, "postgresql"));
     }
 
     @Test

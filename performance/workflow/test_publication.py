@@ -45,6 +45,58 @@ def measured():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_generated_file_dlr_report_passes_schema_and_semantic_validation(self):
+        fixtures = list((Path(__file__).resolve().parent.parent / "harness/target/report-fixtures").glob("file-dlr-*/results.json"))
+        if not fixtures:
+            self.skipTest("Generate file-DLR report fixture with harness verification first")
+        report = publish.read(max(fixtures, key=lambda path: path.stat().st_mtime_ns))
+        publish.validator().validate(report)
+        publish.validate_results(report)
+        self.assertEqual(report["configuration"]["application"]["dlrStorage"], "file")
+        self.assertEqual(report["configuration"]["infrastructure"]["database"],
+                         {"provisioned": False, "resourceMetricsRequired": False})
+        self.assertIn("No database provisioned", publish.fallback_markdown(report))
+        self.assertNotIn("Database resources (RDS)", publish.fallback_markdown(report))
+
+    def test_failed_file_dlr_report_claims_no_database(self):
+        for runtime in ("jvm", "native"):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                req = request({"application_runtime": runtime, "dlr_storage": "file"})
+                report = publish.unavailable(req, "FIXTURE")
+                self.assertEqual(report["configuration"]["infrastructure"]["database"],
+                                 {"provisioned": False, "resourceMetricsRequired": False})
+                publish.validate(report, req)
+                markdown = publish.fallback_markdown(report)
+                self.assertIn("No database provisioned", markdown)
+                self.assertNotIn("Database resources (RDS)", markdown)
+                self.assertNotIn("db.t4g.small", json.dumps(report))
+                publish.publish(req, root, root, root, root, {}, {}, root / "published")
+                published = publish.read(root / "published/results.json")
+                publish.validate(published, req)
+                self.assertEqual(published["configuration"]["infrastructure"]["database"],
+                                 report["configuration"]["infrastructure"]["database"])
+                self.assertIn("No database provisioned", (root / "published/summary.md").read_text(encoding="utf-8"))
+
+    def test_measured_file_dlr_report_passes_publication_without_rds_evidence(self):
+        req, report = measured()
+        req["preset"]["runtime"]["dlrStorage"] = "file"
+        report["configuration"]["application"]["dlrStorage"] = "file"
+        report["configuration"]["infrastructure"]["database"] = {"provisioned": False, "resourceMetricsRequired": False}
+        publish.validate(report, req)
+        self.assertIn("No database provisioned", publish.fallback_markdown(report))
+        self.assertNotIn("Database resources (RDS)", publish.fallback_markdown(report))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "retrieved/harness"
+            path.mkdir(parents=True)
+            prepare.write(path / "results.json", report)
+            with patch.object(publish, "finalize", return_value=(deepcopy(report), publish.fallback_markdown(report))) as finalize:
+                outcome = publish.publish(req, root, root, root, root, {}, {}, root / "published")
+            self.assertEqual(outcome["issues"], [])
+            self.assertIsNone(finalize.call_args.args[5]["rdsMetrics"])
+            publish.validate(publish.read(root / "published/results.json"), req)
+
     def test_full_profiles_are_preserved_and_wrong_stage_labels_rejected(self):
         for profile in STORAGE_PROFILES:
             req = request({"storage_profile": profile})
@@ -69,6 +121,24 @@ class PublicationTests(unittest.TestCase):
                         report["configuration"]["application"].pop("messageStorageProfile")
                         with self.assertRaisesRegex(ValueError, "storage profile mismatch"):
                             publish.validate(report, req)
+
+    def test_file_dlr_label_is_preserved(self):
+        for runtime in ("jvm", "native"):
+            with self.subTest(runtime=runtime):
+                req = request({"application_runtime": runtime, "dlr_storage": "file"})
+                report = publish.unavailable(req, "FIXTURE")
+                self.assertEqual(report["configuration"]["application"]["dlrStorage"], "file")
+                publish.validate(report, req)
+                self.assertIn("DLR storage: **file**", publish.fallback_markdown(report))
+
+    def test_mislabelled_dlr_storage_results_are_rejected(self):
+        for requested, published in (("file", "postgresql"), ("postgresql", "file")):
+            with self.subTest(requested=requested, published=published):
+                req = request({"dlr_storage": requested})
+                report = publish.unavailable(req, "FIXTURE")
+                report["configuration"]["application"]["dlrStorage"] = published
+                with self.assertRaisesRegex(ValueError, "Published DLR storage mismatch"):
+                    publish.validate(report, req)
 
     def test_rds_evidence_is_preserved_and_passed_to_offline_finalizer(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,9 +328,56 @@ class PublicationTests(unittest.TestCase):
             self.assertTrue(final["measurementMetadata"]["resourcesFinalized"])
             publish.immutable(original, final)
             self.assertIn("One-minute", markdown)
+            req["preset"]["runtime"]["dlrStorage"] = "file"
+            original["configuration"]["application"]["dlrStorage"] = "file"
+            original["configuration"]["infrastructure"]["database"] = {"provisioned": False, "resourceMetricsRequired": False}
+            file_work = Path(directory) / "file-work"
+            file_work.mkdir()
+            final, markdown = publish.finalize(req, original, bundles, inputs, file_work, resources)
+            publish.validate(final, req)
+            publish.immutable(original, final)
+            self.assertIn("No database provisioned", markdown)
+            self.assertNotIn("Database resources (RDS)", markdown)
+            self.assertFalse(any(reason["code"] == "RDS_RESOURCES_MISSING" for reason in final["validity"]["reasons"]))
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_file_dlr_diagnostics_skip_rds_and_keep_ec2_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            req, report = measured()
+            req["preset"]["runtime"]["dlrStorage"] = "file"
+            report["configuration"]["application"]["dlrStorage"] = "file"
+            infrastructure = report["configuration"]["infrastructure"]
+            infrastructure["database"] = {"provisioned": False, "resourceMetricsRequired": False}
+            infrastructure["region"] = "eu-west-1"
+            ids = {"sendium": "i-11111111111111111", "harness": "i-22222222222222222"}
+            for source, identity in ids.items():
+                infrastructure[source] = {"instanceId": identity, "instanceType": "t4g.small"}
+            publish.validate(report, req)
+            path = root / "retrieved/harness"
+            path.mkdir(parents=True)
+            prepare.write(path / "results.json", report)
+            tags = [{"Key": key, "Value": value} for key, value in {
+                "sendium:managed-by": "performance-tests", "sendium:repository": req["repository"],
+                "sendium:run-identity": req["runIdentity"]}.items()]
+            def call(service, operation, **parameters):
+                self.assertEqual((service, operation), ("ec2", "describe-instances"))
+                return {"Reservations": [{"Instances": [
+                    {"InstanceId": identity, "InstanceType": "t4g.small",
+                     "Tags": tags + [{"Key": "sendium:role", "Value": source}]} for source, identity in ids.items()]}]}
+            evidence = {"schemaVersion": 1, "instances": [], "collectionIssues": []}
+            with patch.object(recover.deploy, "retrieve", return_value={}), \
+                 patch.object(recover.collect_rds_metrics, "collect", side_effect=AssertionError("No RDS collector")) as rds, \
+                 patch.object(recover.collect_cpu_credits, "collect", return_value=evidence) as credits:
+                result = recover.diagnostics(Mock(call=call), Mock(), {"region": "eu-west-1"}, req, root)
+            self.assertEqual(result["exitCode"], 0)
+            self.assertEqual(result["issues"], [])
+            rds.assert_not_called()
+            self.assertEqual(credits.call_args.args[1], ids)
+            self.assertEqual(prepare.read(root / "cpu-credits.json"), evidence)
+            self.assertFalse((root / "rds-metrics.json").exists())
+
     def test_cleanup_requires_the_dedicated_role_not_the_provisioning_role(self):
         cleanup_role = "arn:aws:iam::123456789012:role/sendium-perf-cleanup"
         orchestration_role = "arn:aws:iam::123456789012:role/sendium-perf-orchestrator"

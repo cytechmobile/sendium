@@ -33,6 +33,12 @@ on:
         options: [memory/memory/memory, file/memory/memory, file/file/memory, file/memory/file, file/file/file]
         default: memory/memory/memory
         required: true
+      dlr_storage:
+        description: 'Sendium DLR storage (leave postgresql for Kannel)'
+        type: choice
+        options: [postgresql, file]
+        default: postgresql
+        required: true
       sendium_instance_type:
         description: Gateway EC2 instance type (Sendium or Kannel)
         type: string
@@ -48,11 +54,12 @@ on:
         type: number
         default: 30
         required: true
-      worker_tps:
-        description: Outgoing worker TPS cap (0 means unlimited)
-        type: number
-        default: 0
-        required: true
+      # Use the preset's workerTps (0 means unlimited), without a form control.
+      # worker_tps:
+      #   description: Outgoing worker TPS cap (0 means unlimited)
+      #   type: number
+      #   default: 0
+      #   required: true
       warmup_seconds:
         description: Warm-up seconds (0–600)
         type: number
@@ -63,11 +70,12 @@ on:
         type: number
         default: 600
         required: true
-      drain_seconds:
-        description: Maximum drain seconds (0–600)
-        type: number
-        default: 120
-        required: true
+      # Use the preset's drainTimeoutSeconds (120), without a form control.
+      # drain_seconds:
+      #   description: Maximum drain seconds (0–600)
+      #   type: number
+      #   default: 120
+      #   required: true
       dlr_enabled:
         description: Request and verify delivery reports
         type: boolean

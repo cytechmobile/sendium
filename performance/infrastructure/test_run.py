@@ -28,11 +28,13 @@ def resolve(value, overrides=None):
 
     def walk(node):
         if isinstance(node, list):
-            return [walk(item) for item in node]
+            return [resolved for item in node if (resolved := walk(item)) is not None]
         if not isinstance(node, dict):
             return node
         if "Ref" in node:
             name = node["Ref"]
+            if name == "AWS::NoValue":
+                return None
             if name in parameters:
                 return parameters[name]
             if name == "DatabaseCredentials":
@@ -43,6 +45,11 @@ def resolve(value, overrides=None):
         if "Fn::Equals" in node:
             left, right = walk(node["Fn::Equals"])
             return left == right
+        if "Fn::Not" in node:
+            return not walk(node["Fn::Not"][0])
+        if "Fn::If" in node:
+            condition, yes, no = node["Fn::If"]
+            return walk(yes if walk(TEMPLATE["Conditions"][condition]) else no)
         if "Fn::Or" in node:
             return any(walk(node["Fn::Or"]))
         if "Fn::Split" in node:
@@ -78,6 +85,31 @@ def grants(documents, action, resource):
 
 
 class RunTests(unittest.TestCase):
+    def test_file_dlr_stack_has_no_database_resources(self):
+        self.assertEqual(TEMPLATE["Parameters"]["DlrStorage"]["Default"], "postgresql")
+        self.assertEqual(TEMPLATE["Parameters"]["DlrStorage"]["AllowedValues"], ["postgresql", "file"])
+        databases = {"Database", "DatabaseCredentials", "DatabaseSubnets", "DatabaseParameters"}
+        database_outputs = {name for name in TEMPLATE["Outputs"] if name.startswith("Database")}
+        self.assertEqual(database_outputs, {"DatabaseIdentifier", "DatabaseAddress", "DatabasePort", "DatabaseName", "DatabaseCredentialsArn"})
+        for storage in ("file", "postgresql"):
+            for name in databases:
+                condition = RESOURCES[name]["Condition"]
+                self.assertEqual(resolve(TEMPLATE["Conditions"][condition], {"DlrStorage": storage}), storage == "postgresql")
+            for name in database_outputs:
+                condition = TEMPLATE["Outputs"][name]["Condition"]
+                self.assertEqual(resolve(TEMPLATE["Conditions"][condition], {"DlrStorage": storage}), storage == "postgresql")
+        self.assertEqual({name for name, resource in RESOURCES.items()
+                          if resource["Type"].startswith(("AWS::RDS::", "AWS::SecretsManager::"))}, databases)
+
+    def test_file_dlr_node_role_has_no_database_secret_access(self):
+        for role in ("SendiumRole", "HarnessRole"):
+            policy = statements(role, {"DlrStorage": "file"})
+            for statement in policy:
+                self.assertNotIn("secretsmanager", json.dumps(statement).lower())
+            self.assertFalse(grants(policy, "secretsmanager:GetSecretValue",
+                                    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:anything"))
+        self.assertTrue(any(statement["Sid"] == "ReadOwnDatabaseCredentials" for statement in statements("SendiumRole")))
+
     def test_harness_can_list_only_the_exact_run_gateway_readiness_key(self):
         listing, = [statement for statement in statements("HarnessRole") if statement["Action"] == "s3:ListBucket"]
         self.assertEqual(listing["Resource"], f"arn:aws:s3:::{BUCKET}")
@@ -135,7 +167,18 @@ class RunTests(unittest.TestCase):
         self.assertEqual(RESOURCES["DatabaseSubnets"]["Properties"]["SubnetIds"],
                          [{"Fn::GetAtt": ["Network", "Outputs.PrimarySubnetId"]},
                           {"Fn::GetAtt": ["Network", "Outputs.SecondarySubnetId"]}])
-        self.assertNotIn("Default", TEMPLATE["Parameters"]["DatabaseEngineVersion"])
+        self.assertEqual(TEMPLATE["Parameters"]["DatabaseEngineVersion"]["Default"], "")
+        rule = TEMPLATE["Rules"]["PostgreSQLRequiresEngineVersion"]
+        for storage in ("file", "postgresql"):
+            self.assertEqual(resolve(rule["RuleCondition"], {"DlrStorage": storage}), storage == "postgresql")
+        assertion, = rule["Assertions"]
+        self.assertFalse(resolve(assertion["Assert"], {"DatabaseEngineVersion": ""}))
+        self.assertTrue(resolve(assertion["Assert"], {"DatabaseEngineVersion": "17.6"}))
+        pattern = TEMPLATE["Parameters"]["DatabaseEngineVersion"]["AllowedPattern"]
+        for version in ("", "17.6", "17.12.1"):
+            self.assertIsNotNone(re.fullmatch(pattern, version))
+        for version in ("18.1", "latest", " "):
+            self.assertIsNone(re.fullmatch(pattern, version))
         self.assertEqual(RESOURCES["DatabaseParameters"]["Properties"]["Family"], "postgres17")
         self.assertEqual(RESOURCES["DatabaseParameters"]["Properties"]["Parameters"]["rds.force_ssl"], "1")
         for policy in ("DeletionPolicy", "UpdateReplacePolicy"):

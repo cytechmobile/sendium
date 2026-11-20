@@ -388,6 +388,12 @@ public final class ResultReport {
     }
 
     private static void databaseResources(StringBuilder out, ObjectNode root) {
+        if ("file".equals(root.path("configuration").path("application").path("dlrStorage").asText())
+                && root.path("configuration").path("infrastructure").path("database").path("provisioned").isBoolean()
+                && !root.path("configuration").path("infrastructure").path("database").path("provisioned").asBoolean()) {
+            out.append("\nNo database provisioned; DLR storage is local to the Sendium node.\n");
+            return;
+        }
         var database = root.path("resources").path("database");
         if (database.isMissingNode() && !root.path("configuration").path("infrastructure").path("database").path("resourceMetricsRequired").asBoolean(false)) { return; }
         out.append("\n## Database resources (RDS)\n\n");

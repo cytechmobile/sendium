@@ -96,14 +96,16 @@ public final class BenchmarkConfigGenerator {
         application.put("quarkus.http.port", "" + deployment.httpPort());
         application.put("quarkus.http.access-log.enabled", "false");
         application.put("quarkus.log.level", "INFO");
-        application.put("quarkus.datasource.dlr.jdbc.url", "${SENDIUM_DLR_POSTGRESQL_JDBC_URL}");
-        application.put("quarkus.datasource.dlr.username", "${SENDIUM_DLR_POSTGRESQL_USERNAME}");
-        application.put("quarkus.datasource.dlr.password", "${SENDIUM_DLR_POSTGRESQL_PASSWORD}");
         var database = deployment.database();
-        application.put("quarkus.datasource.dlr.jdbc.min-size", "" + database.poolMinSize());
-        application.put("quarkus.datasource.dlr.jdbc.max-size", "" + database.poolMaxSize());
-        application.put("quarkus.datasource.dlr.jdbc.acquisition-timeout", database.acquisitionTimeoutMillis() + "ms");
-        application.put("sendium.dlr.delivery-claim-duration", database.claimDurationSeconds() + "s");
+        if (database != null) {
+            application.put("quarkus.datasource.dlr.jdbc.url", "${SENDIUM_DLR_POSTGRESQL_JDBC_URL}");
+            application.put("quarkus.datasource.dlr.username", "${SENDIUM_DLR_POSTGRESQL_USERNAME}");
+            application.put("quarkus.datasource.dlr.password", "${SENDIUM_DLR_POSTGRESQL_PASSWORD}");
+            application.put("quarkus.datasource.dlr.jdbc.min-size", "" + database.poolMinSize());
+            application.put("quarkus.datasource.dlr.jdbc.max-size", "" + database.poolMaxSize());
+            application.put("quarkus.datasource.dlr.jdbc.acquisition-timeout", database.acquisitionTimeoutMillis() + "ms");
+            application.put("sendium.dlr.delivery-claim-duration", database.claimDurationSeconds() + "s");
+        }
 
         String routing = """
                 [default]
@@ -128,7 +130,7 @@ public final class BenchmarkConfigGenerator {
                     systemId: "%s"
                     password: "%s"
                 """.formatted(smpp ? "SMPP" : "HTTP", deployment.runIdentity(), user, password));
-        files.put("sendium/environment.json", json(Map.of(
+        files.put("sendium/environment.json", json(database == null ? Map.of() : Map.of(
                 "SENDIUM_DLR_POSTGRESQL_JDBC_URL", database.jdbcUrl(),
                 "SENDIUM_DLR_POSTGRESQL_USERNAME", database.username(),
                 "SENDIUM_DLR_POSTGRESQL_PASSWORD", database.password())));
@@ -157,7 +159,8 @@ public final class BenchmarkConfigGenerator {
         effective.put("dlrStorage", "postgresql");
         effective.put("dlrRequested", workload.dlrEnabled());
         com.fasterxml.jackson.databind.node.ObjectNode publicDeployment = mapper.valueToTree(deployment);
-        publicDeployment.withObject("/database").remove(java.util.List.of("password", "username"));
+        if (database == null) { publicDeployment.remove("database"); }
+        else { publicDeployment.withObject("/database").remove(java.util.List.of("password", "username")); }
         effective.put("deployment", publicDeployment);
         files.put("public/effective-configuration.json", json(effective));
         files.put("harness/effective-configuration.json", files.get("public/effective-configuration.json"));

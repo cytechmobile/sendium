@@ -59,6 +59,20 @@ class RegionalAws:
 
 
 class ResolutionTests(unittest.TestCase):
+    def test_file_dlr_resolution_skips_database_lookup(self):
+        preset = request({"dlr_storage": "file"})["preset"]
+        aws = RegionalAws()
+        call = aws.call
+        def no_rds(service, operation, **parameters):
+            self.assertNotEqual(service, "rds")
+            return call(service, operation, **parameters)
+        with patch.object(aws, "call", side_effect=no_rds):
+            result = resolve_aws.resolve(aws, preset, "eu-west-1")
+        self.assertEqual(result["database"], {"provisioned": False, "resourceMetricsRequired": False})
+        self.assertEqual(result["placement"]["primary"], "eu-west-1a")
+        self.assertEqual(set(result["nodes"]), {"sendium", "harness"})
+        self.assertFalse(any(service == "rds" for service, _, _ in aws.calls))
+
     def test_s3_gateway_and_interface_records_do_not_overwrite_each_other(self):
         for reverse in (False, True):
             with self.subTest(reverse=reverse):
@@ -187,6 +201,58 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_stack_parameters_select_dlr_storage(self):
+        for storage in ("postgresql", "file"):
+            with self.subTest(storage=storage), tempfile.TemporaryDirectory() as directory:
+                preset = request({"dlr_storage": storage})["preset"]
+                resolved = resolve_aws.resolve(RegionalAws(), preset, "eu-west-1")
+                plan = {"region": "eu-west-1", "repository": CONTEXT["repository"], "runIdentity": "gh-12345-2",
+                        "runStack": "sendium-perf-run-gh-12345-2"}
+                staged = {"expiresAt": "2026-10-16T20:00:00Z", "bucket": "bucket", "preset": preset,
+                          "artifacts": {"runTemplate": {"key": "runs/gh-12345-2/templates/run.yaml"}}}
+                boot = {"RunStackPrefix": "sendium-perf-run-", "RuntimeBoundaryArn": "boundary",
+                        "CloudFormationExecutionRoleArn": "service-role"}
+                identifier = "arn:aws:cloudformation:eu-west-1:123456789012:stack/" + plan["runStack"] + "/id"
+                created = {}
+                def call(service, operation, **parameters):
+                    if operation == "create-stack":
+                        created.update(parameters)
+                        return {"StackId": identifier}
+                    return {"Stacks": [{"StackId": identifier, "StackStatus": "CREATE_COMPLETE",
+                                        "RoleARN": "service-role", "Tags": created["tags"]}]}
+                run_aws.create_stack(Mock(call=call), plan, staged, resolved, boot, "aws", directory)
+                parameters = {item["ParameterKey"]: item["ParameterValue"] for item in created["parameters"]}
+                self.assertEqual(parameters["DlrStorage"], storage)
+                if storage == "file":
+                    self.assertNotIn("DatabaseInstanceType", parameters)
+                    self.assertNotIn("DatabaseEngineVersion", parameters)
+                else:
+                    self.assertEqual(parameters["DatabaseInstanceType"], "db.t4g.small")
+                    self.assertEqual(parameters["DatabaseEngineVersion"], "17.12")
+
+    def test_file_dlr_controller_runs_without_resolved_database_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            req, bundles = test_prepare.ArtifactTests().fixtures(directory)
+            req["preset"]["runtime"]["dlrStorage"] = "file"
+            inputs = prepare.verify_bundles(req, bundles)
+            resolved = resolve_aws.resolve(RegionalAws(), req["preset"], "eu-west-1")
+            resolved["database"] = {"provisioned": False, "resourceMetricsRequired": False}
+            plan = {"schemaVersion": 1, "region": "eu-west-1", "repository": req["repository"], "bootstrapStack": "bootstrap",
+                    "runIdentity": req["runIdentity"], "runStack": "sendium-perf-run-" + req["runIdentity"]}
+            metadata = {"java": {source: {"release": "jdk-25.0.4.1+1"} for source in ("sendium", "harness")}}
+            with patch.object(run_aws, "preflight", return_value=(plan, {}, "aws")), \
+                 patch.object(run_aws.resolve_aws, "resolve", return_value=resolved), \
+                 patch.object(run_aws.runtime_assets, "resolve", return_value=({}, metadata)), \
+                 patch.object(run_aws.deploy, "stage", return_value={**plan, "bucket": "bucket"}) as stage, \
+                 patch.object(run_aws, "create_stack"), patch.object(run_aws, "stack_events", return_value={"events": []}), \
+                 patch.object(run_aws.deploy, "retrieve"), \
+                 patch.object(run_aws.deploy, "execute", return_value={"exitCode": 0}) as execute:
+                result = run_aws.run(Mock(), Mock(), req, inputs, bundles, {"region": "eu-west-1"}, Path(directory) / "controller")
+            self.assertEqual(result["exitCode"], 0)
+            self.assertEqual(result["phase"], "finished")
+            self.assertEqual(stage.call_args.args[2]["runtime"]["dlrStorage"], "file")
+            execute.assert_called_once()
+
     def test_bootstrap_preflight_requires_installed_expiry_and_exact_assumed_role(self):
         role = "arn:aws:iam::123456789012:role/sendium-perf-orchestrator"
         settings = {"region": "eu-west-1", "bootstrapStack": "bootstrap", "roleArn": role}

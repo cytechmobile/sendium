@@ -206,7 +206,8 @@ public final class BenchmarkRunner {
                         pending = client.sendAsync(HttpRequest.newBuilder(readiness).timeout(Duration.ofNanos(timeout)).GET().build(),
                                 HttpResponse.BodyHandlers.limiting(HttpResponse.BodyHandlers.ofString(), 65536));
                         var response = pending.get(timeout, TimeUnit.NANOSECONDS);
-                        ready = target.ready(response.statusCode(), response.body(), mapper) && localGatewayReady(runtime);
+                        ready = target.ready(response.statusCode(), response.body(), mapper,
+                                execution.context().application().path("dlrStorage").asText()) && localGatewayReady(runtime);
                         if (ready) { break; }
                     } catch (java.io.IOException | java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException ignored) {
                         if (pending != null) { pending.cancel(true); }

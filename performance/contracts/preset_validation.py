@@ -4,7 +4,7 @@ import ipaddress
 import math
 import re
 
-from application_runtime import runtime_mode, validate_native_settings, storage_profile
+from application_runtime import runtime_mode, validate_native_settings, storage_profile, dlr_storage
 
 
 def require(condition, message):
@@ -20,6 +20,7 @@ def validate_preset(preset, workload_validator):
     aws, runtime, database = preset["aws"], preset["runtime"], preset["database"]
     mode = runtime_mode(preset)
     storage_profile(runtime)
+    dlr_storage(runtime)
     if mode == "native" or "native" in runtime:
         validate_native_settings(preset)
     deployment, measurement, bounds = preset["deployment"], preset["measurement"], preset["bounds"]

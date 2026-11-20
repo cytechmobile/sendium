@@ -43,7 +43,16 @@ public final class HarnessMain {
             ObjectMapper mapper = configurationMapper();
             RunConfig config = mapper.readValue(Path.of(args[1]).toFile(), RunConfig.class);
             if (generate) {
-                BenchmarkDeployment deployment = mapper.readValue(Path.of(args[2]).toFile(), BenchmarkDeployment.class);
+                var input = mapper.readTree(Path.of(args[2]).toFile());
+                var reader = mapper.readerFor(BenchmarkDeployment.class);
+                if (input.isObject() && !input.has("database")) {
+                    // Only an absent deployment database is optional. Other missing fields remain errors,
+                    // null primitives are rejected, and the record validates its required strings.
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) input).putNull("database");
+                    reader = reader.without(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
+                            .with(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES);
+                }
+                BenchmarkDeployment deployment = reader.readValue(input);
                 BenchmarkConfigGenerator generator = new BenchmarkConfigGenerator();
                 generator.write(Path.of(args[3]), generator.generate(config, deployment));
                 System.out.println("Generated private runtime bundles and public effective configuration");

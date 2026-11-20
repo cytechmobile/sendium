@@ -29,6 +29,49 @@ class BenchmarkConfigGeneratorTest {
         Properties properties = new Properties(); properties.load(new StringReader(text)); return properties;
     }
 
+    @Test
+    void generatesNoDatasourceWithoutDatabase() throws Exception {
+        var input = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(
+                Path.of("src/test/resources/deployment.json").toFile());
+        input.remove("database");
+        var deployment = mapper.treeToValue(input, BenchmarkDeployment.class);
+        assertNull(deployment.database());
+        var files = generator.generate(workload("http", true), deployment).files();
+        assertFalse(properties(files.get("sendium/config/application.properties")).stringPropertyNames().stream()
+                .anyMatch(name -> name.startsWith("quarkus.datasource.dlr.")));
+        assertFalse(mapper.readTree(files.get("sendium/environment.json")).properties().stream()
+                .anyMatch(entry -> entry.getKey().startsWith("SENDIUM_DLR_POSTGRESQL_")));
+        assertFalse(mapper.readTree(files.get("public/effective-configuration.json")).path("deployment").has("database"));
+        assertEquals(files.get("public/effective-configuration.json"), files.get("harness/effective-configuration.json"));
+
+        Path document = directory.resolve("deployment.json");
+        mapper.writeValue(document.toFile(), input);
+        Path output = directory.resolve("no-database");
+        assertEquals(0, HarnessMain.run(new String[]{"generate-config", "src/test/resources/run-config.json",
+                document.toString(), output.toString()}));
+        assertFalse(properties(Files.readString(output.resolve("sendium/config/application.properties"))).stringPropertyNames().stream()
+                .anyMatch(name -> name.startsWith("quarkus.datasource.dlr.")));
+        assertTrue(mapper.readTree(output.resolve("sendium/environment.json").toFile()).isEmpty());
+        assertFalse(mapper.readTree(output.resolve("public/effective-configuration.json").toFile()).path("deployment").has("database"));
+
+        // The optional database must not weaken any other required deployment field.
+        for (String field : input.properties().stream().map(Map.Entry::getKey).toList()) {
+            for (boolean explicitNull : new boolean[]{false, true}) {
+                var invalid = input.deepCopy();
+                if (explicitNull) { invalid.putNull(field); } else { invalid.remove(field); }
+                mapper.writeValue(document.toFile(), invalid);
+                assertEquals(2, HarnessMain.run(new String[]{"generate-config", "src/test/resources/run-config.json",
+                        document.toString(), directory.resolve("invalid").toString()}), field);
+            }
+        }
+        var invalidDatabase = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(
+                Path.of("src/test/resources/deployment.json").toFile());
+        invalidDatabase.withObject("/database").putNull("password");
+        mapper.writeValue(document.toFile(), invalidDatabase);
+        assertEquals(2, HarnessMain.run(new String[]{"generate-config", "src/test/resources/run-config.json",
+                document.toString(), directory.resolve("invalid-database").toString()}));
+    }
+
     @ParameterizedTest
     @CsvSource({"http,true", "http,false", "smpp,true", "smpp,false"})
     void generatedBundlesAgreeOnCredentialsRoutingEndpointsAndDlrSemantics(String mode, boolean dlr) throws Exception {

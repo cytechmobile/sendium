@@ -61,8 +61,10 @@ def create_stack(aws, plan, staged, resolved, boot, partition, directory, clock=
     parameters = {"ResourcePrefix": prefix[:-5], "Repository": plan["repository"], "RunIdentity": plan["runIdentity"],
                   "ExpiresAt": staged["expiresAt"], "ArtifactBucketName": staged["bucket"], "RuntimeBoundaryArn": boot["RuntimeBoundaryArn"],
                   "PrimaryAvailabilityZone": resolved["placement"]["primary"], "SecondaryAvailabilityZone": resolved["placement"]["secondary"],
-                  "S3PrefixListId": resolved["s3PrefixListId"], "DatabaseInstanceType": resolved["database"]["instanceType"],
-                  "DatabaseEngineVersion": resolved["database"]["engineVersion"]}
+                  "S3PrefixListId": resolved["s3PrefixListId"], "DlrStorage": prepare.dlr_storage(staged["preset"]["runtime"])}
+    if parameters["DlrStorage"] == "postgresql":
+        parameters.update(DatabaseInstanceType=resolved["database"]["instanceType"],
+                          DatabaseEngineVersion=resolved["database"]["engineVersion"])
     for source, node in resolved["nodes"].items():
         for suffix, field in (("ImageId", "imageId"), ("InstanceType", "instanceType"), ("RootDeviceName", "rootDeviceName"), ("RootVolumeGiB", "rootVolumeGiB")):
             parameters[source.title() + suffix] = node[field]
@@ -124,7 +126,8 @@ def run(aws, downloads, request, inputs, bundles, settings, directory, verify_bu
         resolved["runtime"] = details
         prepare.write(directory / "resolution.json", resolved)
         preset = deepcopy(request["preset"])
-        preset["database"]["engineVersion"] = resolved["database"]["engineVersion"]
+        if prepare.dlr_storage(preset["runtime"]) == "postgresql":
+            preset["database"]["engineVersion"] = resolved["database"]["engineVersion"]
         preset["runtime"]["java"]["release"] = details["java"]["harness"]["release"]
         artifacts = dict(runtime)
         native_build = None

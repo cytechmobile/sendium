@@ -21,8 +21,9 @@ Start the harness, wait for `state.json` to show `listenersReady: true`, then
 start packaged Sendium using its generated working directory/environment. This
 avoids an initial failed provider bind and reconnection delay. An already-running
 application can also reconnect to the new provider. Readiness requires HTTP `UP`,
-an `UP` `sendium-dlr-storage` check with `backend=postgresql`, and a provider bind.
-PostgreSQL remains required even when message-level DLR is disabled. SMPP ingress
+an `UP` `sendium-dlr-storage` check reporting the selected DLR backend, and a provider bind.
+The backend is `file` when the effective configuration's `dlrStorage` is `file`; otherwise it is
+`postgresql`, which remains required even when message-level DLR is disabled. SMPP ingress
 connects when selected; optional local sampling must produce a baseline.
 
 ### Target-aware execution

@@ -97,6 +97,20 @@ class TargetContractTests(unittest.TestCase):
             value["sendium"] = value.pop("kannel")
             self.assertFalse(VALIDATOR.is_valid(broken), node)
 
+    def test_sendium_report_accepts_file_dlr_storage(self):
+        for runtime in ("jvm", "native"):
+            document = fixture()
+            document["configuration"]["application"].update(dlrStorage="file", runtime=runtime,
+                                                            jvmArguments=[], nativeArguments=["-Xmx512m"])
+            if runtime == "jvm":
+                document["configuration"]["application"].pop("nativeArguments")
+            VALIDATOR.validate(document)
+
+    def test_kannel_report_rejects_file_dlr_storage(self):
+        document = fixture("kannel")
+        document["configuration"]["application"]["dlrStorage"] = "file"
+        self.assertFalse(VALIDATOR.is_valid(document))
+
     def test_sendium_still_requires_a_commit_and_cannot_inherit_kannel_storage_or_runtime(self):
         for field, value in (("runtime", "kannel"), ("dlrStorage", "internal"), ("benchmarkTarget", "unknown")):
             document = fixture()

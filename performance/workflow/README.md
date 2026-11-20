@@ -23,8 +23,8 @@ reviewers, with separate read-only and deletion-only roles. See
 ## Inputs and defaults
 
 GitHub's [current workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
-allows 25 top-level dispatch inputs (checked 2026-10-16). All 14 required controls
-therefore have individual fields; durations do not need a grouped string.
+allows 25 top-level dispatch inputs (checked 2026-10-16). The form exposes 14 inputs
+(13 required), with worker TPS and maximum drain controlled by the preset instead.
 
 | Input | Default | Validation |
 |---|---:|---|
@@ -32,17 +32,21 @@ therefore have individual fields; durations do not need a grouped string.
 | `application_runtime` | `jvm` | Sendium: `jvm` or `native`; leave `jvm` for Kannel, which uses its C runtime |
 | `application_branch` | blank | Sendium branch to resolve to an exact application SHA; blank uses the dispatch branch. Controller remains on the default branch. |
 | `storage_profile` | `memory/memory/memory` | Sendium pending/selected/routed: `memory/memory/memory`, `file/memory/memory`, `file/file/memory`, `file/memory/file`, or `file/file/file`. Leave the default for Kannel. |
+| `dlr_storage` | `postgresql` | Sendium DLR storage: `postgresql` or `file`. Leave the default for Kannel. |
 | `ingress_mode` | `http` | Sendium: `http` or `smpp`; Kannel: HTTP only |
 | `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
 | `offered_rate` | 30 | Finite, positive messages/sec, at most 1,000,000,000; fractional rates supported |
-| `worker_tps` | 0 | Nonnegative Java-compatible integer; 0 means unlimited |
 | `warmup_seconds` | 120 | Integer, 0–600 |
 | `measurement_seconds` | 600 | Integer, 1–3600 |
-| `drain_seconds` | 120 | Integer, 0–600 |
 | `dlr_enabled` | `true` | Boolean; `false` remains false through normalization |
 | `provider_response_delay_ms` | 5 | Integer, 0–10000 |
 | `provider_dlr_delay_ms` | 1000 | Integer, 0–60000 |
+
+The `worker_tps` and `drain_seconds` input blocks are commented out of the workflow.
+Normalization uses the preset defaults: `workerTps: 0` (unlimited) and
+`drainTimeoutSeconds: 120`. Both settings remain active internally; hiding their
+form controls does not disable the outgoing worker limit mechanism or drain phase.
 
 Settings merge into `performance/presets/aws-private-jvm-v1.json` and pass the
 existing workload schema/compatibility/lifecycle-budget checks before builds.
@@ -131,6 +135,25 @@ The effective configuration, `results.json` application metadata, and Markdown s
 normalized request, so file runs cannot silently be reported as memory runs. PostgreSQL DLR storage
 is unchanged. Kannel retains its own spool settings and rejects Sendium's `file` choice. The selected
 application revision must implement the requested profile; choosing `file` does not retrofit older builds.
+
+`dlr_storage` selects Sendium's DLR backend independently of the storage profile, runtime and ingress,
+and defaults to `postgresql`. With `file`, the gateway node creates a private `dlr/` directory beside
+`pending/` under its per-run root and sets `SENDIUM_DLR_STORAGE_BACKEND=file` and
+`SENDIUM_DLR_STORAGE_FILE_PATH` for the application process. Traffic starts only after the
+`sendium-dlr-storage` readiness check reports `backend=file`. The effective configuration,
+`results.json` application metadata and Markdown summary record `dlrStorage`, and publication rejects
+results labelled with a different storage from the request. Compare a `file` run with a `postgresql`
+run that uses otherwise identical inputs. Kannel rejects Sendium's `file` choice. The selected
+application revision must include the file DLR backend; choosing `file` does not retrofit older
+builds. The DLR files live on the temporary instance's root volume and are deleted with it.
+
+File-DLR runs provision no RDS instance, database secret, subnet group or parameter group.
+The controller skips PostgreSQL availability checks, the Sendium node reads no database secret
+and the generator emits no datasource settings or PostgreSQL credentials. Reports record
+`database.provisioned: false` and `resourceMetricsRequired: false`, state "No database provisioned",
+and omit the RDS resources section. Diagnostics still collect both EC2 nodes' resource evidence.
+PostgreSQL runs (including Kannel) retain their database, verified TLS and RDS metrics.
+The shared private network and CA bundle download are unchanged.
 
 To benchmark the filesystem-stage feature branch, first merge this workflow/controller change to
 `main`. Run **Performance Tests** using workflow branch `main`, set

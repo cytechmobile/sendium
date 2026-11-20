@@ -10,8 +10,8 @@ public record BenchmarkDeployment(String runIdentity, String preset, String send
         int outgoingWorkerThreads, int callbackThreads, int callbackQueueCapacity, Database database) {
     public BenchmarkDeployment {
         if (runIdentity == null || !runIdentity.matches("[A-Za-z0-9-]{1,32}")
-                || preset == null || preset.isBlank() || database == null) {
-            throw new IllegalArgumentException("Missing deployment identity, preset, or database");
+                || preset == null || preset.isBlank()) {
+            throw new IllegalArgumentException("Missing deployment identity or preset");
         }
         host(sendiumHost);
         host(harnessHost);
