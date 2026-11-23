@@ -53,6 +53,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     private final PendingMessageStore<M> pending;
     private final SelectedRouterStore<M> router;
     private final RoutedWorkStore<M> routed;
+    private final OutboundDlrPolicy dlrPolicy;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final Map<SelectionId, Context<M>> selections = new HashMap<>();
@@ -73,19 +74,31 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
                                       int recoveryBatchSize) {
+        this(pending, router, routed, recoveryBatchSize, OutboundDlrPolicy.UNRESTRICTED);
+    }
+
+    public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
+                                      int recoveryBatchSize, OutboundDlrPolicy dlrPolicy) {
         this(pending, router, routed, recoveryBatchSize, Clock.systemUTC(), () ->
                 Executors.newSingleThreadScheduledExecutor(task -> {
                     var thread = new Thread(task, "outbound-pending-recovery");
                     thread.setDaemon(true);
                     return thread;
-                }));
+                }), dlrPolicy);
     }
 
     DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
                                int recoveryBatchSize, Clock recoveryClock, Supplier<ScheduledExecutorService> recoverySchedulers) {
+        this(pending, router, routed, recoveryBatchSize, recoveryClock, recoverySchedulers, OutboundDlrPolicy.UNRESTRICTED);
+    }
+
+    private DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
+                                       int recoveryBatchSize, Clock recoveryClock,
+                                       Supplier<ScheduledExecutorService> recoverySchedulers, OutboundDlrPolicy dlrPolicy) {
         this.pending = Objects.requireNonNull(pending, "pending");
         this.router = Objects.requireNonNull(router, "router");
         this.routed = Objects.requireNonNull(routed, "routed");
+        this.dlrPolicy = Objects.requireNonNull(dlrPolicy, "dlrAdmission|error|reason:missingPolicy");
         if (recoveryBatchSize <= 0) {
             throw new IllegalArgumentException("outboundConfiguration|error|reason:nonPositiveRecoveryBatchSize");
         }
@@ -241,15 +254,17 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         lock.lock();
         try {
             requireRunning(Role.PENDING);
-            if (sourceSelections.containsKey(source)) {
-                return source;
-            }
-            SourceId accepted = held ? pending.admitHeld(source, message) : pending.admit(source, message);
-            if (!source.equals(accepted)) {
-                throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
-                        "Pending admission did not confirm the requested source handle");
-            }
-            return accepted;
+            return admitProtected(source, message, () -> {
+                if (sourceSelections.containsKey(source)) {
+                    return source;
+                }
+                SourceId accepted = held ? pending.admitHeld(source, message) : pending.admit(source, message);
+                if (!source.equals(accepted)) {
+                    throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
+                            "outboundAdmission|error|reason:sourceHandleNotConfirmed");
+                }
+                return accepted;
+            });
         } finally {
             lock.unlock();
         }
@@ -268,20 +283,46 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         lock.lock();
         try {
             requireRunning(Role.PENDING);
-            MultipartMembership accepted;
-            if (sourceSelections.containsKey(source)) {
-                accepted = pending.findMultipart(source)
-                        .orElseThrow(() -> invalid(Role.PENDING, "Multipart source is no longer retained"));
-            } else {
-                accepted = pending.admitPart(source, message, timeout);
-            }
-            if (accepted == null || !source.equals(accepted.source())) {
-                throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
-                        "Pending admission did not confirm multipart source membership");
-            }
-            return accepted;
+            return admitProtected(source, message, () -> {
+                MultipartMembership accepted;
+                if (sourceSelections.containsKey(source)) {
+                    accepted = pending.findMultipart(source)
+                            .orElseThrow(() -> invalid(Role.PENDING, "outboundAdmission|error|reason:multipartSourceNotRetained"));
+                } else {
+                    accepted = pending.admitPart(source, message, timeout);
+                }
+                if (accepted == null || !source.equals(accepted.source())) {
+                    throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
+                            "outboundAdmission|error|reason:multipartMembershipNotConfirmed");
+                }
+                return accepted;
+            });
         } finally {
             lock.unlock();
+        }
+    }
+
+    private <T> T admitProtected(SourceId source, M message, Supplier<T> admission) {
+        var reservation = Objects.requireNonNull(dlrPolicy.reserveAdmission(source, message),
+                "dlrAdmission|error|reason:missingReservation");
+        try {
+            return admission.get();
+        } catch (RuntimeException | Error failure) {
+            if (reservation != OutboundDlrPolicy.Reservation.UNCHANGED) {
+                try {
+                    // An exception may follow publication. Only a ready store can establish absence.
+                    // No memory-owner lock is held during these reads.
+                    if (pending.status().state() == OutboundStage.State.READY &&
+                            pending.find(source).isEmpty() && pending.status().state() == OutboundStage.State.READY) {
+                        reservation.rollback();
+                    }
+                } catch (RuntimeException | Error readbackFailure) {
+                    if (readbackFailure != failure) {
+                        failure.addSuppressed(readbackFailure);
+                    }
+                }
+            }
+            throw failure;
         }
     }
 
