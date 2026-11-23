@@ -7,6 +7,8 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 
@@ -103,6 +105,12 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
      * handoff/cleanup instead of returning the work for provider redispatch.
      */
     void returnToRouted(Routed<M> work);
+
+    /** Relinquishes a pre-provider take's scheduling window without completing source/destination ownership. */
+    default void deferFromRouted(Routed<M> work) {
+        throw new OutboundStorageException(OutboundStage.Role.ROUTED_WORK, OutboundStorageException.Reason.UNSUPPORTED,
+                "routedDefer|error|reason:unsupportedCoordinator");
+    }
 
     /**
      * Reports terminal processing of all provider parts for this work, conditional on successful required

@@ -196,7 +196,16 @@ final class FolderPendingIndex {
     }
 
     List<WorkId> routedReady(String destination, int limit) throws IOException {
-        return routedReadyIndex(destination).after(null, limit).stream().map(key -> new WorkId(source(key).value())).toList();
+        return routedReadyAfter(destination, null, limit);
+    }
+
+    List<WorkId> routedReadyAfter(String destination, WorkId after, int limit) throws IOException {
+        return routedReadyIndex(destination).after(after == null ? null : sourceKey(new SourceId(after.value())), limit)
+                .stream().map(key -> new WorkId(source(key).value())).toList();
+    }
+
+    void scheduleRouted(StoredWork record) throws IOException {
+        routedReadyIndex(record.work().destination()).add(sourceKey(new SourceId(record.work().id().value())));
     }
 
     List<WorkId> terminalRoutedAfter(WorkId after, int limit) throws IOException {

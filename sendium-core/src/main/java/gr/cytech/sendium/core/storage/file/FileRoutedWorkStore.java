@@ -39,6 +39,7 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
     private final Map<String, Timer> timers = new ConcurrentHashMap<>();
     private final Map<WorkId, Entry> active = new HashMap<>();
     private final Map<String, ArrayDeque<Entry>> ready = new HashMap<>();
+    private final Map<String, WorkId> cursors = new HashMap<>();
     private PendingSpool spool;
     private State state = State.NEW;
 
@@ -216,6 +217,29 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
     }
 
     @Override
+    public void defer(Routed<StandardMessage> taken) {
+        Objects.requireNonNull(taken, "routedDefer|error|reason:missingTake");
+        measured("routed_defer", () -> {
+            pending.selectionLock().lock();
+            try {
+                requireReady();
+                Entry entry = active.get(taken.id());
+                if (entry == null || entry.inFlight != taken) {
+                    throw invalid("notCurrentTake");
+                }
+                // Only a disposable scheduling reference changes; durable work/source ownership
+                // remains untouched. Publish that reference before relinquishing the current take.
+                spool.rescheduleRouted(entry.record);
+                active.remove(taken.id());
+                pending.selectionChanged().signalAll();
+                return null;
+            } finally {
+                pending.selectionLock().unlock();
+            }
+        });
+    }
+
+    @Override
     public Completed complete(WorkId id) {
         return measured("routed_complete", () -> completeWork(id));
     }
@@ -305,7 +329,13 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
         if (space == 0) {
             return;
         }
-        for (WorkId id : spool.routedCandidates(destination, space)) {
+        var candidates = spool.routedCandidatesAfter(destination, cursors.get(destination), space);
+        if (candidates.isEmpty() && cursors.containsKey(destination)) {
+            // At most one wrap/query per poll; never loop over the blocked backlog here.
+            cursors.remove(destination);
+            candidates = spool.routedCandidatesAfter(destination, null, space);
+        }
+        for (WorkId id : candidates) {
             StoredWork record = spool.routedWork(id);
             if (!record.work().destination().equals(destination)) {
                 state = State.FAILED;
@@ -315,6 +345,7 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
             Entry entry = new Entry(record);
             active.put(id, entry);
             ready.computeIfAbsent(destination, ignored -> new ArrayDeque<>()).addLast(entry);
+            cursors.put(destination, id);
         }
     }
 
@@ -352,6 +383,7 @@ public final class FileRoutedWorkStore implements RoutedWorkStore<StandardMessag
             state = State.CLOSED;
             active.clear();
             ready.clear();
+            cursors.clear();
             pending.selectionChanged().signalAll();
         } finally {
             pending.selectionLock().unlock();

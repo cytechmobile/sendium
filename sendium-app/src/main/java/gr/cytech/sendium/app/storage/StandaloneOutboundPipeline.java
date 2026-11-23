@@ -218,6 +218,9 @@ public class StandaloneOutboundPipeline implements HealthCheck {
                 for (int i = 0; i < batchSize; i++) {
                     var work = dispatch.takeForProvider(worker.getFullName(), Duration.ZERO);
                     if (work.isEmpty()) {
+                        // A blocked candidate may have relinquished its prefetch slot. End this
+                        // destination's bounded cycle; the existing idle delay resumes traversal
+                        // without treating deferral as a productive send or spinning immediately.
                         break;
                     }
                     try {

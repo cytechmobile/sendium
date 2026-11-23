@@ -213,6 +213,12 @@ public final class MemoryRoutedWorkStore<M extends StandardMessage> implements R
     }
 
     @Override
+    public void defer(Routed<M> taken) {
+        // The entire memory backlog is already bounded; ordinary queue-tail rotation suffices.
+        release(taken);
+    }
+
+    @Override
     public Completed complete(WorkId id) {
         Objects.requireNonNull(id, "id");
         lock.lock();

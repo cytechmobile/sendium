@@ -145,7 +145,11 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         return recorded;
     }
 
-    /** Takes recorded work for provider processing; taking or enqueuing it is not terminal completion. */
+    /**
+     * Inspects one recorded candidate for provider processing. Empty may mean a policy-blocked
+     * candidate was deferred, not that the durable destination backlog is empty. A caller must
+     * use bounded cycles with backoff; taking or deferring work is not terminal completion.
+     */
     public Optional<Routed<StandardMessage>> takeForProvider(String destination, Duration timeout) throws InterruptedException {
         return coordinator.takeFromRouted(destination, timeout);
     }

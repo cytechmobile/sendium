@@ -65,6 +65,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     private final Map<SourceId, Context<M>> sourceSelections = new HashMap<>();
     private final Map<WorkId, Execution<M>> executions = new HashMap<>();
     private final Set<Execution<M>> pendingReturns = new HashSet<>();
+    private final Map<String, OutboundDlrPolicy.BlockReason> blockedDestinations = new HashMap<>();
     private final int recoveryBatchSize;
     private final Clock recoveryClock;
     private final Supplier<ScheduledExecutorService> recoverySchedulers;
@@ -514,7 +515,12 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 var returns = pendingReturns.iterator();
                 while (returns.hasNext()) {
                     Execution<M> execution = returns.next();
-                    routed.release(execution.take);
+                    if (execution.deferring) {
+                        routed.defer(execution.take);
+                        retireDeferred(execution);
+                    } else {
+                        routed.release(execution.take);
+                    }
                     execution.take = null;
                     returns.remove();
                 }
@@ -545,8 +551,10 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                     try {
                         protectProvider(execution.context, taken.message());
                     } catch (OutboundDlrPolicy.Blocked blocked) {
+                        execution.deferring = true;
                         pendingReturns.add(execution);
-                        routed.release(taken);
+                        routed.defer(taken);
+                        retireDeferred(execution);
                         execution.take = null;
                         execution.exposed = false;
                         pendingReturns.remove(execution);
@@ -598,8 +606,12 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         try {
             dlrPolicy.prepareProvider(message.serial, required, context.dlrSources);
             context.blockedReason = null;
+            if (!required.isEmpty()) {
+                blockedDestinations.remove(executions.get(context.workId).destination);
+            }
         } catch (OutboundDlrPolicy.Blocked blocked) {
-            if (context.blockedReason != blocked.blockReason()) {
+            String destination = executions.get(context.workId).destination;
+            if (context.blockedReason != blocked.blockReason() && blockedDestinations.get(destination) != blocked.blockReason()) {
                 if (blocked.blockReason() == OutboundDlrPolicy.BlockReason.DISABLED) {
                     logger.warn("dlrProvider|blocked|workId:{}|gatewayMsgId:{}|reason:disabled|action:enableDlrHandling",
                             context.workId.value(), MessageTrace.value(message.serial));
@@ -612,6 +624,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 }
                 context.blockedReason = blocked.blockReason();
             }
+            blockedDestinations.put(destination, blocked.blockReason());
             throw blocked;
         }
     }
@@ -651,6 +664,41 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             changed.signalAll();
         } finally {
             lock.unlock();
+        }
+    }
+
+    @Override
+    public void deferFromRouted(Routed<M> taken) {
+        Objects.requireNonNull(taken, "routedDefer|error|reason:missingTake");
+        lock.lock();
+        try {
+            requireActive(Role.ROUTED_WORK);
+            var execution = execution(taken.id());
+            if (execution.context.finishing || execution.take != taken) {
+                throw invalid(Role.ROUTED_WORK, "routedDefer|error|reason:notCurrentTake");
+            }
+            execution.deferring = true;
+            pendingReturns.add(execution);
+            routed.defer(taken);
+            retireDeferred(execution);
+            pendingReturns.remove(execution);
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void retireDeferred(Execution<M> execution) {
+        execution.take = null;
+        execution.exposed = false;
+        execution.deferring = false;
+        if (routed instanceof FileRoutedWorkStore) {
+            // Durable ownership can be reconstructed on the next take. Keeping these contexts
+            // would gradually hydrate the entire backlog despite the bounded store window.
+            var context = execution.context;
+            executions.remove(context.workId);
+            context.sources.forEach(sourceSelections::remove);
+            selections.remove(context.id);
         }
     }
 
@@ -842,6 +890,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             sourceSelections.clear();
             executions.clear();
             pendingReturns.clear();
+            blockedDestinations.clear();
             if (failure != null) {
                 rethrow(failure);
             }
@@ -1030,6 +1079,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         private Routed<M> take;
         private Routed<M> lastReturn;
         private boolean exposed;
+        private boolean deferring;
 
         private Execution(Context<M> context, String destination) {
             this.context = context;
