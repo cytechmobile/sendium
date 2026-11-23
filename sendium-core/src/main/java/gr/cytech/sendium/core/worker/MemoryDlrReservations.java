@@ -26,6 +26,8 @@ public final class MemoryDlrReservations implements OutboundDlrPolicy {
     private boolean attached;
     private boolean closed;
     private Throwable failure;
+    private boolean recoveryStarted;
+    private long unprotectedAccepted;
 
     public MemoryDlrReservations(int maximum) {
         if (maximum <= 0) {
@@ -43,6 +45,11 @@ public final class MemoryDlrReservations implements OutboundDlrPolicy {
             verifyAvailable();
             if (message.dlrReturnMetadata == null || sources.containsKey(source)) {
                 return Reservation.UNCHANGED;
+            }
+            if (unprotectedAccepted != 0) {
+                throw new OutboundStorageException(OutboundStage.Role.PENDING,
+                        OutboundStorageException.Reason.CAPACITY_EXCEEDED,
+                        "dlrAdmission|rejected|reason:acceptedRecoveryPending|unprotectedSources:" + unprotectedAccepted);
             }
             if (sources.size() >= maximum) {
                 throw new OutboundStorageException(OutboundStage.Role.PENDING,
@@ -82,6 +89,91 @@ public final class MemoryDlrReservations implements OutboundDlrPolicy {
         return maximum;
     }
 
+    @Override
+    public boolean requiresRecoveryReservations() {
+        return true;
+    }
+
+    @Override
+    public boolean beginRecovery(long requiredSources) {
+        lock.lock();
+        try {
+            verifyAvailable();
+            if (requiredSources < 0 || recoveryStarted || !sources.isEmpty() || !executions.isEmpty()) {
+                throw new DlrStorageException("dlrRecovery|error|reason:invalidInitialOwnership");
+            }
+            recoveryStarted = true;
+            unprotectedAccepted = requiredSources;
+            return requiredSources <= maximum;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public void restoreAccepted(SourceId source) {
+        Objects.requireNonNull(source, "dlrRecovery|error|reason:missingSource");
+        lock.lock();
+        try {
+            verifyAvailable();
+            if (!recoveryStarted || unprotectedAccepted <= 0 || sources.containsKey(source) || sources.size() >= maximum) {
+                throw new DlrStorageException("dlrRecovery|error|reason:invalidRestoration");
+            }
+            sources.put(source, new Source());
+            unprotectedAccepted--;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public void prepareProvider(String gatewayMsgId, Set<SourceId> requiredSources) {
+        prepareProvider(gatewayMsgId, requiredSources, Set.of());
+    }
+
+    @Override
+    public void prepareProvider(String gatewayMsgId, Set<SourceId> requiredSources, Set<SourceId> acceptedDlrSources) {
+        Set<SourceId> required = Set.copyOf(requiredSources);
+        Set<SourceId> accepted = Set.copyOf(acceptedDlrSources);
+        if (!required.containsAll(accepted)) {
+            throw new DlrStorageException("dlrRecovery|error|reason:conflictingAcceptedSources");
+        }
+        if (required.isEmpty()) {
+            return;
+        }
+        String id = gatewayId(gatewayMsgId);
+        lock.lock();
+        try {
+            verifyAvailable();
+            if (required.size() > maximum) {
+                throw new Blocked(BlockReason.MAXIMUM_TOO_SMALL, required.size(), maximum);
+            }
+            var existing = executions.get(id);
+            if (existing != null && !existing.sources.equals(required)) {
+                throw new DlrStorageException("memoryDlrOwnership|error|reason:conflictingSourceSet|gatewayMsgId:" + id);
+            }
+            long missing = required.stream().filter(source -> !sources.containsKey(source)).count();
+            long recovered = unprotectedAccepted == 0 ? 0 :
+                    accepted.stream().filter(source -> !sources.containsKey(source)).count();
+            if (unprotectedAccepted != 0 && missing != recovered) {
+                throw new Blocked(BlockReason.RECOVERY_PRIORITY, required.size(), maximum);
+            }
+            if (missing > maximum - sources.size()) {
+                throw new Blocked(BlockReason.CAPACITY, required.size(), maximum);
+            }
+            verifyRecoveryDebit(recovered);
+            // No mutation until the entire required set fits. In particular, recovery never
+            // holds a subset while waiting for another recovered execution to release capacity.
+            for (SourceId source : required) {
+                sources.computeIfAbsent(source, _ -> new Source()).outbound = true;
+            }
+            associateExecution(id, required);
+            unprotectedAccepted -= recovered;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /**
      * Binds a receipt/execution ID to the coordinator's complete source set, not receipt return IDs.
      * All entries must already be protected; association never silently allocates capacity.
@@ -114,11 +206,24 @@ public final class MemoryDlrReservations implements OutboundDlrPolicy {
     }
 
     /** Called after required outbound handoff/cleanup, never just after an early receipt. */
+    @Override
     public void releaseOutbound(Set<SourceId> sourceIds) {
+        releaseOutbound(sourceIds, Set.of());
+    }
+
+    @Override
+    public void releaseOutbound(Set<SourceId> sourceIds, Set<SourceId> acceptedDlrSources) {
         Set<SourceId> completed = Set.copyOf(sourceIds);
+        Set<SourceId> accepted = Set.copyOf(acceptedDlrSources);
         lock.lock();
         try {
             verifyAvailable();
+            if (!completed.containsAll(accepted)) {
+                throw new DlrStorageException("dlrRecovery|error|reason:conflictingCompletedSources");
+            }
+            long removed = unprotectedAccepted == 0 ? 0 :
+                    accepted.stream().filter(source -> !sources.containsKey(source)).count();
+            verifyRecoveryDebit(removed);
             var affected = new HashSet<Execution>();
             for (SourceId id : completed) {
                 var source = sources.get(id);
@@ -131,8 +236,15 @@ public final class MemoryDlrReservations implements OutboundDlrPolicy {
                 }
             }
             affected.forEach(this::retireIfFinished);
+            unprotectedAccepted -= removed;
         } finally {
             lock.unlock();
+        }
+    }
+
+    private void verifyRecoveryDebit(long count) {
+        if (count > unprotectedAccepted) {
+            throw new DlrStorageException("dlrRecovery|error|reason:inconsistentOutstandingCount");
         }
     }
 

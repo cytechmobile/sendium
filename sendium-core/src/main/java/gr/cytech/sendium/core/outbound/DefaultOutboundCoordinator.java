@@ -21,6 +21,9 @@ import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
+import gr.cytech.sendium.util.MessageTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -38,6 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
@@ -50,6 +54,7 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * Handoff waits and callbacks on returned completion stages never run under the coordinator lock.
  */
 public final class DefaultOutboundCoordinator<M extends StandardMessage> implements OutboundCoordinator<M> {
+    private static final Logger logger = LoggerFactory.getLogger(DefaultOutboundCoordinator.class);
     private final PendingMessageStore<M> pending;
     private final SelectedRouterStore<M> router;
     private final RoutedWorkStore<M> routed;
@@ -128,6 +133,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                     filePending.requireRoutedBackend(routed.status().durable());
                 }
                 reconcileTerminalRouted();
+                restoreAcceptedReservations();
                 lifecycle = Lifecycle.RUNNING;
                 if (pending.status().durable()) {
                     recoveryScheduler = Objects.requireNonNull(recoverySchedulers.get(), "outboundStartup|error|reason:missingRecoveryScheduler");
@@ -225,6 +231,54 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 after = id;
             }
         }
+    }
+
+    private void restoreAcceptedReservations() {
+        if (!dlrPolicy.requiresRecoveryReservations()) {
+            return;
+        }
+        long count = 0;
+        SourceId after = null;
+        while (true) {
+            var page = pending.sourcesAfter(after, recoveryBatchSize);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (SourceId source : page) {
+                if (acceptedRequiresDlr(source)) {
+                    count = Math.incrementExact(count);
+                }
+                after = source;
+            }
+        }
+        // Empty coordinators may share an existing policy (embedded callers). They
+        // have no recovered obligations and must not reinitialize that owner's ledger.
+        if (count == 0 || !dlrPolicy.beginRecovery(count)) {
+            return;
+        }
+        after = null;
+        long restored = 0;
+        while (true) {
+            var page = pending.sourcesAfter(after, recoveryBatchSize);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (SourceId source : page) {
+                if (acceptedRequiresDlr(source)) {
+                    dlrPolicy.restoreAccepted(source);
+                    restored = Math.incrementExact(restored);
+                }
+                after = source;
+            }
+        }
+        if (restored != count) {
+            throw invalid(Role.PENDING, "dlrRecovery|error|reason:backlogChangedDuringRestoration");
+        }
+    }
+
+    private boolean acceptedRequiresDlr(SourceId source) {
+        return pending.find(source).orElseThrow(() ->
+                invalid(Role.PENDING, "dlrRecovery|error|reason:acceptedSourceNotRetained")).dlrReturnMetadata != null;
     }
 
     @Override
@@ -488,6 +542,16 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                         pendingReturns.remove(execution);
                         throw unavailable(Role.ROUTER_QUEUE, "Retry the unfinished routing transition before dispatch");
                     }
+                    try {
+                        protectProvider(execution.context, taken.message());
+                    } catch (OutboundDlrPolicy.Blocked blocked) {
+                        pendingReturns.add(execution);
+                        routed.release(taken);
+                        execution.take = null;
+                        execution.exposed = false;
+                        pendingReturns.remove(execution);
+                        return Optional.empty();
+                    }
                     execution.exposed = true;
                     return next;
                 }
@@ -498,6 +562,69 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             }
         } finally {
             lock.unlock();
+        }
+    }
+
+    @Override
+    public Optional<Consumer<M>> providerPreparation(WorkId work) {
+        Objects.requireNonNull(work, "dlrProvider|error|reason:missingWork");
+        if (dlrPolicy == OutboundDlrPolicy.UNRESTRICTED) {
+            return Optional.empty();
+        }
+        return Optional.of(message -> {
+            lock.lock();
+            try {
+                requireActive(Role.ROUTED_WORK);
+                var execution = execution(work);
+                if (!execution.exposed || execution.take == null || execution.context.destinationCompleted) {
+                    throw invalid(Role.ROUTED_WORK, "dlrProvider|error|reason:executionNotActive");
+                }
+                protectProvider(execution.context, message);
+            } finally {
+                lock.unlock();
+            }
+        });
+    }
+
+    private void protectProvider(Context<M> context, M message) {
+        if (dlrPolicy == OutboundDlrPolicy.UNRESTRICTED) {
+            return;
+        }
+        identifyDlrSources(context);
+        // Preserve per-ingress counting for mixed multipart requests. If filters introduce
+        // a receipt where no source originally requested one, protect the contributing set.
+        Set<SourceId> required = context.dlrSources.isEmpty() && message.dlrReturnMetadata != null ?
+                context.sources : context.dlrSources;
+        try {
+            dlrPolicy.prepareProvider(message.serial, required, context.dlrSources);
+            context.blockedReason = null;
+        } catch (OutboundDlrPolicy.Blocked blocked) {
+            if (context.blockedReason != blocked.blockReason()) {
+                if (blocked.blockReason() == OutboundDlrPolicy.BlockReason.DISABLED) {
+                    logger.warn("dlrProvider|blocked|workId:{}|gatewayMsgId:{}|reason:disabled|action:enableDlrHandling",
+                            context.workId.value(), MessageTrace.value(message.serial));
+                } else {
+                    logger.warn("dlrProvider|blocked|workId:{}|gatewayMsgId:{}|reason:{}|requiredSources:{}|maxTrackedSubmissions:{}|action:{}",
+                            context.workId.value(), MessageTrace.value(message.serial), blocked.blockReason(),
+                            blocked.required(), blocked.maximum(),
+                            blocked.blockReason() == OutboundDlrPolicy.BlockReason.MAXIMUM_TOO_SMALL ?
+                                    "increaseMaxTrackedSubmissions" : "waitForCapacity");
+                }
+                context.blockedReason = blocked.blockReason();
+            }
+            throw blocked;
+        }
+    }
+
+    private void identifyDlrSources(Context<M> context) {
+        if (context.dlrSources == null) {
+            var required = new HashSet<SourceId>();
+            for (SourceId source : context.sources) {
+                if (acceptedRequiresDlr(source)) {
+                    required.add(source);
+                }
+            }
+            context.dlrSources = Set.copyOf(required);
         }
     }
 
@@ -625,6 +752,10 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     private void cleanup(Context<M> context) {
+        if (dlrPolicy != OutboundDlrPolicy.UNRESTRICTED) {
+            // Cache before any uncertain deletion so a retry never infers requirements from absence.
+            identifyDlrSources(context);
+        }
         if (context.workId != null && !context.destinationCompleted) {
             Completed completed = routed.complete(context.workId);
             if (!completed.selection().equals(context.id) || !completed.sources().equals(context.sources)) {
@@ -643,6 +774,9 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         }
         if (context.workId != null) {
             routed.forget(context.id);
+        }
+        dlrPolicy.releaseOutbound(context.sources, context.dlrSources == null ? Set.of() : context.dlrSources);
+        if (context.workId != null) {
             pendingReturns.remove(executions.remove(context.workId));
         }
         context.sources.forEach(sourceSelections::remove);
@@ -880,6 +1014,8 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         private boolean destinationCompleted;
         private boolean pendingCompleted;
         private boolean selectedCompleted;
+        private Set<SourceId> dlrSources;
+        private OutboundDlrPolicy.BlockReason blockedReason;
         private Attempt attempt;
 
         private Context(Selected<M> selected) {

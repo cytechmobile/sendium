@@ -2,6 +2,7 @@ package gr.cytech.sendium.routing;
 
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
+import gr.cytech.sendium.core.outbound.OutboundDlrPolicy;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
@@ -30,6 +31,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** Explicitly assembled routing and provider-completion boundary for the single-destination lifecycle. */
@@ -156,6 +158,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
             throw new IllegalArgumentException("Provider does not match the recorded destination");
         }
         var execution = new ProviderExecution();
+        execution.beforeSend = coordinator.providerPreparation(work.id()).orElse(null);
         execution.retryCompletion = () -> track(work.id(), coordinator.complete(work.id(), execution.attempts));
         CompletionStage<Void> attempts = scheduleAttempt(work.message(), () -> worker, execution, false);
         execution.attempts = attempts;
@@ -484,9 +487,12 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                 state = AttemptState.PREPARING;
             }
             try {
-                var submission = worker.submitPrepared(message, (payload, router) ->
+                OutboundProvider.Retry<StandardMessage> retry = (payload, router) ->
                         scheduleAttempt(payload, router ?
-                                () -> retryDestination(payload) : () -> worker, execution, true), replacement);
+                                () -> retryDestination(payload) : () -> worker, execution, true);
+                var submission = execution.beforeSend == null ?
+                        worker.submitPrepared(message, retry, replacement) :
+                        worker.submitPrepared(message, retry, replacement, execution.beforeSend);
                 execution.submissions.add(submission);
                 synchronized (this) {
                     state = AttemptState.AWAITING_COMPLETION;
@@ -500,6 +506,14 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                         completed.complete(null);
                     }
                 });
+            } catch (OutboundDlrPolicy.Blocked blocked) {
+                synchronized (this) {
+                    state = AttemptState.QUEUED;
+                    failure = blocked;
+                    // Reuse the owned attempt scheduler, never an immediate busy loop or a
+                    // new ingress admission. Worker execution threads remain free meanwhile.
+                    schedule(100);
+                }
             } catch (Exception error) {
                 fail(error);
             } catch (Error error) {
@@ -517,6 +531,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         private CompletableFuture<Void> completionMonitor;
         private CompletionStage<Void> attempts;
         private Supplier<CompletableFuture<Void>> retryCompletion;
+        private Consumer<StandardMessage> beforeSend;
 
         private void setCompletion(CompletableFuture<Void> monitor) {
             completionMonitor = monitor;

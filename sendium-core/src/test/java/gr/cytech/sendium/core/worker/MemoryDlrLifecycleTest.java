@@ -62,8 +62,10 @@ class MemoryDlrLifecycleTest {
             assertThat(storage.resolveDlr("P", "second", MessageState.MessageStatus.FAILED, 2, "1")).isEmpty();
             assertThat(storage.getState(state.getGatewayMsgId()).orElseThrow().getStatus())
                     .isEqualTo(MessageState.MessageStatus.DELIVERED);
-            assertThatThrownBy(() -> storage.recordProviderAccepted(state, "P", "late"))
-                    .isInstanceOf(DlrStorageException.class);
+            storage.recordProviderAccepted(state, "P", "late");
+            assertThat(storage.getState(state.getGatewayMsgId()).orElseThrow().getStatus())
+                    .isEqualTo(MessageState.MessageStatus.DELIVERED);
+            assertThat(storage.resolveDlr("P", "late", MessageState.MessageStatus.FAILED, 2, "1")).isEmpty();
         }
     }
 
@@ -76,8 +78,9 @@ class MemoryDlrLifecycleTest {
             storage.claimDueHttpDeliveries(1);
             storage.completeDelivery(state.getGatewayMsgId(), 1);
             assertThat(owner.usedCapacity()).isEqualTo(1);
-            assertThatThrownBy(() -> storage.recordProviderAccepted(state, "P", "late"))
-                    .isInstanceOf(DlrStorageException.class);
+            storage.recordProviderAccepted(state, "P", "late");
+            assertThat(storage.getState(state.getGatewayMsgId())).isEmpty();
+            assertThat(owner.usedCapacity()).isEqualTo(1);
             owner.releaseOutbound(Set.of(source));
             owner.releaseOutbound(Set.of(source));
             assertThat(owner.usedCapacity()).isZero();

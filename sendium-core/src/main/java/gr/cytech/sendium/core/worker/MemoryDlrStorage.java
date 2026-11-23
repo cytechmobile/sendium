@@ -79,7 +79,10 @@ final class MemoryDlrStorage implements DlrStorageBackend {
             String id = MemoryDlrReservations.gatewayId(prepared.getGatewayMsgId());
             Execution execution = owner.execution(id);
             if (execution.terminal) {
-                throw new DlrStorageException("memoryDlrAcceptance|error|reason:terminalStateExists|gatewayMsgId:" + id);
+                // A terminal receipt may beat another provider part's acceptance handoff.
+                // The first result wins, but that valid late handoff must still let outbound
+                // processing finish. Retained execution ownership prevents resurrection.
+                return null;
             }
             long now = clock.millis();
             long expires = execution.firstCorrelations.containsKey(key) ?

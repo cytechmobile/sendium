@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Consumer;
 
 /**
  * Application-facing lifecycle boundary. Implementations receive pending, selected-router, and
@@ -86,6 +87,15 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
 
     /** Takes already-routed work for the named destination without completing its stored ownership or sending it. */
     Optional<Routed<M>> takeFromRouted(String destination, Duration timeout) throws InterruptedException;
+
+    /**
+     * Optional post-filter provider guard for the owned execution, including replacement attempts.
+     * Legacy/external ownership remains unchanged when empty; selected managed modes must
+     * explicitly compose a coordinator that supplies their enforcement.
+     */
+    default Optional<Consumer<M>> providerPreparation(WorkId work) {
+        return Optional.empty();
+    }
 
     /**
      * Returns the current unfinished take to routed scheduling at the same recorded destination.
