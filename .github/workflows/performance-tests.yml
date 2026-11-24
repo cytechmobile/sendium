@@ -36,7 +36,7 @@ on:
       dlr_storage:
         description: 'Sendium DLR storage (leave postgresql for Kannel)'
         type: choice
-        options: [postgresql, file]
+        options: [postgresql, file, memory]
         default: postgresql
         required: true
       sendium_instance_type:

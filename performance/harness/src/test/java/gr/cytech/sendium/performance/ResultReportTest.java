@@ -69,6 +69,27 @@ class ResultReportTest {
     }
 
     @Test
+    void memoryDlrReportAndFinalizationPreserveNoDatabaseIdentity() throws Exception {
+        var context = context();
+        context.application().put("dlrStorage", "memory");
+        context.infrastructure().putObject("database").put("provisioned", false).put("resourceMetricsRequired", false);
+        var config = config(true);
+        var ledger = ledger(config); ledger.freeze();
+        var report = writer.build(config, ledger, context, List.of(), false);
+        assertEquals("memory", report.json().at("/configuration/application/dlrStorage").asText());
+        assertTrue(report.markdown().contains("DLR storage: **memory**"));
+        assertTrue(report.markdown().contains("No database provisioned"));
+        assertFalse(report.markdown().contains("Database resources (RDS)"));
+        report.json().withObject("/measurementMetadata").put("resourceFinalizationVersion", 1).put("observedDurationNanos", 0)
+                .putNull("measurementStartUtc");
+        var finalized = writer.finalizeResources(report.json(), ResourceEvidence.empty());
+        assertEquals(report.json().path("configuration"), finalized.json().path("configuration"));
+        assertTrue(finalized.markdown().contains("No database provisioned"));
+        assertFalse(finalized.markdown().contains("Database resources (RDS)"));
+        saveFixture("memory-dlr", finalized);
+    }
+
+    @Test
     void localModeledDataLimitationsRemainVisibleInStandaloneJsonAndMarkdown() {
         var context = context();
         String limitation = "RDS resource series are deterministic local fixtures, not observed database utilization.";

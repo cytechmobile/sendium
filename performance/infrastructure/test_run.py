@@ -87,11 +87,11 @@ def grants(documents, action, resource):
 class RunTests(unittest.TestCase):
     def test_file_dlr_stack_has_no_database_resources(self):
         self.assertEqual(TEMPLATE["Parameters"]["DlrStorage"]["Default"], "postgresql")
-        self.assertEqual(TEMPLATE["Parameters"]["DlrStorage"]["AllowedValues"], ["postgresql", "file"])
+        self.assertEqual(TEMPLATE["Parameters"]["DlrStorage"]["AllowedValues"], ["postgresql", "file", "memory"])
         databases = {"Database", "DatabaseCredentials", "DatabaseSubnets", "DatabaseParameters"}
         database_outputs = {name for name in TEMPLATE["Outputs"] if name.startswith("Database")}
         self.assertEqual(database_outputs, {"DatabaseIdentifier", "DatabaseAddress", "DatabasePort", "DatabaseName", "DatabaseCredentialsArn"})
-        for storage in ("file", "postgresql"):
+        for storage in ("file", "memory", "postgresql"):
             for name in databases:
                 condition = RESOURCES[name]["Condition"]
                 self.assertEqual(resolve(TEMPLATE["Conditions"][condition], {"DlrStorage": storage}), storage == "postgresql")
@@ -109,6 +109,11 @@ class RunTests(unittest.TestCase):
             self.assertFalse(grants(policy, "secretsmanager:GetSecretValue",
                                     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:anything"))
         self.assertTrue(any(statement["Sid"] == "ReadOwnDatabaseCredentials" for statement in statements("SendiumRole")))
+
+    def test_memory_dlr_roles_have_no_database_secret_access(self):
+        for role in ("SendiumRole", "HarnessRole"):
+            for statement in statements(role, {"DlrStorage": "memory"}):
+                self.assertNotIn("secretsmanager", json.dumps(statement).lower())
 
     def test_harness_can_list_only_the_exact_run_gateway_readiness_key(self):
         listing, = [statement for statement in statements("HarnessRole") if statement["Action"] == "s3:ListBucket"]

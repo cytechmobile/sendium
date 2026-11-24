@@ -271,7 +271,7 @@ remain part of Tasks 4.5/6.1.
 
 `run.yaml` owns the network child, two private EC2s, separate runtime IAM
 roles/profiles and, for `DlrStorage=postgresql` (the default), PostgreSQL subnet/parameter
-groups, a private RDS instance and a generated database secret. `DlrStorage=file`
+groups, a private RDS instance and a generated database secret. `DlrStorage=file` or `memory`
 creates none of those database resources or outputs and grants no database-secret
 access to the Sendium role. The shared network is unchanged. Create a fresh root stack named
 `<ResourcePrefix>-run-<RunIdentity>` using bootstrap's CloudFormation execution
@@ -290,9 +290,9 @@ not grant stack updates. Do not reuse names for simultaneous attempts.
 | `SendiumInstanceType`, `HarnessInstanceType` | Default `t4g.small` each; preflight verifies memory, architecture, offerings and capacity assumptions. |
 | `SendiumRootDeviceName`, `HarnessRootDeviceName` | Exact AMI `RootDeviceName`; no padded/hardcoded disk default. |
 | `SendiumRootVolumeGiB`, `HarnessRootVolumeGiB` | Corresponding root EBS mapping's minimum `VolumeSize`, generally 8 GiB; validate integer values and sufficient space for staged files. |
-| `DlrStorage` | `postgresql` (default) or `file`; the protected controller takes it from the normalized preset. File is Sendium-only. |
-| `DatabaseInstanceType` | PostgreSQL only: default `db.t4g.small`; validate PostgreSQL 17/gp3 support in the chosen AZ. Omitted for file runs. |
-| `DatabaseEngineVersion` | PostgreSQL only: exact available PostgreSQL 17 minor and `postgres17` parameter family. Defaults to empty so file runs can omit it; a template rule rejects an empty version for PostgreSQL. |
+| `DlrStorage` | `postgresql` (default), `file` or `memory`; the protected controller takes it from the normalized preset. File/memory are Sendium-only and provision no database resources or database-secret permissions. |
+| `DatabaseInstanceType` | PostgreSQL only: default `db.t4g.small`; validate PostgreSQL 17/gp3 support in the chosen AZ. Omitted for file/memory runs. |
+| `DatabaseEngineVersion` | PostgreSQL only: exact available PostgreSQL 17 minor and `postgres17` parameter family. Defaults to empty so file/memory runs can omit it; a template rule rejects an empty version for PostgreSQL. |
 
 The resource prefix must also be valid for RDS identifiers (single hyphen
 separators). Reject unsupported additional AMI disks or other launch-time mappings

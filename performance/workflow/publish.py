@@ -101,7 +101,7 @@ def unavailable(request, code):
         infrastructure["kannel"] = infrastructure.pop("sendium")
         infrastructure["database"].update(provisioned=None, engine="postgresql", sslMode="verify-full", state="unresolved")
         result["resources"]["kannel"] = result["resources"].pop("sendium")
-    elif prepare.dlr_storage(preset["runtime"]) == "file":
+    elif prepare.dlr_storage(preset["runtime"]) in ("file", "memory"):
         result["configuration"]["infrastructure"]["database"] = {"provisioned": False, "resourceMetricsRequired": False}
     return result
 

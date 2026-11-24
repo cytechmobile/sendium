@@ -18,14 +18,14 @@ def storage_profile(runtime):
     return profile
 
 
-DLR_STORAGES = ("postgresql", "file")
+DLR_STORAGES = ("postgresql", "file", "memory")
 
 
 def dlr_storage(runtime, target="sendium"):
-    """Sendium's startup DLR backend; file storage is a Sendium-only option."""
+    """Sendium's startup DLR backend; file and memory are Sendium-only options."""
     storage = runtime.get("dlrStorage", "postgresql")
-    require(storage in DLR_STORAGES, "DLR storage must be postgresql or file")
-    require(storage == "postgresql" or target == "sendium", "Kannel cannot select Sendium file DLR storage")
+    require(storage in DLR_STORAGES, "DLR storage must be postgresql, file or memory")
+    require(storage == "postgresql" or target == "sendium", f"Kannel cannot select Sendium {storage} DLR storage")
     return storage
 
 

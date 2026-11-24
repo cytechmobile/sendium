@@ -154,8 +154,8 @@ class Node:
         self.storage_profile = storage_profile(document)
         self.pending_backend = self.storage_profile.split("/")[0]
         self.dlr_storage = dlr_storage(document, self.target)
-        if self.dlr_storage == "file" and self.source != "sendium":
-            raise ValueError("File DLR storage belongs only to the Sendium gateway node")
+        if self.dlr_storage in ("file", "memory") and self.source != "sendium":
+            raise ValueError(f"{self.dlr_storage.capitalize()} DLR storage belongs only to the Sendium gateway node")
         if self.pending_backend not in ("memory", "file"):
             raise ValueError("Pending backend must be memory or file")
         if self.pending_backend == "file" and (self.target != "sendium" or self.source != "sendium"):
@@ -293,6 +293,8 @@ class Node:
             dlr.mkdir(mode=0o700, exist_ok=True)
             settings["sendium.dlr.storage.backend"] = "file"
             settings["sendium.dlr.storage.file.path"] = str(dlr)
+        elif self.dlr_storage == "memory":
+            settings["sendium.dlr.storage.backend"] = "memory"
         environment_path = self.root / "generated/sendium/environment.json"
         environment = read(environment_path)
         environment.update({key.upper().replace(".", "_").replace("-", "_"): value for key, value in settings.items()})

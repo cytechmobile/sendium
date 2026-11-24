@@ -66,6 +66,18 @@ class BenchmarkTargetTest {
     }
 
     @Test
+    void memoryReadinessCannotAcceptAnotherDlrBackend() throws Exception {
+        String health = """
+                {"status":"UP","checks":[{"name":"sendium-dlr-storage","status":"UP","data":{"backend":"%s"}}]}
+                """;
+        for (String backend : List.of("postgresql", "file", "disabled")) {
+            assertFalse(BenchmarkTarget.SENDIUM.ready(200, health.formatted(backend), mapper, "memory"));
+        }
+        assertTrue(BenchmarkTarget.SENDIUM.ready(200, health.formatted("memory"), mapper, "memory"));
+        assertFalse(BenchmarkTarget.SENDIUM.ready(503, health.formatted("memory"), mapper, "memory"));
+    }
+
+    @Test
     void postgresBackendRequiresExplicitProvisioningAndVerifiedTlsConfiguration() {
         var context = KannelFixtures.context("postgres-identity");
         context.application().put("dlrStorage", "postgresql");

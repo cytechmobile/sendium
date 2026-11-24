@@ -59,6 +59,18 @@ class RegionalAws:
 
 
 class ResolutionTests(unittest.TestCase):
+    def test_memory_dlr_resolution_skips_database_lookup(self):
+        preset = request({"dlr_storage": "memory"})["preset"]
+        aws = RegionalAws()
+        call = aws.call
+        def no_rds(service, operation, **parameters):
+            self.assertNotEqual(service, "rds")
+            return call(service, operation, **parameters)
+        with patch.object(aws, "call", side_effect=no_rds):
+            result = resolve_aws.resolve(aws, preset, "eu-west-1")
+        self.assertEqual(result["database"], {"provisioned": False, "resourceMetricsRequired": False})
+        self.assertFalse(any(service == "rds" for service, _, _ in aws.calls))
+
     def test_file_dlr_resolution_skips_database_lookup(self):
         preset = request({"dlr_storage": "file"})["preset"]
         aws = RegionalAws()
@@ -202,7 +214,7 @@ class RuntimeTests(unittest.TestCase):
 
 class ControllerTests(unittest.TestCase):
     def test_stack_parameters_select_dlr_storage(self):
-        for storage in ("postgresql", "file"):
+        for storage in ("postgresql", "file", "memory"):
             with self.subTest(storage=storage), tempfile.TemporaryDirectory() as directory:
                 preset = request({"dlr_storage": storage})["preset"]
                 resolved = resolve_aws.resolve(RegionalAws(), preset, "eu-west-1")
@@ -223,7 +235,7 @@ class ControllerTests(unittest.TestCase):
                 run_aws.create_stack(Mock(call=call), plan, staged, resolved, boot, "aws", directory)
                 parameters = {item["ParameterKey"]: item["ParameterValue"] for item in created["parameters"]}
                 self.assertEqual(parameters["DlrStorage"], storage)
-                if storage == "file":
+                if storage in ("file", "memory"):
                     self.assertNotIn("DatabaseInstanceType", parameters)
                     self.assertNotIn("DatabaseEngineVersion", parameters)
                 else:

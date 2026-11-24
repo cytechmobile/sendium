@@ -77,6 +77,23 @@ class ArchiveUploadTests(unittest.TestCase):
             for item in [*manifest["files"], manifest["bundle"]]:
                 self.assertEqual(aws.objects[manifest["prefix"] + item["path"]], (package / item["path"]).read_bytes())
 
+    def test_memory_backend_is_preserved_through_archive_and_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            req = test_prepare.request({"dlr_storage": "memory"})
+            report = publish.unavailable(req, "FIXTURE")
+            req, source = test_archive_package.ArchivePackageTests().fixture(root, req, report)
+            (source / "evidence/rds-metrics.json").unlink()
+            package = root / "package"
+            manifest = archive_package.package(req, source, package)
+            self.assertEqual(publish.read(package / "results.json")["configuration"]["application"]["dlrStorage"], "memory")
+            aws = FakeAws()
+            outcome = archive_upload.upload(aws, req, package, "bootstrap", ROLE)
+            self.assertEqual(outcome["status"], "archived")
+            archived = json.loads(aws.objects[manifest["prefix"] + "manifest.json"])
+            self.assertEqual(archived["files"], manifest["files"])
+            self.assertEqual(json.loads(aws.objects[manifest["prefix"] + "results.json"]), report)
+
     def test_native_failed_setup_and_partial_reports_are_archived_without_reclassification(self):
         for status in ("failed", "inconclusive"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:

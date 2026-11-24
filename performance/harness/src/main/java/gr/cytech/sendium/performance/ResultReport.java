@@ -252,6 +252,7 @@ public final class ResultReport {
                 .append("** · Harness runtime: **jvm**\n\n");
         if (target == BenchmarkTarget.SENDIUM) {
             out.append("Message storage profile: **").append(text(application.path("messageStorageProfile").asText("memory/memory/memory")))
+                    .append("** · DLR storage: **").append(text(application.path("dlrStorage").asText()))
                     .append("**\n\n");
         }
         if (target == BenchmarkTarget.KANNEL) {
@@ -388,7 +389,7 @@ public final class ResultReport {
     }
 
     private static void databaseResources(StringBuilder out, ObjectNode root) {
-        if ("file".equals(root.path("configuration").path("application").path("dlrStorage").asText())
+        if (List.of("file", "memory").contains(root.path("configuration").path("application").path("dlrStorage").asText())
                 && root.path("configuration").path("infrastructure").path("database").path("provisioned").isBoolean()
                 && !root.path("configuration").path("infrastructure").path("database").path("provisioned").asBoolean()) {
             out.append("\nNo database provisioned; DLR storage is local to the Sendium node.\n");
