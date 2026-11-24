@@ -41,11 +41,13 @@ With over 20 years of experience building high-performance telecommunications so
 
 ## 🔄 How It Works
 
+![Sendium connects HTTP applications and SMPP platforms to upstream SMPP providers, with configurable routing, throughput controls and returning delivery receipts.](docs/diagrams/sendium-overview.svg)
+
 1.  **Request:** Your application sends a message to Sendium via **HTTP** or **SMPP**.
 2.  **Logic:** Sendium applies routing rules based on destination, sender ID, account, message attributes, and priority.
 3.  **Delivery:** Sendium delivers via one or more **SMPP** connections to upstream providers.
 4.  **Verification:** Asynchronous Delivery Receipts (DLRs) are received and normalized.
-5.  **Callback:** Sendium forwards the status back to your system via **HTTP Webhooks**.
+5.  **Return:** Sendium forwards requested delivery status to the originating system via **HTTP callbacks** or **SMPP delivery receipts**, as configured.
 
 ---
 

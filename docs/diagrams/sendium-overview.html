@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sendium — SMS connectivity overview</title>
+  <!-- Adapted from cathrynlavery/diagram-design; see LICENSE.diagram-design.txt. -->
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #f5f5f1; color: #000050; font-family: Helvetica, Arial, sans-serif; }
+    .frame { max-width: 1280px; min-width: 0; margin: auto; }
+    .diagram-container { width: 100%; overflow-x: auto; background: #ffffff; }
+    svg { width: 100%; min-width: 1280px; display: block; }
+    svg text { font-family: Helvetica, Arial, sans-serif; fill: #000050; }
+    .heading { font-size: 40px; font-weight: 600; letter-spacing: -1px; }
+    .intro { font-size: 19px; fill: #52596c; }
+    .tag { font-size: 12px; font-weight: 600; letter-spacing: 1.5px; }
+    .name { font-size: 23px; font-weight: 600; }
+    .detail { font-size: 16px; fill: #52596c; }
+    .label { font-family: Consolas, "Courier New", monospace; font-size: 12px; fill: #52596c; }
+    .benefit { font-size: 18px; font-weight: 600; }
+    .edge { fill: none; stroke: #52596c; stroke-width: 1.5; marker-end: url(#arrow); }
+    .return { stroke-dasharray: 5 4; }
+    details { margin: 20px 0; color: #52596c; font-size: 14px; line-height: 1.6; }
+    summary { cursor: pointer; color: #000050; }
+    @media print { body { padding: 0; } .diagram-container { overflow-x: visible; } svg { min-width: 0; } details { display: none; } }
+  </style>
+</head>
+<body>
+  <main class="frame">
+    <div class="diagram-container">
+      <svg id="sendium-overview" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="sendium-overview-title sendium-overview-desc">
+        <title id="sendium-overview-title">Sendium SMS connectivity overview</title>
+        <desc id="sendium-overview-desc">HTTP applications and SMPP platforms connect through Sendium for protocol bridging, configurable routing and throughput controls, with upstream SMPP providers returning delivery receipts to the originating systems.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#52596c"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#000050"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#000050"/></marker>
+        </defs>
+        <rect width="1280" height="720" fill="#ffffff"/>
+        <text x="64" y="56" class="tag">SENDIUM / SELF-HOSTED SMS GATEWAY</text>
+        <text x="64" y="112" class="heading">Your systems. Your providers. Your gateway.</text>
+        <text x="64" y="148" class="intro">Own your SMS connectivity. Keep your applications provider-independent.</text>
+        <text x="64" y="204" class="tag">YOUR SYSTEMS</text>
+        <text x="952" y="204" class="tag">UPSTREAM SMPP PROVIDERS</text>
+
+        <path d="M 328 272 H 456" class="edge"/>
+        <path d="M 456 312 H 328" class="edge return"/>
+        <path d="M 328 464 H 456" class="edge"/>
+        <path d="M 456 504 H 328" class="edge return"/>
+        <path d="M 824 272 H 952" class="edge"/>
+        <path d="M 952 312 H 824" class="edge return"/>
+        <path d="M 824 464 H 952" class="edge"/>
+        <path d="M 952 504 H 824" class="edge return"/>
+
+        <rect x="344" y="244" width="96" height="20" fill="#ffffff"/>
+        <text x="392" y="258" text-anchor="middle" class="label">HTTP API</text>
+        <rect x="344" y="284" width="96" height="20" fill="#ffffff"/>
+        <text x="392" y="298" text-anchor="middle" class="label">CALLBACK</text>
+        <rect x="344" y="436" width="96" height="20" fill="#ffffff"/>
+        <text x="392" y="450" text-anchor="middle" class="label">SMPP</text>
+        <rect x="344" y="476" width="96" height="20" fill="#ffffff"/>
+        <text x="392" y="490" text-anchor="middle" class="label">DLR</text>
+        <rect x="840" y="244" width="96" height="20" fill="#ffffff"/>
+        <text x="888" y="258" text-anchor="middle" class="label">SMPP</text>
+        <rect x="840" y="284" width="96" height="20" fill="#ffffff"/>
+        <text x="888" y="298" text-anchor="middle" class="label">DLR</text>
+        <rect x="840" y="436" width="96" height="20" fill="#ffffff"/>
+        <text x="888" y="450" text-anchor="middle" class="label">SMPP</text>
+        <rect x="840" y="476" width="96" height="20" fill="#ffffff"/>
+        <text x="888" y="490" text-anchor="middle" class="label">DLR</text>
+
+        <g>
+          <rect x="64" y="232" width="264" height="112" rx="8" fill="#ffffff" stroke="#697184"/>
+          <text x="88" y="276" class="name">HTTP applications</text>
+          <text x="88" y="308" class="detail">OTP · notifications · campaigns</text>
+        </g>
+        <g>
+          <rect x="64" y="424" width="264" height="112" rx="8" fill="#ffffff" stroke="#697184"/>
+          <text x="88" y="468" class="name">SMPP platforms</text>
+          <text x="88" y="500" class="detail">Messaging systems and clients</text>
+        </g>
+        <g>
+          <rect x="456" y="232" width="368" height="304" rx="8" fill="#fff6ce" stroke="#000050"/>
+          <rect x="480" y="256" width="88" height="24" rx="2" fill="#faca16"/>
+          <text x="524" y="273" text-anchor="middle" class="tag">GATEWAY</text>
+          <text x="480" y="324" class="name" style="font-size:32px">Sendium</text>
+          <text x="480" y="368" class="detail">HTTP ↔ SMPP bridging</text>
+          <text x="480" y="404" class="detail">Configurable provider routing</text>
+          <text x="480" y="440" class="detail">Throughput controls</text>
+          <text x="480" y="500" class="detail">Delivery receipt correlation and return</text>
+        </g>
+        <g>
+          <rect x="952" y="232" width="264" height="112" rx="8" fill="#ffffff" stroke="#697184"/>
+          <text x="976" y="276" class="name">Provider A</text>
+          <text x="976" y="308" class="detail">Carrier, SMSC or SMS provider</text>
+        </g>
+        <g>
+          <rect x="952" y="424" width="264" height="112" rx="8" fill="#ffffff" stroke="#697184"/>
+          <text x="976" y="468" class="name">Provider B</text>
+          <text x="976" y="500" class="detail">Carrier, SMSC or SMS provider</text>
+        </g>
+
+        <line x1="64" y1="592" x2="1216" y2="592" stroke="#d9dce4"/>
+        <text x="64" y="628" class="benefit">Connect your systems once.</text>
+        <text x="64" y="656" class="detail">Use HTTP or SMPP without separate provider integrations.</text>
+        <text x="688" y="628" class="benefit">Manage connectivity in Sendium.</text>
+        <text x="688" y="656" class="detail">Configure provider connections, routing and traffic limits.</text>
+        <line x1="64" y1="692" x2="96" y2="692" stroke="#52596c" stroke-width="1.5"/>
+        <text x="108" y="696" class="label">SUBMISSION</text>
+        <line x1="280" y1="692" x2="312" y2="692" stroke="#52596c" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text x="324" y="696" class="label">ASYNC DELIVERY STATUS</text>
+        <text x="1216" y="696" text-anchor="end" class="label">sendium.org</text>
+      </svg>
+    </div>
+    <details>
+      <summary>Scope, technical accuracy and design sources</summary>
+      <p>This is an integration overview, not a protocol sequence or deployment topology. Both ingress protocols can route to either configured upstream provider; row alignment does not assign HTTP traffic to A or SMPP traffic to B. Routing selects a configured destination; arrows do not imply broadcast, load balancing, outage detection or automatic failover.</p>
+      <p>OTP generation, notification logic and campaign management remain in the originating applications. Sendium bridges message protocols and manages routing and throughput controls; it does not supply provider connectivity contracts or worldwide coverage. Delivery receipts depend on client requests, provider support, correlation, persistence and return-path configuration. Submission acceptance is not delivery confirmation.</p>
+      <p>Sources: <a href="../06-http-api.md">HTTP APIs</a>, <a href="../04-smpp-configuration.md">SMPP and throughput configuration</a>, <a href="../05-routing-engine.md">routing rules</a>, <a href="../07-webhooks.md">callbacks</a> and <a href="../13-dlr-persistence.md">DLR persistence</a>. Queues, storage, credentials, binds, acknowledgements, retries and deployment infrastructure are omitted for clarity.</p>
+      <p>Design: diagram-design Architecture grammar and minimal-light template, doc-wide canvas, mixed audience. Brand tokens sampled from sendium.org: navy #000050, yellow #FACA16 and white #FFFFFF. Helvetica/Arial are deliberate offline substitutes for Inter Tight headings. No remote fonts, scripts or assets are loaded. Five components and eight connectors.</p>
+    </details>
+  </main>
+</body>
+</html>
