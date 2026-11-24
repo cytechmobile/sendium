@@ -12,6 +12,11 @@ Routing logic is organized into **Routing Tables**.
 
 ## 📏 Routing Rules Syntax
 
+For testing without a real provider, an explicitly configured
+[simulator worker](09-configuration-reference.md#simulated-outbound-delivery-test-only)
+can be the destination. Keep synthetic SMS routing separate from the downstream
+SMPP DLR return route.
+
 Inside each table, routing rules are evaluated top-to-bottom. Every rule MUST follow a strict four-part, colon-separated format:
 
 `Target:Attribute:Operator:Value`

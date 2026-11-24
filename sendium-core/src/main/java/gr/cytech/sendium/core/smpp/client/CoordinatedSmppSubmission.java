@@ -1,6 +1,7 @@
 package gr.cytech.sendium.core.smpp.client;
 
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.worker.OutboundProvider;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -10,7 +11,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
 
 /** Tracks provider requests and their replacement attempts without admitting additional sources. */
-public final class CoordinatedSmppSubmission<M extends StandardMessage> {
+public final class CoordinatedSmppSubmission<M extends StandardMessage> implements OutboundProvider.Submission {
     private final List<Part<M>> parts = new ArrayList<>();
     private CompletionStage<Void> completion;
 

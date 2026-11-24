@@ -29,6 +29,53 @@ In the Docker image, the working directory is `/work`, so the default configurat
 | `smsg.properties` | Worker definitions, SMPP server/client configuration, retry behavior, logging-related worker settings. |
 | `routingTable.conf` | Routing tables and rules used to select workers. |
 
+## Simulated outbound delivery (test only)
+
+The opt-in `simulator` worker accepts SMS without contacting a provider and
+generates synthetic final DLRs through the normal DLR pipeline. It does **not**
+send real SMS, verify upstream connectivity, or model handset delivery.
+
+In `conf/smsg.properties`:
+
+```properties
+outSms.instance.demo.type=simulator
+outSms.instance.demo.enable=true
+outSms.instance.demo.outcome=delivered
+outSms.instance.demo.generateDlrs=true
+outSms.instance.demo.tps=10
+```
+
+Add `demo::default:` to your existing `[MESSAGE]` routing table **instead of**
+the real provider route for the test traffic. Preserve the normal DLR route to
+your SMPP server; do not route DLR messages to the simulator.
+
+| Worker property | Default | Meaning |
+| :--- | :--- | :--- |
+| `outcome` | `delivered` | Fixed final result: `delivered`, `failed`, or `expired` (case-insensitive). |
+| `generateDlrs` | `true` | Generate a receipt only if the submitting client requested one. `false` also skips correlation storage, so it does not leave waiting DLR records. |
+| `tps` | `0` | Existing worker rate limit; `0` means unlimited. |
+
+Invalid outcomes/booleans reject worker initialization rather than falling back.
+The worker emits an explicit simulation warning when configured. Existing worker
+pause, thread count and filter controls remain available. Outcome and receipt
+settings are snapshotted per submission, so later edits do not change an in-flight
+handoff retry.
+
+Use the normal HTTP callback or SMPP receipt-request options and enable Sendium
+DLR persistence as described in [DLR persistence](13-dlr-persistence.md). Both
+PostgreSQL and file storage use the same simulator path. The simulator first waits
+for correlation acceptance, then resolves the synthetic result. Failed handoffs
+retain pending SMS ownership and retry without counting another simulated send;
+once the DLR state is committed, the DLR backend owns callback retries or receipts
+for disconnected SMPP clients. Crash recovery remains at least once, not exactly once.
+
+There is no configurable receipt delay or random outcome. One simulated request
+represents one logical routed SMS; long-message SMPP segmentation is not modeled.
+Provider request metrics identify this traffic as `simulator.demo`; acceptance is
+always synthetic provider acceptance, even when the later final DLR is failed or
+expired. Do not mix these figures with real-provider delivery statistics.
+No simulator is enabled by default and Quick Start configuration is unchanged.
+
 ## Common Docker Environment Variables
 
 | Variable | Example | Description |
@@ -69,7 +116,7 @@ Validation runs before Sendium's file-watcher and router/worker startup observer
 profile is retained for the process lifetime. Startup logs the effective profile and its durability limits.
 Memory pending is non-durable: accepted messages and in-flight work can be lost on restart. The current
 standalone pipeline binds HTTP/SMPP to one shared coordinator and executes bounded selection, routing,
-SMPP-client submission, retries and terminal handoffs. All capacity/batch settings must be positive.
+lifecycle-aware provider submission (SMPP clients or the simulator), retries and terminal handoffs. All capacity/batch settings must be positive.
 
 For `file` pending, set `sendium.message.pending.path` explicitly to a writable local spool directory.
 Only one process may own it. Startup validates and reconstructs retained sources before admission;

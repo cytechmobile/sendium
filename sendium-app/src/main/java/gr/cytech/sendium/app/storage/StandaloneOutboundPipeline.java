@@ -5,7 +5,6 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
-import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
@@ -17,6 +16,7 @@ import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
+import gr.cytech.sendium.core.worker.OutboundProvider;
 import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.routing.AbstractRoutingManager;
 import gr.cytech.sendium.routing.OutgoingWorkerManager;
@@ -212,7 +212,7 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         }
         try {
             for (var worker : workers.getWorkersCopy()) {
-                if (!(worker instanceof SmppClientWorker<?> client) || !worker.acceptsMessages() || worker.isPause()) {
+                if (!(worker instanceof OutboundProvider<?> provider) || !worker.acceptsMessages() || worker.isPause()) {
                     continue;
                 }
                 for (int i = 0; i < batchSize; i++) {
@@ -221,7 +221,7 @@ public class StandaloneOutboundPipeline implements HealthCheck {
                         break;
                     }
                     try {
-                        var execution = dispatch.submitToProvider(work.orElseThrow(), (SmppClientWorker<StandardMessage>) client);
+                        var execution = dispatch.submitToProvider(work.orElseThrow(), (OutboundProvider<StandardMessage>) provider);
                         executions.put(work.orElseThrow().id(), execution);
                         progressed = true;
                     } catch (Exception failure) {
@@ -322,7 +322,7 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         }
     }
 
-    /** The activated provider boundary supports SMPP submission, not arbitrary legacy worker methods. */
+    /** The activated boundary requires lifecycle-aware providers, not arbitrary legacy worker methods. */
     @Vetoed
     static final class LifecycleRouting extends StandardRoutingManager {
         private final StandardRoutingManager delegate;
@@ -334,10 +334,10 @@ public class StandaloneOutboundPipeline implements HealthCheck {
         @Override
         public RoutingLookupResult lookupForLifecycle(StandardMessage message) throws IOException {
             var result = delegate.lookupForLifecycle(message);
-            if (result.getDestinations().stream().anyMatch(worker -> !(worker instanceof SmppClientWorker<?>))) {
+            if (result.getDestinations().stream().anyMatch(worker -> !(worker instanceof OutboundProvider<?>))) {
                 throw new OutboundStorageException(OutboundStage.Role.ROUTER_QUEUE,
                         OutboundStorageException.Reason.UNSUPPORTED,
-                        "Standalone outbound execution requires an SMPP-client destination");
+                        "outboundRouting|error|reason:unsupportedProviderDestination");
             }
             return result;
         }
