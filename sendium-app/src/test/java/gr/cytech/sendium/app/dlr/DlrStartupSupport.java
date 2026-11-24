@@ -9,21 +9,32 @@ import gr.cytech.sendium.core.worker.DlrStorageReadinessCheck;
 import gr.cytech.sendium.core.worker.ForwardDlrService;
 import gr.cytech.sendium.core.worker.ManagedDlrStorage;
 import gr.cytech.sendium.core.worker.ProviderDlrProcessor;
+import io.quarkus.arc.DefaultBean;
 import io.quarkus.test.QuarkusExtensionTest;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Singleton;
+import org.jboss.shrinkwrap.api.spec.JavaArchive;
 
-final class DlrStartupSupport {
+import java.util.function.Consumer;
+
+public final class DlrStartupSupport {
     private DlrStartupSupport() {
     }
 
     static QuarkusExtensionTest application() {
+        return application(archive -> archive.addClass(EmptyCredentials.class));
+    }
+
+    public static QuarkusExtensionTest application(Consumer<JavaArchive> extra) {
         return new QuarkusExtensionTest()
-                .withApplicationRoot(archive -> archive.addClasses(
+                .withApplicationRoot(archive -> {
+                    archive.addClasses(
                         DlrMessageStorage.class, DlrStorage.class, ManagedDlrStorage.class,
                         DlrService.class, ProviderDlrProcessor.class, ForwardDlrService.class,
                         DlrStorageReadinessCheck.class, DlrStorageMetrics.class,
-                        DlrStartupSupport.class, EmptyCredentials.class))
+                         DlrStartupSupport.class);
+                    extra.accept(archive);
+                })
                 // Isolate unrelated protocol workers, but include the real conditional DLR beans above.
                 .overrideConfigKey("quarkus.arc.exclude-dependency.core.group-id", "gr.cytech")
                 .overrideConfigKey("quarkus.arc.exclude-dependency.core.artifact-id", "sendium-core")
@@ -36,6 +47,7 @@ final class DlrStartupSupport {
     public static class EmptyCredentials {
         @Produces
         @Singleton
+        @DefaultBean
         CredentialFileWatcher credentials() {
             return new CredentialFileWatcher();
         }

@@ -4,12 +4,19 @@ import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.queue.InMemoryQueueProvider;
 import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
+import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
+import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
+import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import gr.cytech.sendium.core.worker.DisabledDlrProcessingTest;
+import gr.cytech.sendium.core.worker.MemoryDlrReservations;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import utils.OutboundIngressFixture;
 
 import java.util.Map;
@@ -32,6 +40,33 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class KannelResourceTest {
+    @ParameterizedTest
+    @ValueSource(strings = {"full", "recovery", "disabled"})
+    void dlrPolicyErrorsPreserveKannelResponse(String scenario) throws Exception {
+        var managed = DisabledDlrProcessingTest.selected(scenario.equals("disabled") ? "disabled" : "memory", 1);
+        var policy = DisabledDlrProcessingTest.policy(managed);
+        var pending = new MemoryPendingMessageStore<StandardMessage>(8, message -> PendingMessageData.capture(message).restore());
+        try (var ignored = DisabledDlrProcessingTest.lifetime(managed);
+             var coordinator = new DefaultOutboundCoordinator<>(pending, new MemorySelectedRouterStore<>(pending, 8),
+                     new MemoryRoutedWorkStore<>(8, message -> PendingMessageData.capture(message).restore()), 8, policy)) {
+            coordinator.start();
+            when(resource.outboundCoordinators.isUnsatisfied()).thenReturn(false);
+            when(resource.outboundCoordinators.get()).thenReturn(coordinator);
+            if (scenario.equals("full")) {
+                assertThat(submit("https://callback.test/dlr").getStatus()).isEqualTo(202);
+            } else if (scenario.equals("recovery")) {
+                ((MemoryDlrReservations) policy).beginRecovery(2);
+            }
+            var response = submit("https://callback.test/dlr");
+            assertThat(response.getStatus()).isEqualTo(scenario.equals("disabled") ? 400 : 503);
+            assertThat(response.getEntity()).isEqualTo(scenario.equals("disabled") ?
+                    "Unsupported SMS submission" : "Temporal failure, try again later.");
+            assertThat(pending.sourcesAfter(null, 8)).hasSize(scenario.equals("full") ? 1 : 0);
+            assertThat(submit(null).getStatus()).isEqualTo(202);
+            verifyNoInteractions(routerQueue);
+        }
+    }
+
     @Test
     void attributesMetricsToCredentialRatherThanRequestOwner() {
         var credential = new CredentialFileWatcher.Credential(CredentialFileWatcher.CredentialType.HTTP,

@@ -19,19 +19,29 @@ public class DlrService {
     @Inject
     ProviderDlrProcessor processor;
 
+    public boolean isProcessingDisabled() {
+        return storage instanceof ManagedDlrStorage managed && managed.isProcessingDisabled();
+    }
+
     public CompletionStage<Optional<MessageState>> recordProviderAcceptedAsync(
             MessageState state, String providerName, String providerMessageId) {
+        if (isProcessingDisabled()) {
+            return CompletableFuture.failedStage(new DlrStorageException("dlrProvider|error|reason:handlingDisabled"));
+        }
         return processor.submit(new ProviderDlrEvent.Accepted(state, providerName, providerMessageId));
     }
 
     public CompletionStage<Optional<MessageState>> recordProviderRejectedAsync(
             MessageState state, String providerName, String providerMessageId, int dlrState, String errorCode) {
+        if (isProcessingDisabled()) {
+            return CompletableFuture.failedStage(new DlrStorageException("dlrProvider|error|reason:handlingDisabled"));
+        }
         return processor.submit(new ProviderDlrEvent.Rejected(state, providerName, providerMessageId, dlrState, errorCode));
     }
 
     public CompletionStage<Optional<MessageState>> resolveDlrAsync(
             String providerName, String providerMessageId, int dlrState, String errorCode) {
-        if (!isTerminalDlrState(dlrState)) {
+        if (isProcessingDisabled() || !isTerminalDlrState(dlrState)) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
         return processor.submit(new ProviderDlrEvent.Receipt(

@@ -42,7 +42,7 @@ public class ProviderDlrProcessor implements AutoCloseable {
     private final Object admission = new Object();
     private final Counter rejected;
     private final DistributionSummary batchEvents;
-    private final ExecutorService completions = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService completions;
     private final Thread worker;
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile boolean accepting = true;
@@ -67,8 +67,18 @@ public class ProviderDlrProcessor implements AutoCloseable {
         this.batchSize = batchSize;
         this.delayNanos = delay.toNanos();
         this.shutdownTimeout = shutdownTimeout;
+        if (storage.isProcessingDisabled()) {
+            queue = null;
+            capacity = null;
+            rejected = null;
+            batchEvents = null;
+            completions = null;
+            worker = null;
+            return;
+        }
         queue = new ArrayBlockingQueue<>(queueCapacity);
         capacity = new Semaphore(queueCapacity);
+        completions = Executors.newVirtualThreadPerTaskExecutor();
         rejected = metrics.counter("sendium.dlr.batch.rejected");
         batchEvents = metrics.summary("sendium.dlr.batch.events");
         Gauge.builder("sendium.dlr.batch.pending", capacity, slots -> queueCapacity - slots.availablePermits())
@@ -78,6 +88,10 @@ public class ProviderDlrProcessor implements AutoCloseable {
 
     public CompletionStage<Optional<MessageState>> submit(ProviderDlrEvent event) {
         java.util.Objects.requireNonNull(event, "event");
+        if (worker == null) {
+            return event instanceof ProviderDlrEvent.Receipt ? CompletableFuture.completedStage(Optional.empty()) :
+                    CompletableFuture.failedStage(new DlrStorageException("dlrProvider|error|reason:handlingDisabled"));
+        }
         synchronized (admission) {
             if (!accepting || !capacity.tryAcquire()) {
                 rejected.increment();
@@ -194,6 +208,9 @@ public class ProviderDlrProcessor implements AutoCloseable {
     @PreDestroy
     public void close() {
         if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        if (worker == null) {
             return;
         }
         synchronized (admission) {

@@ -19,6 +19,7 @@ import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
 import gr.cytech.sendium.core.storage.file.FileRoutedWorkStore;
 import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
+import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 import gr.cytech.sendium.util.MessageTrace;
@@ -571,6 +572,12 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         } finally {
             lock.unlock();
         }
+    }
+
+    @Override
+    public boolean enforcesDlrPolicy(OutboundDlrPolicy policy) {
+        return dlrPolicy == policy && (policy == OutboundDlrPolicy.UNRESTRICTED ||
+                routed instanceof FileRoutedWorkStore || routed instanceof MemoryRoutedWorkStore<?>);
     }
 
     @Override

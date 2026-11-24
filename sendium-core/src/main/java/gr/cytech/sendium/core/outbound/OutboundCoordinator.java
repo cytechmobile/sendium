@@ -90,6 +90,11 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
     /** Takes already-routed work for the named destination without completing its stored ownership or sending it. */
     Optional<Routed<M>> takeFromRouted(String destination, Duration timeout) throws InterruptedException;
 
+    /** Attests enforcement of this exact selected policy, including required blocked-work deferral. */
+    default boolean enforcesDlrPolicy(OutboundDlrPolicy policy) {
+        return policy == OutboundDlrPolicy.UNRESTRICTED;
+    }
+
     /**
      * Optional post-filter provider guard for the owned execution, including replacement attempts.
      * Legacy/external ownership remains unchanged when empty; selected managed modes must

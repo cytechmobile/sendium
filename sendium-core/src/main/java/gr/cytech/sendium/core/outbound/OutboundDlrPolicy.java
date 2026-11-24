@@ -14,6 +14,23 @@ import java.util.Set;
 @FunctionalInterface
 public interface OutboundDlrPolicy {
     OutboundDlrPolicy UNRESTRICTED = (source, message) -> Reservation.UNCHANGED;
+    OutboundDlrPolicy DISABLED = new OutboundDlrPolicy() {
+        @Override
+        public Reservation reserveAdmission(SourceId source, StandardMessage message) {
+            if (message.dlrReturnMetadata != null) {
+                throw new OutboundStorageException(OutboundStage.Role.PENDING, OutboundStorageException.Reason.UNSUPPORTED,
+                        "dlrAdmission|rejected|reason:disabled");
+            }
+            return Reservation.UNCHANGED;
+        }
+
+        @Override
+        public void prepareProvider(String gatewayMsgId, Set<SourceId> requiredSources) {
+            if (!requiredSources.isEmpty()) {
+                throw new Blocked(BlockReason.DISABLED, requiredSources.size(), 0);
+            }
+        }
+    };
 
     /**
      * Protects a source before pending publication. A retained source reuses its reservation.

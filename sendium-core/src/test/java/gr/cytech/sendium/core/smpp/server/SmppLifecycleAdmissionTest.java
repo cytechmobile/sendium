@@ -6,12 +6,19 @@ import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.pdu.SubmitSmResp;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.PendingMessageStore;
+import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
+import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
+import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
+import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import gr.cytech.sendium.core.worker.DisabledDlrProcessingTest;
+import gr.cytech.sendium.core.worker.MemoryDlrReservations;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.mockito.ArgumentCaptor;
@@ -44,6 +51,38 @@ import static org.mockito.Mockito.verify;
 
 @Timeout(10)
 class SmppLifecycleAdmissionTest {
+    @ParameterizedTest
+    @ValueSource(strings = {"full", "recovery", "disabled"})
+    void dlrPolicyRejectsBeforeSubmitSuccess(String scenario) throws Exception {
+        var managed = DisabledDlrProcessingTest.selected(scenario.equals("disabled") ? "disabled" : "memory", 1);
+        var policy = DisabledDlrProcessingTest.policy(managed);
+        var pending = new MemoryPendingMessageStore<StandardMessage>(8, message -> PendingMessageData.capture(message).restore());
+        try (var ignored = DisabledDlrProcessingTest.lifetime(managed);
+             var coordinator = new DefaultOutboundCoordinator<>(pending, new MemorySelectedRouterStore<>(pending, 8),
+                     new MemoryRoutedWorkStore<>(8, message -> PendingMessageData.capture(message).restore()), 8, policy);
+             var worker = new TestWorker()) {
+            coordinator.start();
+            worker.setIngressCoordinator(coordinator);
+            if (scenario.equals("full")) {
+                worker.enqueueIn(submission("0500037F0201", "first", 1));
+                assertThat(worker.responses.getLast().getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
+            } else if (scenario.equals("recovery")) {
+                ((MemoryDlrReservations) policy).beginRecovery(2);
+            }
+            worker.enqueueIn(submission(scenario.equals("full") ? "0500037F0202" : null, "rejected", 2));
+            assertThat(worker.responses.getLast().getCommandStatus()).isEqualTo(scenario.equals("disabled") ?
+                    SmppConstants.STATUS_SUBMITFAIL : SmppConstants.STATUS_THROTTLED);
+            assertThat(worker.responses.getLast().getMessageId()).isNullOrEmpty();
+            assertThat(pending.sourcesAfter(null, 8)).hasSize(scenario.equals("full") ? 1 : 0);
+            var plain = submission(null, "eligible", 3);
+            plain.pMsg.dlrReturnMetadata = null;
+            plain.pMsg.acked = false;
+            worker.enqueueIn(plain);
+            assertThat(worker.responses.getLast().getCommandStatus()).isEqualTo(SmppConstants.STATUS_OK);
+            assertThat(worker.legacyQueue.isEmpty()).isTrue();
+        }
+    }
+
     @Test
     void successReferencesAcceptedHandle() throws Exception {
         try (var lifecycle = new OutboundIngressFixture(1); var worker = new TestWorker()) {

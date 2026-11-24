@@ -22,7 +22,7 @@ class DlrProfileValidationTest {
 
     @ParameterizedTest(name = "app backend={0}")
     @CsvSource(nullValues = "-", value = {
-        "-, true", "postgresql, true", "file, false", "memory, false", "unknown, false", "FILE, false"})
+        "-, true", "postgresql, true", "file, false", "memory, false", "disabled, false", "unknown, false", "FILE, false"})
     void standaloneDatasourceFollowsBackend(String backend, boolean active) throws Exception {
         Map<String, String> overrides = new HashMap<>();
         if (backend != null) {
@@ -37,7 +37,7 @@ class DlrProfileValidationTest {
     @ParameterizedTest(name = "core enabled={0} backend={1}")
     @CsvSource(nullValues = "-", value = {
         "-, -, false", "-, file, false", "false, postgresql, false", "false, unknown, false",
-        "true, -, true", "true, postgresql, true", "true, file, false", "true, memory, false"})
+        "true, -, true", "true, postgresql, true", "true, file, false", "true, memory, false", "true, disabled, false"})
     void embeddedDatasourceStaysInactiveUnlessPostgresqlIsEnabled(String enabled, String backend, boolean active)
             throws Exception {
         Map<String, String> overrides = new HashMap<>();

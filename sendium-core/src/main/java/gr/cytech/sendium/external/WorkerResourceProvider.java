@@ -45,6 +45,8 @@ public class WorkerResourceProvider {
      * Whether Sendium owns the DLR persistence lifecycle in this build. Callers on message paths must check this
      * before {@link #getDlrService()}: an application embedding {@code sendium-core} can leave
      * {@code sendium.dlr.persistence.enabled} unset and take over DLR tracking itself.
+     * Startup-selected disabled handling still owns this boundary: ingress must retain DLR request
+     * metadata so its admission policy can reject it, rather than silently accepting a downgrade.
      */
     public boolean isDlrPersistenceEnabled() {
         return !dlrServices.isUnsatisfied();

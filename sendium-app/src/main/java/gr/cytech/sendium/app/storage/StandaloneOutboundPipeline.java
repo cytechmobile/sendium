@@ -4,6 +4,7 @@ import gr.cytech.sendium.conf.SendiumConfigurationHandler;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
+import gr.cytech.sendium.core.outbound.OutboundDlrPolicy;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
@@ -16,6 +17,7 @@ import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
+import gr.cytech.sendium.core.worker.ManagedDlrStorage;
 import gr.cytech.sendium.core.worker.OutboundProvider;
 import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.routing.AbstractRoutingManager;
@@ -60,6 +62,7 @@ import java.util.concurrent.TimeUnit;
 public class StandaloneOutboundPipeline implements HealthCheck {
     private static final Logger logger = LoggerFactory.getLogger(StandaloneOutboundPipeline.class);
     @Inject Instance<OutboundCoordinator<StandardMessage>> coordinators;
+    @Inject Instance<ManagedDlrStorage> dlrStorages;
     OutboundCoordinator<StandardMessage> coordinator;
     @Inject StandardRoutingManager routing;
     @Inject OutgoingWorkerManager workers;
@@ -77,7 +80,17 @@ public class StandaloneOutboundPipeline implements HealthCheck {
     @Produces
     @Singleton
     @DefaultBean
+    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config, MeterRegistry metrics,
+                                                            Instance<ManagedDlrStorage> dlrStorages) {
+        return coordinator(profile, config, metrics, selectedDlrPolicy(config, dlrStorages));
+    }
+
     static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config, MeterRegistry metrics) {
+        return coordinator(profile, config, metrics, selectedDlrPolicy(config, null));
+    }
+
+    static OutboundCoordinator<StandardMessage> coordinator(MessageStorageProfile profile, Config config, MeterRegistry metrics,
+                                                            OutboundDlrPolicy policy) {
         int sourceCapacity = positive(config, "pending.capacity", 10000);
         int recoveryBatchSize = positive(config, "selection-batch-size", 100);
         int routerCapacity = positive(config, "router-queue.capacity", 1000);
@@ -107,7 +120,10 @@ public class StandaloneOutboundPipeline implements HealthCheck {
             }
             routed = memoryRouted;
         }
-        var result = new DefaultOutboundCoordinator<>(pending, selected, routed, recoveryBatchSize);
+        var result = new DefaultOutboundCoordinator<>(pending, selected, routed, recoveryBatchSize, policy);
+        if (!result.enforcesDlrPolicy(policy)) {
+            throw new IllegalStateException("dlrPolicy|error|reason:unsupportedCoordinator");
+        }
         result.start();
         if (metrics != null && selected instanceof MemorySelectedRouterStore<StandardMessage> memorySelected) {
             memorySelected.bindMetrics(metrics);
@@ -123,6 +139,10 @@ public class StandaloneOutboundPipeline implements HealthCheck {
     void start(@Observes @Priority(Interceptor.Priority.APPLICATION + 100) StartupEvent event) {
         if (coordinator == null) {
             coordinator = coordinators.get();
+        }
+        var policy = selectedDlrPolicy(config, dlrStorages);
+        if (policy != OutboundDlrPolicy.UNRESTRICTED && !coordinator.enforcesDlrPolicy(policy)) {
+            throw new IllegalStateException("dlrPolicy|error|reason:selectedPolicyNotEnforced");
         }
         batchSize = positive(config, "selection-batch-size", 100);
         dispatch = new StandardOutboundDispatch(coordinator, new LifecycleRouting(routing));
@@ -299,6 +319,25 @@ public class StandaloneOutboundPipeline implements HealthCheck {
             throw new IllegalArgumentException("messageStorageConfiguration|error|reason:nonPositiveValue|setting:" + key);
         }
         return value;
+    }
+
+    static OutboundDlrPolicy selectedDlrPolicy(Config config, Instance<ManagedDlrStorage> storages) {
+        String backend = config.getOptionalValue("sendium.dlr.storage.backend", String.class).orElse("postgresql");
+        boolean nonDurable = "memory".equals(backend) || "disabled".equals(backend);
+        boolean included = config.getOptionalValue("sendium.dlr.persistence.enabled", Boolean.class).orElse(false);
+        if (!included) {
+            if (nonDurable) {
+                throw new IllegalStateException("dlrPolicy|error|reason:selectedModeRequiresIncludedSubsystem");
+            }
+            return OutboundDlrPolicy.UNRESTRICTED;
+        }
+        if (storages == null || storages.isUnsatisfied()) {
+            if (nonDurable) {
+                throw new IllegalStateException("dlrPolicy|error|reason:selectedModeRequiresManagedStorage");
+            }
+            return OutboundDlrPolicy.UNRESTRICTED;
+        }
+        return storages.get().outboundDlrPolicy();
     }
 
     private static Path pendingPath(Config config) {

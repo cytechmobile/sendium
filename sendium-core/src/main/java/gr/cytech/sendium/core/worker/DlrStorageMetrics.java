@@ -44,6 +44,7 @@ public class DlrStorageMetrics {
 
     private long staleAfterNanos;
     private String backend;
+    private boolean nonDurable;
     private final AtomicBoolean collecting = new AtomicBoolean();
     private final List<Meter> ownedMeters = new ArrayList<>();
     private volatile Snapshot snapshot = new Snapshot(null, 0, Double.NaN);
@@ -57,6 +58,10 @@ public class DlrStorageMetrics {
         }
         staleAfterNanos = interval.toNanos() * 2;
         backend = storage.backend();
+        nonDurable = "memory".equals(backend) || "disabled".equals(backend);
+        if (nonDurable) {
+            return;
+        }
         register("sendium.storage.collection.enabled", "Whether receipt storage snapshot collection is enabled", ignored -> enabled ? 1 : 0);
         register("sendium.storage.collection.available", "Whether a complete fresh receipt snapshot is available", ignored -> available(snapshot) ? 1 : 0);
         register("sendium.storage.collection.last.success.timestamp.seconds", "Unix timestamp of last complete receipt snapshot",
@@ -81,7 +86,7 @@ public class DlrStorageMetrics {
 
     @Scheduled(every = "${sendium.metrics.storage.interval:60s}", delayed = "1s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void collect() {
-        if (!enabled || !collecting.compareAndSet(false, true)) {
+        if (nonDurable || !enabled || !collecting.compareAndSet(false, true)) {
             return;
         }
         try {

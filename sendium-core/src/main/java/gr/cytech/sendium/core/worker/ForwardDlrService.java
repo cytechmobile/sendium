@@ -52,7 +52,7 @@ public class ForwardDlrService {
 
     @Inject
     public ForwardDlrService(DlrService dlrService) {
-        this(dlrService, newHttpClient());
+        this(dlrService, dlrService.isProcessingDisabled() ? null : newHttpClient());
     }
 
     ForwardDlrService(DlrService dlrService, HttpClient httpClient) {
@@ -63,6 +63,9 @@ public class ForwardDlrService {
     /** CDI binds automatically; direct construction can opt in without changing callback behavior. */
     @Inject
     public void bindMetrics(MeterRegistry metrics) {
+        if (dlrService.isProcessingDisabled()) {
+            return;
+        }
         successfulReturns = metrics.counter("sendium.dlr.return.attempts", "channel", "http", "result", "success");
         failedReturns = metrics.counter("sendium.dlr.return.attempts", "channel", "http", "result", "failure");
     }
@@ -82,6 +85,9 @@ public class ForwardDlrService {
 
     @Scheduled(every = "1s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void dispatchDueDeliveries() {
+        if (dlrService.isProcessingDisabled()) {
+            return;
+        }
         List<MessageState> dueDeliveries;
         try {
             dueDeliveries = dlrService.claimDueHttpDeliveries(DUE_BATCH_SIZE);
