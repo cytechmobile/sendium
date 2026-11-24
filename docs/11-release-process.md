@@ -19,6 +19,38 @@ On each run, the workflow:
 
 Artifact publishing jobs are independent. A failure in one registry does not suppress publication to the others, and the failed job still makes the release workflow fail visibly. Release workflow runs are queued rather than cancelled when another commit reaches `main`, so a later push cannot interrupt an active publication.
 
+## Application Verification
+
+`Run Tests` runs automatically for pull requests (using GitHub's PR merge ref)
+and pushes to `main`. Feature-branch pushes and tags do not start another copy.
+To verify a branch before opening a PR, dispatch `Run Tests` manually and select
+that branch. Its `tests` and Quick Start check names are unchanged.
+
+Superseded runs cancel only within the same workflow, event type and ref.
+Different PRs, `main` pushes, and manual runs do not cancel one another across
+those boundaries. Fork and Dependabot PRs keep the existing PR workflow and
+permissions; no privileged `pull_request_target` execution is introduced.
+Version-only release PR classification remains unchanged; `main` still receives
+full verification after merge.
+
+`Native E2E Tests` retains its existing path-filtered PR and manual triggers.
+It builds the application and required core module in one reactor invocation:
+
+```sh
+./mvnw -B package -pl sendium-app -am -Pnative -DskipTests -Dmaven.test.skip=true \
+  -Dquarkus.native.container-build=false
+```
+
+This replaces the preliminary `clean install -DskipTests` JVM build followed by
+an app-only native `package`. The reactor supplies core directly, without a local
+Maven install. JVM unit/integration tests and style checks remain in `Run Tests`;
+the native job still compiles the actual native executable and runs both
+PostgreSQL and file DLR end-to-end restart checks. Those smoke utilities are
+compiled once before their first use. There are currently no native-specific
+app test classes or test executions added by the `native` profile.
+
+Maven dependency caching and repository configuration are unchanged.
+
 ## Developer Responsibilities
 
 Use Conventional Commit messages in PR titles and commits. Release Please uses these messages to decide whether a release is needed and what version bump to apply.

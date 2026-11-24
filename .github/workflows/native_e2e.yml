@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: SendiumNativeE2E-${{ github.ref }}
+  group: SendiumNativeE2E-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -53,8 +53,10 @@ jobs:
       - name: Build native application
         run: |
           chmod +x ./mvnw
-          ./mvnw -B clean install -DskipTests
-          ./mvnw -B package -pl sendium-app -Pnative -Dquarkus.native.container-build=false
+          # Build core and app together: no preliminary JVM package/install is needed.
+          # Full JVM verification runs in Run Tests; compile smoke utilities only when used below.
+          ./mvnw -B package -pl sendium-app -am -Pnative -DskipTests -Dmaven.test.skip=true \
+            -Dquarkus.native.container-build=false
 
       - name: Build native Docker image
         run: docker build -t sendium:native-e2e -f sendium-app/src/main/docker/Dockerfile.native sendium-app
@@ -70,7 +72,7 @@ jobs:
             -Dexec.classpathScope=test \
             -Dexec.mainClass=utils.NativeE2eSmoke
           # File mode passes no PostgreSQL settings to the container and uses a retained DLR volume.
-          SENDIUM_E2E_DLR_BACKEND=file ./mvnw -B -pl sendium-core -DskipTests test-compile \
+          SENDIUM_E2E_DLR_BACKEND=file ./mvnw -B -pl sendium-core -DskipTests \
             org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
             -Dexec.classpathScope=test \
             -Dexec.mainClass=utils.NativeE2eSmoke
