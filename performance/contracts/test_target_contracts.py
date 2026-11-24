@@ -111,6 +111,19 @@ class TargetContractTests(unittest.TestCase):
         document["configuration"]["application"]["dlrStorage"] = "file"
         self.assertFalse(VALIDATOR.is_valid(document))
 
+    def test_memory_dlr_report_is_sendium_only(self):
+        for runtime in ("jvm", "native"):
+            document = fixture()
+            document["configuration"]["application"].update(dlrStorage="memory", runtime=runtime,
+                                                            jvmArguments=[], nativeArguments=["-Xmx512m"])
+            if runtime == "jvm":
+                document["configuration"]["application"].pop("nativeArguments")
+            document["configuration"]["infrastructure"]["database"] = {"provisioned": False, "resourceMetricsRequired": False}
+            VALIDATOR.validate(document)
+        document = fixture("kannel")
+        document["configuration"]["application"]["dlrStorage"] = "memory"
+        self.assertFalse(VALIDATOR.is_valid(document))
+
     def test_sendium_still_requires_a_commit_and_cannot_inherit_kannel_storage_or_runtime(self):
         for field, value in (("runtime", "kannel"), ("dlrStorage", "internal"), ("benchmarkTarget", "unknown")):
             document = fixture()

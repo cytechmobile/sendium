@@ -36,7 +36,7 @@ public enum BenchmarkTarget {
         if (this == SENDIUM) {
             if (provenance.applicationCommit() == null || application.has("runtime")
                     && !java.util.List.of("jvm", "native").contains(application.path("runtime").asText())
-                    || !java.util.List.of("postgresql", "file", "disabled").contains(application.path("dlrStorage").asText())) {
+                    || !java.util.List.of("postgresql", "file", "memory", "disabled").contains(application.path("dlrStorage").asText())) {
                 throw new IllegalArgumentException("Invalid Sendium application identity");
             }
             return;
@@ -63,11 +63,11 @@ public enum BenchmarkTarget {
     }
 
     /**
-     * Sendium is ready only when its DLR storage check reports the selected backend: file for file runs,
-     * otherwise PostgreSQL, which is also required when message-level DLR is disabled.
+     * Sendium is ready only when its DLR storage check reports the selected backend.
+     * PostgreSQL remains required by default even when message-level DLR is disabled.
      */
     boolean ready(int status, String body, ObjectMapper mapper, String dlrStorage) throws IOException {
-        String expectedBackend = "file".equals(dlrStorage) ? "file" : "postgresql";
+        String expectedBackend = java.util.List.of("file", "memory").contains(dlrStorage) ? dlrStorage : "postgresql";
         if (this == KANNEL) {
             // This exercises smsbox's actual sendsms handler without admitting a probe SMS.
             return status == 403 && "Authorization failed for sendsms".equals(body.strip());

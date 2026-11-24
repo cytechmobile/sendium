@@ -316,8 +316,12 @@ The standalone application has PostgreSQL persistence enabled at build time.
 datasource or disable the compiled persistence subsystem.** PostgreSQL remains
 configured in both modes, and the public configuration records `dlrStorage` as
 `postgresql` alongside the separate `dlrRequested` flag. For a `dlr_storage=file`
-AWS run, the deployment node then selects Sendium's file DLR backend and records
-`dlrStorage: file`; see the [workflow guide](../workflow/README.md#sendium-build-and-runtime-details).
+or `dlr_storage=memory` AWS run, the deployment node selects that backend and records
+the exact `dlrStorage` value. Both omit the database; only file mode creates a DLR
+directory. Readiness must match the selected backend, and reports/finalization preserve
+its identity. This is separate from setting `dlr_enabled=false`; startup `disabled`
+handling is not a workflow option. See the
+[workflow guide](../workflow/README.md#sendium-build-and-runtime-details).
 
 The provider worker gets the exact workload TPS, one transceiver, explicit
 window/request timeout/thread settings, and a run-specific provider namespace.

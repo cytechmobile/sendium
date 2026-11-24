@@ -1,4 +1,4 @@
-"""Sendium-only file DLR storage propagation and run-local DLR directory configuration."""
+"""Sendium-only file/memory DLR propagation and database-free node configuration."""
 
 import tempfile
 import unittest
@@ -27,7 +27,7 @@ def documents(runtime, storage):
     state = native_state() if runtime == "native" else staged()
     state["preset"]["runtime"]["dlrStorage"] = storage
     outputs = deployment_outputs()
-    if storage == "file":
+    if storage in ("file", "memory"):
         outputs = {key: value for key, value in outputs.items() if not key.startswith("Database") and key != "resolvedDatabase"}
     instances = {outputs[source.title() + "InstanceId"]: {
         "InstanceId": outputs[source.title() + "InstanceId"], "InstanceType": "t4g.small", "Architecture": "arm64",
@@ -37,6 +37,26 @@ def documents(runtime, storage):
 
 
 class DlrStorageTests(unittest.TestCase):
+    def test_memory_dlr_needs_no_database_or_dlr_directory(self):
+        for runtime in ("jvm", "native"):
+            for profile in ("memory/memory/memory", "file/file/file"):
+                with self.subTest(runtime=runtime, profile=profile), tempfile.TemporaryDirectory() as directory:
+                    generated = documents(runtime, "memory")
+                    self.assertNotIn("database", generated["sendium"]["deployment"])
+                    self.assertNotIn("databaseSecretArn", generated["sendium"])
+                    self.assertEqual(generated["harness"]["execution"]["context"]["application"]["dlrStorage"], "memory")
+                    self.assertEqual(generated["harness"]["execution"]["context"]["infrastructure"]["database"],
+                                     {"provisioned": False, "resourceMetricsRequired": False})
+                    node = configured(directory, messageStorageProfile=profile, dlrStorage="memory")
+                    environment = read(node.root / "generated/sendium/environment.json")
+                    self.assertEqual(environment["SENDIUM_DLR_STORAGE_BACKEND"], "memory")
+                    self.assertNotIn("SENDIUM_DLR_STORAGE_FILE_PATH", environment)
+                    self.assertFalse((node.root / "dlr").exists())
+                    for location in ("public", "harness"):
+                        effective = read(node.root / ("generated/" + location + "/effective-configuration.json"))
+                        self.assertEqual(effective["dlrStorage"], "memory")
+                        self.assertEqual(effective["applicationProperties"]["sendium.dlr.storage.backend"], "memory")
+
     def test_file_dlr_deployment_records_no_database(self):
         state = staged()
         state["preset"]["runtime"]["dlrStorage"] = "file"
@@ -84,10 +104,10 @@ class DlrStorageTests(unittest.TestCase):
                 self.assertNotIn("jdbc:", str(value))
         self.assertNotIn("database", generated["sendium"]["deployment"])
 
-    def test_file_dlr_node_reads_no_database_secret(self):
-        for runtime in ("jvm", "native"):
-            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as directory:
-                document = documents(runtime, "file")["sendium"]
+    def test_non_postgresql_dlr_node_reads_no_database_secret(self):
+        for runtime, storage in ((runtime, storage) for runtime in ("jvm", "native") for storage in ("file", "memory")):
+            with self.subTest(runtime=runtime, storage=storage), tempfile.TemporaryDirectory() as directory:
+                document = documents(runtime, storage)["sendium"]
                 aws = MemoryAws()
                 node = Node(document, root=directory, install=directory, aws=aws)
                 node.root.mkdir(parents=True)
@@ -106,7 +126,7 @@ class DlrStorageTests(unittest.TestCase):
                      patch("node.subprocess.run", side_effect=generate):
                     node.configure()
                 environment = read(node.root / "generated/sendium/environment.json")
-                self.assertEqual(environment["SENDIUM_DLR_STORAGE_BACKEND"], "file")
+                self.assertEqual(environment["SENDIUM_DLR_STORAGE_BACKEND"], storage)
                 self.assertFalse(any(key.startswith("SENDIUM_DLR_POSTGRESQL_") for key in environment))
                 self.assertTrue(any(key.endswith("effective-configuration.json") for key in aws.uploads))
 
@@ -150,7 +170,8 @@ class DlrStorageTests(unittest.TestCase):
     def test_invalid_or_non_sendium_file_dlr_settings_fail_before_aws_access(self):
         document = {"source": "sendium", "runIdentity": "gh-12345-1", "region": "local", "bucket": "bucket"}
         for changes in ({"dlrStorage": "disk"}, {"dlrStorage": "file", "source": "harness"},
-                        {"dlrStorage": "file", "benchmarkTarget": "kannel"}):
+                        {"dlrStorage": "file", "benchmarkTarget": "kannel"},
+                        {"dlrStorage": "memory", "source": "harness"}, {"dlrStorage": "memory", "benchmarkTarget": "kannel"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 Node({**document, **changes}, aws=object())
 

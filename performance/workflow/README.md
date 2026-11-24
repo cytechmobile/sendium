@@ -29,7 +29,7 @@ allows 25 top-level dispatch inputs (checked 2026-10-16). The form exposes 14 in
 | `application_runtime` | `jvm` | Sendium: `jvm` or `native`; leave `jvm` for Kannel, which uses its C runtime |
 | `application_branch` | blank | Sendium branch to resolve to an exact application SHA; blank uses the dispatch branch. Controller remains on the default branch. |
 | `storage_profile` | `memory/memory/memory` | Sendium pending/selected/routed: `memory/memory/memory`, `file/memory/memory`, `file/file/memory`, `file/memory/file`, or `file/file/file`. Leave the default for Kannel. |
-| `dlr_storage` | `postgresql` | Sendium DLR storage: `postgresql` or `file`. Leave the default for Kannel. |
+| `dlr_storage` | `postgresql` | Sendium DLR storage: `postgresql`, `file` or `memory`. Leave the default for Kannel. |
 | `ingress_mode` | `http` | Sendium: `http` or `smpp`; Kannel: HTTP only |
 | `sendium_instance_type` | `t4g.small` | Gateway instance type for either target; actual regional/type compatibility is preflight work |
 | `harness_instance_type` | `t4g.small` | Same as above |
@@ -139,18 +139,31 @@ and defaults to `postgresql`. With `file`, the gateway node creates a private `d
 `SENDIUM_DLR_STORAGE_FILE_PATH` for the application process. Traffic starts only after the
 `sendium-dlr-storage` readiness check reports `backend=file`. The effective configuration,
 `results.json` application metadata and Markdown summary record `dlrStorage`, and publication rejects
-results labelled with a different storage from the request. Compare a `file` run with a `postgresql`
-run that uses otherwise identical inputs. Kannel rejects Sendium's `file` choice. The selected
+results labelled with a different storage from the request. Compare runs using otherwise identical
+inputs. Kannel rejects Sendium's `file` and `memory` choices. The selected
 application revision must include the file DLR backend; choosing `file` does not retrofit older
 builds. The DLR files live on the temporary instance's root volume and are deleted with it.
 
-File-DLR runs provision no RDS instance, database secret, subnet group or parameter group.
+With `memory`, the gateway sets `SENDIUM_DLR_STORAGE_BACKEND=memory`, creates no DLR directory,
+and requires readiness to report `backend=memory` before traffic starts. Memory DLR state is
+process-local and disappears on restart, independently of any file-backed SMS stages.
+The selected application revision must implement memory DLR; this tooling does not retrofit it
+onto older applications. No new memory-capacity, retry-timing or workload controls are added.
+
+File- and memory-DLR runs provision no RDS instance, database secret, subnet group or parameter group.
 The controller skips PostgreSQL availability checks, the Sendium node reads no database secret
 and the generator emits no datasource settings or PostgreSQL credentials. Reports record
 `database.provisioned: false` and `resourceMetricsRequired: false`, state "No database provisioned",
 and omit the RDS resources section. Diagnostics still collect both EC2 nodes' resource evidence.
 PostgreSQL runs (including Kannel) retain their database, verified TLS and RDS metrics.
 The shared private network and CA bundle download are unchanged.
+
+To compare the memory implementation with file DLR, first merge this controller change to `main`.
+Dispatch **Performance Tests** from `main` with `application_branch=feat/334-memory-dlr`, keep
+`storage_profile`, runtime, ingress and workload identical, and vary only `dlr_storage=file` versus
+`dlr_storage=memory`. `storage_profile=memory/memory/memory` describes SMS stages, **not** the DLR backend.
+The request, effective configuration, measured/failed reports and permanent archive preserve the
+selected DLR backend. `disabled` is not a dispatch option in this update.
 
 To benchmark the filesystem-stage feature branch, first merge this workflow/controller change to
 `main`. Run **Performance Tests** using workflow branch `main`, set

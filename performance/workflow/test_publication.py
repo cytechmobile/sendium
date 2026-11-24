@@ -131,6 +131,27 @@ class PublicationTests(unittest.TestCase):
                 publish.validate(report, req)
                 self.assertIn("DLR storage: **file**", publish.fallback_markdown(report))
 
+    def test_memory_dlr_reports_preserve_backend_and_no_database(self):
+        for runtime in ("jvm", "native"):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                req = request({"application_runtime": runtime, "dlr_storage": "memory"})
+                report = publish.unavailable(req, "FIXTURE")
+                publish.validate(report, req)
+                self.assertEqual(report["configuration"]["application"]["dlrStorage"], "memory")
+                self.assertEqual(report["configuration"]["infrastructure"]["database"],
+                                 {"provisioned": False, "resourceMetricsRequired": False})
+                publish.publish(req, root, root, root, root, {}, {}, root / "published")
+                published = publish.read(root / "published/results.json")
+                publish.validate(published, req)
+                summary = (root / "published/summary.md").read_text(encoding="utf-8")
+                self.assertIn("DLR storage: **memory**", summary)
+                self.assertIn("No database provisioned", summary)
+                self.assertNotIn("Database resources (RDS)", summary)
+                published["configuration"]["application"]["dlrStorage"] = "file"
+                with self.assertRaisesRegex(ValueError, "Published DLR storage mismatch"):
+                    publish.validate(published, req)
+
     def test_mislabelled_dlr_storage_results_are_rejected(self):
         for requested, published in (("file", "postgresql"), ("postgresql", "file")):
             with self.subTest(requested=requested, published=published):

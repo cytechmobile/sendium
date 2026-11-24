@@ -69,7 +69,7 @@ class InputTests(unittest.TestCase):
 
     def test_dlr_storage_defaults_to_postgresql_and_accepts_file(self):
         field = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["dlr_storage"]
-        self.assertEqual(field["options"], ["postgresql", "file"])
+        self.assertEqual(field["options"], ["postgresql", "file", "memory"])
         self.assertEqual(field["default"], "postgresql")
         self.assertEqual(request()["preset"]["runtime"]["dlrStorage"], "postgresql")
         for runtime in ("jvm", "native"):
@@ -81,7 +81,7 @@ class InputTests(unittest.TestCase):
                         self.assertEqual(result["preset"]["runtime"]["dlrStorage"], "file")
 
     def test_dlr_storage_rejects_unknown_values_and_kannel(self):
-        for storage in ("memory", "disabled", "FILE", "", None):
+        for storage in ("ram", "disabled", "FILE", "", None):
             with self.subTest(storage=storage), self.assertRaises(ValueError):
                 request({"dlr_storage": storage})
         with self.assertRaisesRegex(ValueError, "Kannel cannot select Sendium file DLR storage"):
@@ -95,6 +95,17 @@ class InputTests(unittest.TestCase):
         for backend in ("memory", "file", "", None):
             with self.subTest(backend=backend), self.assertRaises(ValueError):
                 request({"pending_backend": backend})
+
+    def test_memory_dlr_selection_is_independent_of_runtime_ingress_and_sms_profile(self):
+        for runtime in ("jvm", "native"):
+            for ingress in ("http", "smpp"):
+                for profile in ("memory/memory/memory", "file/file/file"):
+                    with self.subTest(runtime=runtime, ingress=ingress, profile=profile):
+                        result = request({"dlr_storage": "memory", "application_runtime": runtime,
+                                          "ingress_mode": ingress, "storage_profile": profile})
+                        self.assertEqual(result["preset"]["runtime"]["dlrStorage"], "memory")
+        with self.assertRaises(ValueError):
+            request({"dlr_storage": "memory", "benchmark_target": "kannel"})
 
     def test_defaults_match_preset_and_dispatch_commit_is_independent_from_harness(self):
         result = request()

@@ -60,7 +60,7 @@ Parameters:
   DlrStorage:
     Type: String
     Default: postgresql
-    AllowedValues: [postgresql, file]
+    AllowedValues: [postgresql, file, memory]
   DatabaseInstanceType:
     Type: String
     Default: db.t4g.small
