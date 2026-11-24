@@ -111,7 +111,7 @@ class StandaloneOutboundPipelineTest {
             when(worker.isKeepOnRunning()).thenReturn(true);
             when(worker.acceptsMessages()).thenReturn(true);
             when(worker.getThreadCount()).thenReturn(1);
-            when(worker.submitPreparedCoordinated(any(), any(), anyBoolean())).thenAnswer(invocation -> {
+            when(worker.submitPrepared(any(), any(), anyBoolean())).thenAnswer(invocation -> {
                 message = invocation.getArgument(0);
                 calls.incrementAndGet();
                 var submission = mock(CoordinatedSmppSubmission.class);

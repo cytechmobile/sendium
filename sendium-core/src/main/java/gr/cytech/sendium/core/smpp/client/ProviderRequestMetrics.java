@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** Shared per configured provider, including across replacement worker instances. No per-message index. */
 @ApplicationScoped
 public class ProviderRequestMetrics {
-    enum Result {
+    public enum Result {
         ACCEPTED("accepted"), REJECTED("rejected"), TIMEOUT("timeout"),
         TRANSPORT_ERROR("transport_error"), PROTOCOL_ERROR("protocol_error");
 
@@ -34,7 +34,7 @@ public class ProviderRequestMetrics {
         this.registry = registry;
     }
 
-    Attempt start(String provider, boolean retry) {
+    public Attempt start(String provider, boolean retry) {
         Meters meters = providers.computeIfAbsent(provider, this::meters);
         (retry ? meters.retry : meters.initial).increment();
         meters.inFlight.incrementAndGet();
@@ -57,7 +57,7 @@ public class ProviderRequestMetrics {
     }
 
     /** Completion is guarded by the existing per-part response claim, not by another message map. */
-    static final class Attempt {
+    public static final class Attempt {
         private final Meters meters;
         private final Timer.Sample sample;
 
@@ -66,7 +66,7 @@ public class ProviderRequestMetrics {
             this.sample = sample;
         }
 
-        void complete(Result result) {
+        public void complete(Result result) {
             sample.stop(meters.timers.get(result));
             meters.inFlight.decrementAndGet();
         }

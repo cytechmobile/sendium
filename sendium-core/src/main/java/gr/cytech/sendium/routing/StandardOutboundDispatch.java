@@ -7,10 +7,9 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
-import gr.cytech.sendium.core.smpp.client.CoordinatedSmppSubmission;
-import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.worker.OutboundProvider;
 import gr.cytech.sendium.external.filter.FilterException;
 import gr.cytech.sendium.external.filter.FilterStatusCodes;
 
@@ -39,7 +38,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     private final StandardRoutingManager routing;
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
-    private final ConcurrentMap<SmppClientWorker<StandardMessage>, WorkerExecution> workerExecutors = new ConcurrentHashMap<>();
+    private final ConcurrentMap<OutboundProvider<StandardMessage>, WorkerExecution> workerExecutors = new ConcurrentHashMap<>();
     private final ConcurrentMap<WorkId, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
     private final Object completionLock = new Object();
     private boolean shuttingDown;
@@ -149,8 +148,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         return coordinator.takeFromRouted(destination, timeout);
     }
 
-    /** Runs an explicitly taken SMPP work item and carries its ownership through replacement attempts. */
-    public synchronized ProviderExecution submitToProvider(Routed<StandardMessage> work, SmppClientWorker<StandardMessage> worker)
+    /** Runs an explicitly taken provider work item and carries its ownership through replacement attempts. */
+    public synchronized ProviderExecution submitToProvider(Routed<StandardMessage> work, OutboundProvider<StandardMessage> worker)
             throws Exception {
         requireDispatching();
         if (!work.destination().equals(worker.getFullName())) {
@@ -165,7 +164,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
     }
 
     private CompletionStage<Void> scheduleAttempt(StandardMessage message,
-                                                   Supplier<SmppClientWorker<StandardMessage>> destination,
+                                                    Supplier<OutboundProvider<StandardMessage>> destination,
                                                     ProviderExecution execution, boolean replacement) {
         var attempt = new ProviderAttempt(message, destination, execution, replacement);
         execution.providerAttempts.add(attempt);
@@ -173,15 +172,15 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         return attempt.completed.minimalCompletionStage();
     }
 
-    private SmppClientWorker<StandardMessage> retryDestination(StandardMessage message) {
+    private OutboundProvider<StandardMessage> retryDestination(StandardMessage message) {
         try {
             RoutingLookupResult result = routing.lookupForLifecycle(message);
             if (result.getDestinations().size() != 1 ||
-                    !(result.getDestinations().getFirst() instanceof SmppClientWorker<?>)) {
+                    !(result.getDestinations().getFirst() instanceof OutboundProvider<?>)) {
                 throw new OutboundStorageException(OutboundStage.Role.ROUTER_QUEUE,
-                        OutboundStorageException.Reason.UNAVAILABLE, "No single SMPP destination for retry");
+                        OutboundStorageException.Reason.UNAVAILABLE, "outboundRetry|error|reason:noSingleProviderDestination");
             }
-            return (SmppClientWorker<StandardMessage>) result.getDestinations().getFirst();
+            return (OutboundProvider<StandardMessage>) result.getDestinations().getFirst();
         } catch (IOException failure) {
             throw new java.util.concurrent.CompletionException(failure);
         }
@@ -279,7 +278,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
     }
 
-    private synchronized WorkerExecution executionFor(SmppClientWorker<StandardMessage> worker) {
+    private synchronized WorkerExecution executionFor(OutboundProvider<StandardMessage> worker) {
         if (closed) {
             throw new IllegalStateException("Outbound dispatch is closed");
         }
@@ -311,14 +310,14 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
     /** Owned attempts wait once in FIFO order; preparation threads continue directly when capacity frees. */
     private final class WorkerExecution {
-        private final SmppClientWorker<StandardMessage> worker;
+        private final OutboundProvider<StandardMessage> worker;
         private final int threads;
         private final ArrayDeque<ProviderAttempt> waiting = new ArrayDeque<>();
         private final ThreadPoolExecutor executor;
         private int running;
         private ScheduledFuture<?> wakeup;
 
-        private WorkerExecution(SmppClientWorker<StandardMessage> worker) {
+        private WorkerExecution(OutboundProvider<StandardMessage> worker) {
             this.worker = worker;
             threads = Math.max(1, worker.getThreadCount());
             executor = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
@@ -414,15 +413,15 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
     private final class ProviderAttempt implements Runnable {
         private final StandardMessage message;
-        private final Supplier<SmppClientWorker<StandardMessage>> resolveDestination;
+        private final Supplier<OutboundProvider<StandardMessage>> resolveDestination;
         private final ProviderExecution execution;
         private final boolean replacement;
         private final CompletableFuture<Void> completed = new CompletableFuture<>();
-        private volatile SmppClientWorker<StandardMessage> worker;
+        private volatile OutboundProvider<StandardMessage> worker;
         private AttemptState state = AttemptState.QUEUED;
         private Throwable failure;
 
-        private ProviderAttempt(StandardMessage message, Supplier<SmppClientWorker<StandardMessage>> destination,
+        private ProviderAttempt(StandardMessage message, Supplier<OutboundProvider<StandardMessage>> destination,
                                   ProviderExecution execution, boolean replacement) {
             this.message = message;
             this.resolveDestination = destination;
@@ -485,8 +484,8 @@ public final class StandardOutboundDispatch implements AutoCloseable {
                 state = AttemptState.PREPARING;
             }
             try {
-                var submission = worker.submitPreparedCoordinated(message, (payload, policy) ->
-                        scheduleAttempt(payload, policy == SmppClientWorker.NackHandlePolicy.RETRY_ROUTER ?
+                var submission = worker.submitPrepared(message, (payload, router) ->
+                        scheduleAttempt(payload, router ?
                                 () -> retryDestination(payload) : () -> worker, execution, true), replacement);
                 execution.submissions.add(submission);
                 synchronized (this) {
@@ -512,7 +511,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
 
     /** Runtime attempt handles remain associated with the parent's recorded work, never new admissions. */
     public static final class ProviderExecution {
-        private final List<CoordinatedSmppSubmission<StandardMessage>> submissions = new CopyOnWriteArrayList<>();
+        private final List<OutboundProvider.Submission> submissions = new CopyOnWriteArrayList<>();
         private final List<ProviderAttempt> providerAttempts = new CopyOnWriteArrayList<>();
         private CompletionStage<Void> completion;
         private CompletableFuture<Void> completionMonitor;
@@ -538,7 +537,7 @@ public final class StandardOutboundDispatch implements AutoCloseable {
         }
 
         public void retryPendingHandoffs() {
-            List.copyOf(submissions).forEach(CoordinatedSmppSubmission::retryPendingHandoffs);
+            List.copyOf(submissions).forEach(OutboundProvider.Submission::retryPendingHandoffs);
             List.copyOf(providerAttempts).forEach(ProviderAttempt::retry);
         }
 

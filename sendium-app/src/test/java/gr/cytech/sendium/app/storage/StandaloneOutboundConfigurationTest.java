@@ -5,6 +5,7 @@ import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import gr.cytech.sendium.core.worker.SimulatorWorker;
 import gr.cytech.sendium.routing.RoutingLookupResult;
 import gr.cytech.sendium.routing.StandardRoutingManager;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -25,6 +26,16 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class StandaloneOutboundConfigurationTest {
+    @Test
+    void simulatorIsAcceptedAsALifecycleAwareDestination() throws Exception {
+        var routing = mock(StandardRoutingManager.class);
+        var simulator = mock(SimulatorWorker.class);
+        var result = new RoutingLookupResult(List.of(simulator), true);
+        when(routing.lookupForLifecycle(any())).thenReturn(result);
+        assertThat(new StandaloneOutboundPipeline.LifecycleRouting(routing)
+                .lookupForLifecycle(new StandardMessage())).isSameAs(result);
+    }
+
     @Test
     void invalidMemoryBoundsFailBeforeReturningAnAdmissionCoordinator() {
         for (String setting : List.of("pending.capacity", "router-queue.capacity", "selection-batch-size")) {

@@ -36,6 +36,7 @@ import gr.cytech.sendium.core.smpp.util.VFGRCharset;
 import gr.cytech.sendium.core.worker.DlrService;
 import gr.cytech.sendium.core.worker.DlrStorageException;
 import gr.cytech.sendium.core.worker.ForwardMoService;
+import gr.cytech.sendium.core.worker.OutboundProvider;
 import gr.cytech.sendium.core.worker.Tracker;
 import gr.cytech.sendium.core.worker.WorkerType;
 import gr.cytech.sendium.external.HealthCheckReport;
@@ -78,7 +79,8 @@ import static gr.cytech.sendium.core.smpp.client.SmppClientWorker.TYPE_SMPP_CLIE
 
 @Dependent
 @WorkerType(TYPE_SMPP_CLIENT)
-public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWorker<M> {
+public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWorker<M>
+        implements OutboundProvider<M> {
     public static final String TYPE_SMPP_CLIENT = "smppclient";
     public static final String CHARSET_HEX = "HEX";
 
@@ -552,6 +554,13 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
         }
 
         return null;
+    }
+
+    @Override
+    public CoordinatedSmppSubmission<M> submitPrepared(M message,
+            OutboundProvider.Retry<M> retry, boolean retryAttempt) throws Exception {
+        return submitPreparedCoordinated(message,
+                (payload, policy) -> retry.retry(payload, policy == NackHandlePolicy.RETRY_ROUTER), retryAttempt);
     }
 
     /** Applies worker preparation before an initial or replacement provider attempt. */

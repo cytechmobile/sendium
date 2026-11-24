@@ -12,7 +12,11 @@ committed selections without reselection, but still repeats routing. **`file/mem
 Power-loss durability and exactly-once delivery are not guaranteed.
 See [Filesystem Pending Storage](16-filesystem-pending-storage.md) for the as-built file architecture,
 deployment, stopped-instance backup/restore and rollback procedures.
-The contracts are message-neutral; the current standalone provider adapter executes SMPP-client submissions.
+The contracts are message-neutral; standalone dispatch executes lifecycle-aware providers through
+`OutboundProvider`, currently SMPP clients and the opt-in [simulator](09-configuration-reference.md#simulated-outbound-delivery-test-only).
+Providers return a completion handle covering required tracking handoffs and support retrying those
+handoffs without repeating completed requests. Transport-specific retry statuses stay inside the provider;
+dispatch owns worker/router retries, bounded execution and pending-source completion.
 The working lifecycle comes from [#338](https://github.com/cytechmobile/sendium/issues/338), with pending-source
 contracts, multipart admission and the [versioned CBOR representation](15-pending-record-schema.md) refined by
 [#343](https://github.com/cytechmobile/sendium/issues/343), under [#337](https://github.com/cytechmobile/sendium/issues/337).
