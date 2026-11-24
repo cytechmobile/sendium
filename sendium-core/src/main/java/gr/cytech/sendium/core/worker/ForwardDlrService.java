@@ -7,8 +7,10 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.arc.properties.IfBuildProperty;
 import io.quarkus.scheduler.Scheduled;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,13 +39,16 @@ public class ForwardDlrService {
     private static final int DUE_BATCH_SIZE = 500;
     private static final int MAX_IN_FLIGHT_PER_HOST = 10;
     private static final int MAX_ATTEMPTS = 10;
-    private static final long RETRY_INTERVAL_MS = Duration.ofHours(1).toMillis();
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
     private static final int DLR_DELIVERED = 1;
     private static final int DLR_FAILED = 2;
     private static final int DLR_BUFFERED = 4;
     private static final int DLR_SMSC_SUBMIT = 8;
+
+    @Inject
+    @ConfigProperty(name = "sendium.dlr.http.retry-interval", defaultValue = "1H")
+    Duration retryInterval = Duration.ofHours(1);
 
     private final DlrService dlrService;
     private final HttpClient httpClient;
@@ -58,6 +63,23 @@ public class ForwardDlrService {
     ForwardDlrService(DlrService dlrService, HttpClient httpClient) {
         this.dlrService = dlrService;
         this.httpClient = httpClient;
+    }
+
+    @PostConstruct
+    void initialize() {
+        if (dlrService.isProcessingDisabled()) {
+            return;
+        }
+        try {
+            if (retryInterval == null || retryInterval.isNegative() || retryInterval.toMillis() < 1) {
+                throw new IllegalArgumentException("dlrCallbackConfig|error|setting:sendium.dlr.http.retry-interval" +
+                        "|reason:nonPositiveMillisecondInterval");
+            }
+            Math.addExact(System.currentTimeMillis(), retryInterval.toMillis());
+        } catch (ArithmeticException overflow) {
+            throw new IllegalArgumentException("dlrCallbackConfig|error|setting:sendium.dlr.http.retry-interval" +
+                    "|reason:intervalOverflow", overflow);
+        }
     }
 
     /** CDI binds automatically; direct construction can opt in without changing callback behavior. */
@@ -218,7 +240,7 @@ public class ForwardDlrService {
             boolean updated;
             if (attempt < MAX_ATTEMPTS) {
                 updated = dlrService.retryDelivery(
-                        gatewayMsgId, attempt, result, System.currentTimeMillis() + RETRY_INTERVAL_MS);
+                        gatewayMsgId, attempt, result, Math.addExact(System.currentTimeMillis(), retryInterval.toMillis()));
             } else {
                 updated = dlrService.failDelivery(gatewayMsgId, attempt, result);
             }

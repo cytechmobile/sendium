@@ -279,13 +279,25 @@ rejection also produces `failed`. `errorCode` carries the recorded provider erro
 absent. Requests use `Content-Type: application/json`. The callback URL is used as supplied, without
 Kannel placeholder substitution or callback-host preapproval. Receipt callbacks require DLR persistence
 to be enabled. Both formats share the existing delivery policy: a 5-second request timeout, any 2xx
-response completes the attempt, other responses/transport failures retry after one hour, and attempt
+response completes the attempt, other responses/transport failures retry after the configured interval (one hour by default), and attempt
 10 failure marks delivery `FAILED`. Redirects are not followed. Receivers must handle duplicate
 callbacks idempotently by `messageId`.
 
 The initial V1 schema includes `http_callback_format`, defaulting Kannel writers to `KANNEL_GET`;
 native callbacks persist `JSON_POST`. The format survives provider-event batching, process restart,
 and callback retries.
+
+### HTTP callback retry interval
+
+| Property | Environment variable | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `sendium.dlr.http.retry-interval` | `SENDIUM_DLR_HTTP_RETRY_INTERVAL` | `1H` | Startup-configured delay before the next retry of a failed HTTP callback, for both Kannel GET and native JSON POST callbacks. |
+
+For example, `SENDIUM_DLR_HTTP_RETRY_INTERVAL=5S` schedules subsequent retries five seconds after a failed attempt. The every-second dispatcher and in-flight work can add delay; this is not a guaranteed callback deadline. Short intervals increase callback traffic during receiver failures.
+
+When HTTP callback processing is enabled, the interval must be positive, at least one millisecond, and representable as a future millisecond timestamp; invalid or overflowing values fail startup. Startup-disabled handling does not use this setting.
+
+Changing the setting affects retry timestamps written after subsequent failures. It does not rewrite already scheduled receipt due times or reset attempts. The ten-attempt limit, five-second request timeout, per-host concurrency limits, attempt fencing and SMPP retry behavior are unchanged.
 
 ## Retention
 
@@ -319,7 +331,7 @@ The table describes PostgreSQL. File storage keeps the same ingress, batching, f
 | Terminal HTTP/SMPP delivery | The common payload and exact provider outcome remain in one row until fenced completion. | Delivery is at-least-once; acknowledgement can be received before the final delete commits. |
 | Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. HTTP batch claims and SMPP attempt starts use a database lease so active replicas cannot start the same delivery. | An attempt that outlives its lease can overlap a replacement. |
 | Multipart submission | Segments and aggregate payloads remain in memory. After provider acceptance, the aggregate DLR row retains the original gateway part IDs needed for downstream receipt delivery. | Multipart assembly and its pending timers are process-local and are not reconstructed after restart. |
-| HTTP DLR callback retry | Pending state, attempt count, next-attempt timestamp, and active lease are durable. Every second, the dispatcher checks for up to 500 due rows and atomically claims them with locked-row skipping. Batches do not overlap; each callback uses its own virtual thread, with at most 10 callbacks in flight per host. Failures retry after one hour and attempt 10 failures become `FAILED`. | The batch limit is not a guaranteed delivery rate. A request accepted before a crash or failed completion update can be repeated. A running batch delays the next due-callback check, and an attempt that outlives its lease can overlap a replacement. |
+| HTTP DLR callback retry | Pending state, attempt count, next-attempt timestamp, and active lease are durable. Every second, the dispatcher checks for up to 500 due rows and atomically claims them with locked-row skipping. Batches do not overlap; each callback uses its own virtual thread, with at most 10 callbacks in flight per host. Failures retry after the configured interval (one hour by default) and attempt 10 failures become `FAILED`. | The batch limit is not a guaranteed delivery rate. A request accepted before a crash or failed completion update can be repeated. A running batch delays the next due-callback check, and an attempt that outlives its lease can overlap a replacement. |
 | SMPP DLR delivery | One leased attempt covers every generated receipt part and completes only after matching successful `deliver_sm_resp` PDUs for all parts. Pending rows are enqueued when the same `system_id` binds. | Timeout, `generic_nack`, wrong/non-OK response, enqueue/send failure, or session closure releases the attempt. Replay is bind-driven rather than periodic, and partial success is not checkpointed. |
 | Database files | The Quick Start named volume survives normal container replacement and `docker compose down`. | Volume deletion, host-disk loss, and disaster recovery require backups or external PostgreSQL replication managed by the operator. |
 

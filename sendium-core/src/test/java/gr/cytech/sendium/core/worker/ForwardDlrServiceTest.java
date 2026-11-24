@@ -13,8 +13,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
@@ -22,6 +24,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -29,8 +32,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -81,6 +86,84 @@ class ForwardDlrServiceTest {
 
         verify(dlrService).claimDueHttpDeliveries(500);
         verifyNoInteractions(httpClient);
+    }
+
+    @ParameterizedTest
+    @EnumSource(HttpCallbackFormat.class)
+    void configuredIntervalControlsNextRetry(HttpCallbackFormat format) throws Exception {
+        setRetryInterval(Duration.ofSeconds(5));
+        initializeRetryInterval();
+        verify(dlrService, never()).retryDelivery(anyString(), anyInt(), anyString(), anyLong());
+        var due = dueState("https://example.test/callback");
+        due.setHttpCallbackFormat(format);
+        dueAttempt(due, 2);
+        respondWith(503);
+        when(dlrService.retryDelivery(eq(GATEWAY_ID), eq(2), eq("http_failure"), anyLong())).thenReturn(true);
+        long beforeFailure = System.currentTimeMillis();
+
+        service.dispatchDueDeliveries();
+
+        var nextAttempt = ArgumentCaptor.forClass(Long.class);
+        verify(dlrService).retryDelivery(eq(GATEWAY_ID), eq(2), eq("http_failure"), nextAttempt.capture());
+        assertThat(nextAttempt.getValue()).isBetween(beforeFailure + 5_000, System.currentTimeMillis() + 5_000);
+        assertThat(due.getHttpCallbackFormat()).isEqualTo(format);
+        verify(dlrService, never()).completeDelivery(anyString(), anyInt());
+    }
+
+    static Stream<Duration> invalidRetryIntervals() {
+        return Stream.of(null, Duration.ZERO, Duration.ofMillis(-1), Duration.ofNanos(1),
+                Duration.ofMillis(Long.MAX_VALUE), Duration.ofSeconds(Long.MAX_VALUE));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidRetryIntervals")
+    void invalidRetryIntervalsFailInitialization(Duration interval) {
+        setRetryInterval(interval);
+        assertThatThrownBy(this::initializeRetryInterval).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("setting:sendium.dlr.http.retry-interval");
+        verifyNoInteractions(httpClient);
+        verify(dlrService, never()).retryDelivery(anyString(), anyInt(), anyString(), anyLong());
+    }
+
+    @Test
+    void disabledProcessingDoesNotValidateOrUseUnusedRetryTiming() {
+        when(dlrService.isProcessingDisabled()).thenReturn(true);
+        setRetryInterval(Duration.ZERO);
+        initializeRetryInterval();
+        service.dispatchDueDeliveries();
+        verify(dlrService, never()).claimDueHttpDeliveries(anyInt());
+        verifyNoInteractions(httpClient);
+    }
+
+    // On the baseline, leave the fixed delay/no initialization unchanged so the tests
+    // fail on the observed retry timestamp or missing validation, not a missing Java API.
+    private void setRetryInterval(Duration interval) {
+        try {
+            var field = ForwardDlrService.class.getDeclaredField("retryInterval");
+            field.setAccessible(true);
+            field.set(service, interval);
+        } catch (NoSuchFieldException beforeConfiguration) {
+            // Exercise the baseline's hard-coded behavior.
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError("HTTP callback retry interval must be configurable", failure);
+        }
+    }
+
+    private void initializeRetryInterval() {
+        try {
+            var initialize = ForwardDlrService.class.getDeclaredMethod("initialize");
+            initialize.setAccessible(true);
+            initialize.invoke(service);
+        } catch (NoSuchMethodException beforeValidation) {
+            // The baseline has no retry-setting validation.
+        } catch (InvocationTargetException failure) {
+            if (failure.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new AssertionError(failure.getCause());
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError("HTTP callback retry timing must be validated at startup", failure);
+        }
     }
 
     @Test
