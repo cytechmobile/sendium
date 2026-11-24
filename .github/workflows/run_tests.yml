@@ -1,20 +1,18 @@
 name: Run Tests
 
 on:
-   push:
-   pull_request:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: SendiumTests-${{github.ref}}
+  group: SendiumTests-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   classify:
-    # A release branch push is followed by a PR run; main always gets full CI.
-    if: >-
-      !(github.event_name == 'push' &&
-        github.actor == 'cytech-release-bot[bot]' &&
-        startsWith(github.ref, 'refs/heads/release-please--'))
+    # Only main pushes run automatically; PRs validate their merge ref, including release branches.
     permissions:
       contents: read
       pull-requests: read
