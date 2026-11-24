@@ -102,6 +102,24 @@ Check:
 - `QUARKUS_LOG_FILE_PATH`, `QUARKUS_LOG_FILE_SMPPCLIENT_PATH`, and `QUARKUS_LOG_FILE_SMPPSERVER_PATH` point to valid paths.
 - Console logging is enabled if you expect logs in `docker logs`.
 
+## Maven Waits on JBoss Repository Metadata
+
+Inherited dependency POMs introduce JBoss repositories. Maven may retry their
+optional `/.meta/prefixes.txt` discovery requests during an outage, then continue
+with warnings because the prefix files are not required artifacts.
+
+`.mvn/maven.config` disables only automatic prefix-file discovery for the four
+JBoss repository IDs observed in builds. Actual dependency downloads remain
+enabled, as does prefix discovery for Maven Central and other repositories.
+This does not enable dependency caching or offline mode, and actual artifact
+requests can still be delayed by an outage.
+
+The mitigation is reversible: remove the corresponding
+`aether.remoteRepositoryFilter.prefixes.resolvePrefixFiles.<repositoryId>=false`
+lines to restore default discovery. For a one-off check, pass the same property
+with `=true` on the Maven command line. An outage being resolved does not itself
+require reverting; reassess if those repositories provide useful prefix files.
+
 ## Asking For Help
 
 Before opening a public issue or discussion, remove credentials, system IDs, IP addresses, phone numbers, and message content from configs and logs.
