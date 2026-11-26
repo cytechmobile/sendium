@@ -76,3 +76,11 @@ jobs:
             org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
             -Dexec.classpathScope=test \
             -Dexec.mainClass=utils.NativeE2eSmoke
+          # New modes pass neither DLR database credentials nor a DLR file volume.
+          # Run sequentially because the harness uses fixed HTTP/SMPP ports.
+          for backend in memory disabled; do
+            SENDIUM_E2E_DLR_BACKEND="$backend" ./mvnw -B -pl sendium-core -DskipTests test-compile \
+              org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
+              -Dexec.classpathScope=test \
+              -Dexec.mainClass=utils.NativeE2eSmoke
+          done

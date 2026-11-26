@@ -3,6 +3,8 @@ package gr.cytech.sendium.core.worker;
 import gr.cytech.sendium.conf.SendiumConfigurationProvider;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.OutboundDlrPolicy;
+import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.queue.Queue;
 import gr.cytech.sendium.core.smpp.client.ProviderRequestMetrics;
 import gr.cytech.sendium.external.WorkerResourceProvider;
@@ -20,9 +22,11 @@ import utils.OutboundIngressFixture;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -40,6 +44,59 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class SimulatorWorkerTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void postFilterDlrGuardPreventsSimulatorEffects(boolean disabled) throws Exception {
+        var tracker = tracker();
+        var worker = worker("delivered", "true", tracker);
+        var owner = new MemoryDlrReservations(1);
+        var occupied = new SourceId(UUID.randomUUID());
+        owner.reserveAdmission(occupied, message());
+        var candidate = message();
+        candidate.dlrReturnMetadata = null;
+        var source = new SourceId(UUID.fromString(candidate.serial));
+        worker.preparation = prepared -> prepared.dlrReturnMetadata = message().dlrReturnMetadata;
+        OutboundDlrPolicy policy = disabled ? OutboundDlrPolicy.DISABLED : owner;
+
+        assertThatThrownBy(() -> worker.submitPrepared(candidate, (payload, router) -> null, false, prepared -> {
+            assertThat(prepared.dlrReturnMetadata).isNotNull();
+            policy.prepareProvider(prepared.serial, Set.of(source));
+        })).isInstanceOf(OutboundDlrPolicy.Blocked.class);
+        verify(tracker, never()).handoffProviderAccepted(any(), any(), any());
+        verify(tracker, never()).createAndEnqueueDlrAsync(anyInt(), any(), any(), any(), any(), any(), anyInt(), any(), any());
+        assertThat(candidate.extrid).isNull();
+        assertThat(owner.usedCapacity()).isEqualTo(1);
+
+        if (!disabled) {
+            owner.releaseOutbound(Set.of(occupied));
+            worker.submitPrepared(candidate, (payload, router) -> null, true,
+                    prepared -> owner.prepareProvider(prepared.serial, Set.of(source)))
+                    .completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            verify(tracker).handoffProviderAccepted(any(), any(), any());
+            assertThat(owner.usedCapacity()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void providersWithoutPostFilterProtectionFailExplicitly() {
+        OutboundProvider<StandardMessage> unsupported = new OutboundProvider<>() {
+            @Override
+            public String getFullName() { return "unsupported"; }
+            @Override
+            public boolean isKeepOnRunning() { return true; }
+            @Override
+            public boolean isPause() { return false; }
+            @Override
+            public int getThreadCount() { return 1; }
+            @Override
+            public Submission submitPrepared(StandardMessage message, Retry<StandardMessage> retry, boolean retryAttempt) {
+                throw new AssertionError("Unguarded provider submission must not be used");
+            }
+        };
+        assertThatThrownBy(() -> unsupported.submitPrepared(message(), (payload, router) -> null, false, ignored -> { }))
+                .hasMessageContaining("providerDoesNotProtectPreparation");
+    }
+
     @Test
     void coordinatedDispatchRetainsSourceUntilReceiptHandoffFinishes() throws Exception {
         var tracker = tracker();
@@ -233,6 +290,13 @@ class SimulatorWorkerTest {
     }
 
     private static final class TestSimulator extends SimulatorWorker {
+        private Consumer<StandardMessage> preparation = ignored -> { };
+
+        @Override
+        public void checkBeforeDoMessageFilters(StandardMessage message) {
+            preparation.accept(message);
+        }
+
         void attach(Tracker<StandardMessage> tracker) {
             messageTracker = tracker;
         }

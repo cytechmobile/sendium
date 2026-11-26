@@ -19,8 +19,12 @@ import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
 import gr.cytech.sendium.core.storage.file.FileRoutedWorkStore;
 import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.internal.IndexedMultipartSource;
+import gr.cytech.sendium.core.storage.memory.MemoryRoutedWorkStore;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
+import gr.cytech.sendium.util.MessageTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -38,6 +42,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.INVALID_TRANSITION;
@@ -50,15 +55,18 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
  * Handoff waits and callbacks on returned completion stages never run under the coordinator lock.
  */
 public final class DefaultOutboundCoordinator<M extends StandardMessage> implements OutboundCoordinator<M> {
+    private static final Logger logger = LoggerFactory.getLogger(DefaultOutboundCoordinator.class);
     private final PendingMessageStore<M> pending;
     private final SelectedRouterStore<M> router;
     private final RoutedWorkStore<M> routed;
+    private final OutboundDlrPolicy dlrPolicy;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final Map<SelectionId, Context<M>> selections = new HashMap<>();
     private final Map<SourceId, Context<M>> sourceSelections = new HashMap<>();
     private final Map<WorkId, Execution<M>> executions = new HashMap<>();
     private final Set<Execution<M>> pendingReturns = new HashSet<>();
+    private final Map<String, OutboundDlrPolicy.BlockReason> blockedDestinations = new HashMap<>();
     private final int recoveryBatchSize;
     private final Clock recoveryClock;
     private final Supplier<ScheduledExecutorService> recoverySchedulers;
@@ -73,19 +81,31 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
 
     public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
                                       int recoveryBatchSize) {
+        this(pending, router, routed, recoveryBatchSize, OutboundDlrPolicy.UNRESTRICTED);
+    }
+
+    public DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
+                                      int recoveryBatchSize, OutboundDlrPolicy dlrPolicy) {
         this(pending, router, routed, recoveryBatchSize, Clock.systemUTC(), () ->
                 Executors.newSingleThreadScheduledExecutor(task -> {
                     var thread = new Thread(task, "outbound-pending-recovery");
                     thread.setDaemon(true);
                     return thread;
-                }));
+                }), dlrPolicy);
     }
 
     DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
                                int recoveryBatchSize, Clock recoveryClock, Supplier<ScheduledExecutorService> recoverySchedulers) {
+        this(pending, router, routed, recoveryBatchSize, recoveryClock, recoverySchedulers, OutboundDlrPolicy.UNRESTRICTED);
+    }
+
+    private DefaultOutboundCoordinator(PendingMessageStore<M> pending, SelectedRouterStore<M> router, RoutedWorkStore<M> routed,
+                                       int recoveryBatchSize, Clock recoveryClock,
+                                       Supplier<ScheduledExecutorService> recoverySchedulers, OutboundDlrPolicy dlrPolicy) {
         this.pending = Objects.requireNonNull(pending, "pending");
         this.router = Objects.requireNonNull(router, "router");
         this.routed = Objects.requireNonNull(routed, "routed");
+        this.dlrPolicy = Objects.requireNonNull(dlrPolicy, "dlrAdmission|error|reason:missingPolicy");
         if (recoveryBatchSize <= 0) {
             throw new IllegalArgumentException("outboundConfiguration|error|reason:nonPositiveRecoveryBatchSize");
         }
@@ -115,6 +135,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                     filePending.requireRoutedBackend(routed.status().durable());
                 }
                 reconcileTerminalRouted();
+                restoreAcceptedReservations();
                 lifecycle = Lifecycle.RUNNING;
                 if (pending.status().durable()) {
                     recoveryScheduler = Objects.requireNonNull(recoverySchedulers.get(), "outboundStartup|error|reason:missingRecoveryScheduler");
@@ -214,6 +235,54 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         }
     }
 
+    private void restoreAcceptedReservations() {
+        if (!dlrPolicy.requiresRecoveryReservations()) {
+            return;
+        }
+        long count = 0;
+        SourceId after = null;
+        while (true) {
+            var page = pending.sourcesAfter(after, recoveryBatchSize);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (SourceId source : page) {
+                if (acceptedRequiresDlr(source)) {
+                    count = Math.incrementExact(count);
+                }
+                after = source;
+            }
+        }
+        // Empty coordinators may share an existing policy (embedded callers). They
+        // have no recovered obligations and must not reinitialize that owner's ledger.
+        if (count == 0 || !dlrPolicy.beginRecovery(count)) {
+            return;
+        }
+        after = null;
+        long restored = 0;
+        while (true) {
+            var page = pending.sourcesAfter(after, recoveryBatchSize);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (SourceId source : page) {
+                if (acceptedRequiresDlr(source)) {
+                    dlrPolicy.restoreAccepted(source);
+                    restored = Math.incrementExact(restored);
+                }
+                after = source;
+            }
+        }
+        if (restored != count) {
+            throw invalid(Role.PENDING, "dlrRecovery|error|reason:backlogChangedDuringRestoration");
+        }
+    }
+
+    private boolean acceptedRequiresDlr(SourceId source) {
+        return pending.find(source).orElseThrow(() ->
+                invalid(Role.PENDING, "dlrRecovery|error|reason:acceptedSourceNotRetained")).dlrReturnMetadata != null;
+    }
+
     @Override
     public void beginShutdown() {
         lock.lock();
@@ -241,15 +310,17 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         lock.lock();
         try {
             requireRunning(Role.PENDING);
-            if (sourceSelections.containsKey(source)) {
-                return source;
-            }
-            SourceId accepted = held ? pending.admitHeld(source, message) : pending.admit(source, message);
-            if (!source.equals(accepted)) {
-                throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
-                        "Pending admission did not confirm the requested source handle");
-            }
-            return accepted;
+            return admitProtected(source, message, () -> {
+                if (sourceSelections.containsKey(source)) {
+                    return source;
+                }
+                SourceId accepted = held ? pending.admitHeld(source, message) : pending.admit(source, message);
+                if (!source.equals(accepted)) {
+                    throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
+                            "outboundAdmission|error|reason:sourceHandleNotConfirmed");
+                }
+                return accepted;
+            });
         } finally {
             lock.unlock();
         }
@@ -268,20 +339,46 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         lock.lock();
         try {
             requireRunning(Role.PENDING);
-            MultipartMembership accepted;
-            if (sourceSelections.containsKey(source)) {
-                accepted = pending.findMultipart(source)
-                        .orElseThrow(() -> invalid(Role.PENDING, "Multipart source is no longer retained"));
-            } else {
-                accepted = pending.admitPart(source, message, timeout);
-            }
-            if (accepted == null || !source.equals(accepted.source())) {
-                throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
-                        "Pending admission did not confirm multipart source membership");
-            }
-            return accepted;
+            return admitProtected(source, message, () -> {
+                MultipartMembership accepted;
+                if (sourceSelections.containsKey(source)) {
+                    accepted = pending.findMultipart(source)
+                            .orElseThrow(() -> invalid(Role.PENDING, "outboundAdmission|error|reason:multipartSourceNotRetained"));
+                } else {
+                    accepted = pending.admitPart(source, message, timeout);
+                }
+                if (accepted == null || !source.equals(accepted.source())) {
+                    throw new OutboundStorageException(Role.PENDING, OutboundStorageException.Reason.OWNERSHIP_CONFLICT,
+                            "outboundAdmission|error|reason:multipartMembershipNotConfirmed");
+                }
+                return accepted;
+            });
         } finally {
             lock.unlock();
+        }
+    }
+
+    private <T> T admitProtected(SourceId source, M message, Supplier<T> admission) {
+        var reservation = Objects.requireNonNull(dlrPolicy.reserveAdmission(source, message),
+                "dlrAdmission|error|reason:missingReservation");
+        try {
+            return admission.get();
+        } catch (RuntimeException | Error failure) {
+            if (reservation != OutboundDlrPolicy.Reservation.UNCHANGED) {
+                try {
+                    // An exception may follow publication. Only a ready store can establish absence.
+                    // No memory-owner lock is held during these reads.
+                    if (pending.status().state() == OutboundStage.State.READY &&
+                            pending.find(source).isEmpty() && pending.status().state() == OutboundStage.State.READY) {
+                        reservation.rollback();
+                    }
+                } catch (RuntimeException | Error readbackFailure) {
+                    if (readbackFailure != failure) {
+                        failure.addSuppressed(readbackFailure);
+                    }
+                }
+            }
+            throw failure;
         }
     }
 
@@ -419,7 +516,12 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                 var returns = pendingReturns.iterator();
                 while (returns.hasNext()) {
                     Execution<M> execution = returns.next();
-                    routed.release(execution.take);
+                    if (execution.deferring) {
+                        routed.defer(execution.take);
+                        retireDeferred(execution);
+                    } else {
+                        routed.release(execution.take);
+                    }
                     execution.take = null;
                     returns.remove();
                 }
@@ -447,6 +549,18 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
                         pendingReturns.remove(execution);
                         throw unavailable(Role.ROUTER_QUEUE, "Retry the unfinished routing transition before dispatch");
                     }
+                    try {
+                        protectProvider(execution.context, taken.message());
+                    } catch (OutboundDlrPolicy.Blocked blocked) {
+                        execution.deferring = true;
+                        pendingReturns.add(execution);
+                        routed.defer(taken);
+                        retireDeferred(execution);
+                        execution.take = null;
+                        execution.exposed = false;
+                        pendingReturns.remove(execution);
+                        return Optional.empty();
+                    }
                     execution.exposed = true;
                     return next;
                 }
@@ -457,6 +571,80 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             }
         } finally {
             lock.unlock();
+        }
+    }
+
+    @Override
+    public boolean enforcesDlrPolicy(OutboundDlrPolicy policy) {
+        return dlrPolicy == policy && (policy == OutboundDlrPolicy.UNRESTRICTED ||
+                routed instanceof FileRoutedWorkStore || routed instanceof MemoryRoutedWorkStore<?>);
+    }
+
+    @Override
+    public Optional<Consumer<M>> providerPreparation(WorkId work) {
+        Objects.requireNonNull(work, "dlrProvider|error|reason:missingWork");
+        if (dlrPolicy == OutboundDlrPolicy.UNRESTRICTED) {
+            return Optional.empty();
+        }
+        return Optional.of(message -> {
+            lock.lock();
+            try {
+                requireActive(Role.ROUTED_WORK);
+                var execution = execution(work);
+                if (!execution.exposed || execution.take == null || execution.context.destinationCompleted) {
+                    throw invalid(Role.ROUTED_WORK, "dlrProvider|error|reason:executionNotActive");
+                }
+                protectProvider(execution.context, message);
+            } finally {
+                lock.unlock();
+            }
+        });
+    }
+
+    private void protectProvider(Context<M> context, M message) {
+        if (dlrPolicy == OutboundDlrPolicy.UNRESTRICTED) {
+            return;
+        }
+        identifyDlrSources(context);
+        // Preserve per-ingress counting for mixed multipart requests. If filters introduce
+        // a receipt where no source originally requested one, protect the contributing set.
+        Set<SourceId> required = context.dlrSources.isEmpty() && message.dlrReturnMetadata != null ?
+                context.sources : context.dlrSources;
+        try {
+            dlrPolicy.prepareProvider(message.serial, required, context.dlrSources);
+            context.blockedReason = null;
+            if (!required.isEmpty()) {
+                blockedDestinations.remove(executions.get(context.workId).destination);
+            }
+        } catch (OutboundDlrPolicy.Blocked blocked) {
+            String destination = executions.get(context.workId).destination;
+            if (context.blockedReason != blocked.blockReason() && blockedDestinations.get(destination) != blocked.blockReason()) {
+                if (blocked.blockReason() == OutboundDlrPolicy.BlockReason.DISABLED) {
+                    logger.warn("dlrProvider|blocked|workId:{}|gatewayMsgId:{}|reason:disabled|action:enableDlrHandling",
+                            context.workId.value(), MessageTrace.value(message.serial));
+                } else {
+                    logger.warn("dlrProvider|blocked|workId:{}|gatewayMsgId:{}|reason:{}|requiredSources:{}|maxTrackedSubmissions:{}|action:{}",
+                            context.workId.value(), MessageTrace.value(message.serial), blocked.blockReason(),
+                            blocked.required(), blocked.maximum(),
+                            blocked.blockReason() == OutboundDlrPolicy.BlockReason.MAXIMUM_TOO_SMALL ?
+                                    "increaseMaxTrackedSubmissions" : "waitForCapacity");
+                }
+                context.blockedReason = blocked.blockReason();
+            }
+            blockedDestinations.put(destination, blocked.blockReason());
+            throw blocked;
+        }
+    }
+
+    private void identifyDlrSources(Context<M> context) {
+        if (context.dlrSources == null) {
+            var required = new HashSet<SourceId>();
+            for (SourceId source : context.sources) {
+                if (acceptedRequiresDlr(source)) {
+                    required.add(source);
+                }
+            }
+            context.dlrSources = Set.copyOf(required);
         }
     }
 
@@ -483,6 +671,41 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             changed.signalAll();
         } finally {
             lock.unlock();
+        }
+    }
+
+    @Override
+    public void deferFromRouted(Routed<M> taken) {
+        Objects.requireNonNull(taken, "routedDefer|error|reason:missingTake");
+        lock.lock();
+        try {
+            requireActive(Role.ROUTED_WORK);
+            var execution = execution(taken.id());
+            if (execution.context.finishing || execution.take != taken) {
+                throw invalid(Role.ROUTED_WORK, "routedDefer|error|reason:notCurrentTake");
+            }
+            execution.deferring = true;
+            pendingReturns.add(execution);
+            routed.defer(taken);
+            retireDeferred(execution);
+            pendingReturns.remove(execution);
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void retireDeferred(Execution<M> execution) {
+        execution.take = null;
+        execution.exposed = false;
+        execution.deferring = false;
+        if (routed instanceof FileRoutedWorkStore) {
+            // Durable ownership can be reconstructed on the next take. Keeping these contexts
+            // would gradually hydrate the entire backlog despite the bounded store window.
+            var context = execution.context;
+            executions.remove(context.workId);
+            context.sources.forEach(sourceSelections::remove);
+            selections.remove(context.id);
         }
     }
 
@@ -584,6 +807,10 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
     }
 
     private void cleanup(Context<M> context) {
+        if (dlrPolicy != OutboundDlrPolicy.UNRESTRICTED) {
+            // Cache before any uncertain deletion so a retry never infers requirements from absence.
+            identifyDlrSources(context);
+        }
         if (context.workId != null && !context.destinationCompleted) {
             Completed completed = routed.complete(context.workId);
             if (!completed.selection().equals(context.id) || !completed.sources().equals(context.sources)) {
@@ -602,6 +829,9 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         }
         if (context.workId != null) {
             routed.forget(context.id);
+        }
+        dlrPolicy.releaseOutbound(context.sources, context.dlrSources == null ? Set.of() : context.dlrSources);
+        if (context.workId != null) {
             pendingReturns.remove(executions.remove(context.workId));
         }
         context.sources.forEach(sourceSelections::remove);
@@ -667,6 +897,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
             sourceSelections.clear();
             executions.clear();
             pendingReturns.clear();
+            blockedDestinations.clear();
             if (failure != null) {
                 rethrow(failure);
             }
@@ -839,6 +1070,8 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         private boolean destinationCompleted;
         private boolean pendingCompleted;
         private boolean selectedCompleted;
+        private Set<SourceId> dlrSources;
+        private OutboundDlrPolicy.BlockReason blockedReason;
         private Attempt attempt;
 
         private Context(Selected<M> selected) {
@@ -853,6 +1086,7 @@ public final class DefaultOutboundCoordinator<M extends StandardMessage> impleme
         private Routed<M> take;
         private Routed<M> lastReturn;
         private boolean exposed;
+        private boolean deferring;
 
         private Execution(Context<M> context, String destination) {
             this.context = context;

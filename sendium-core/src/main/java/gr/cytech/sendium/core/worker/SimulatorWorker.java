@@ -18,6 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** Explicitly configured test destination. Never connects to a provider or transmits an SMS. */
@@ -71,6 +72,18 @@ public class SimulatorWorker extends AbstractOutWorker<StandardMessage> implemen
     @Override
     public Submission submitPrepared(StandardMessage message, Retry<StandardMessage> retry, boolean retryAttempt)
             throws Exception {
+        return prepare(message, retry, retryAttempt, null);
+    }
+
+    @Override
+    public Submission submitPrepared(StandardMessage message, Retry<StandardMessage> retry, boolean retryAttempt,
+                                     Consumer<? super StandardMessage> beforeSend) throws Exception {
+        return prepare(message, retry, retryAttempt,
+                Objects.requireNonNull(beforeSend, "dlrProvider|error|reason:missingPreparationGuard"));
+    }
+
+    private Submission prepare(StandardMessage message, Retry<StandardMessage> retry, boolean retryAttempt,
+                               Consumer<? super StandardMessage> beforeSend) throws Exception {
         requireRunning();
         applyRateLimit();
         requireRunning();
@@ -78,6 +91,9 @@ public class SimulatorWorker extends AbstractOutWorker<StandardMessage> implemen
         String originalBody = doCharMap(message);
         try {
             checkBeforeDoMessageFilters(message);
+            if (beforeSend != null) {
+                beforeSend.accept(message);
+            }
             return simulate(message, retryAttempt, true);
         } catch (FilterException failure) {
             message.body = originalBody;

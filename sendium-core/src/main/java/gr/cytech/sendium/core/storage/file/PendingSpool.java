@@ -813,6 +813,17 @@ public final class PendingSpool implements AutoCloseable {
         return routedOperation(() -> index.routedReady(destination, limit));
     }
 
+    synchronized List<WorkId> routedCandidatesAfter(String destination, WorkId after, int limit) {
+        return routedOperation(() -> index.routedReadyAfter(destination, after, limit));
+    }
+
+    synchronized void rescheduleRouted(StoredWork record) {
+        routedOperation(() -> {
+            index.scheduleRouted(record);
+            return null;
+        });
+    }
+
     synchronized List<WorkId> terminalRoutedAfter(WorkId after, int limit) {
         return routedOperation(() -> index.terminalRoutedAfter(after, limit));
     }

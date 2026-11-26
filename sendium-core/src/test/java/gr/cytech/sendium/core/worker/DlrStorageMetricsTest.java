@@ -8,7 +8,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Optional;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -26,6 +32,53 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
 
 class DlrStorageMetricsTest {
+    @Test
+    void memoryExposesOnlyAgreedStorageMeters() {
+        var messages = new ArrayList<String>();
+        var logger = Logger.getLogger(ManagedDlrStorage.class.getName());
+        var handler = new Handler() {
+            @Override public void publish(LogRecord record) {
+                messages.add(record.getMessage());
+            }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        var previousLevel = logger.getLevel();
+        // CI uses ERROR globally; explicitly enable the startup warning being asserted here.
+        logger.setLevel(Level.ALL);
+        logger.addHandler(handler);
+        ManagedDlrStorage managed;
+        try {
+            managed = DisabledDlrProcessingTest.selected("memory");
+        } finally {
+            logger.removeHandler(handler);
+            logger.setLevel(previousLevel);
+        }
+        try {
+            assertThat(messages).anySatisfy(message ->
+                    assertThat(message).contains("durability:processLocal", "replicas:singleProcessOnly", "restart:receiptStateLost"));
+            var owner = (MemoryDlrReservations) DisabledDlrProcessingTest.policy(managed);
+            var state = MemoryDlrTestSupport.state(MessageState.DeliveryChannel.HTTP);
+            MemoryDlrTestSupport.associate(owner, state);
+            managed.recordProviderAccepted(state, "P", "id");
+            var collector = new DlrStorageMetrics();
+            collector.storage = managed;
+            collector.metrics = managed.meterRegistry;
+            collector.initialize();
+            collector.collect();
+            verify(managed, never()).readMetricSnapshot(anyInt(), any());
+            assertThat(managed.meterRegistry.get("sendium.dlr.storage.capacity.used").gauge().value()).isEqualTo(1);
+            assertThat(managed.meterRegistry.get("sendium.dlr.storage.capacity.maximum").gauge().value()).isEqualTo(100_000);
+            assertThat(managed.meterRegistry.getMeters()).extracting(meter -> meter.getId().getName())
+                    .containsExactlyInAnyOrder("sendium.dlr.storage.selected", "sendium.dlr.storage.capacity.used",
+                            "sendium.dlr.storage.capacity.maximum", "sendium.dlr.storage.operation");
+            assertThat(managed.meterRegistry.find("sendium.dlr.storage.messages").gauges()).isEmpty();
+        } finally {
+            managed.close();
+            managed.meterRegistry.close();
+        }
+    }
+
     private final MockClock clock = new MockClock();
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry(SimpleConfig.DEFAULT, clock);
     private final ManagedDlrStorage storage = mock(ManagedDlrStorage.class);

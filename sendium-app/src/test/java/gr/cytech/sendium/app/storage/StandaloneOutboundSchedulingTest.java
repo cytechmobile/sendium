@@ -1,9 +1,15 @@
 package gr.cytech.sendium.app.storage;
 
 import gr.cytech.sendium.conf.SendiumConfigurationHandler;
+import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
+import gr.cytech.sendium.core.outbound.DefaultOutboundCoordinator;
+import gr.cytech.sendium.core.outbound.OutboundDlrPolicy;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.smpp.client.SmppClientWorker;
+import gr.cytech.sendium.core.storage.file.FilePendingMessageStore;
+import gr.cytech.sendium.core.storage.file.FileRoutedWorkStore;
+import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
 import gr.cytech.sendium.routing.AbstractRoutingManager;
 import gr.cytech.sendium.routing.OutgoingWorkerManager;
 import gr.cytech.sendium.routing.RoutingLookupResult;
@@ -12,13 +18,17 @@ import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -44,6 +54,31 @@ import static org.mockito.Mockito.when;
 
 @Timeout(30)
 class StandaloneOutboundSchedulingTest {
+    @TempDir Path root;
+
+    @Test
+    void onlyDeferredWorkUsesDelayedRetry() throws Exception {
+        try (var fixture = new SchedulingFixture(root)) {
+            when(fixture.provider.acceptsMessages()).thenReturn(true);
+            when(fixture.pipeline.workers.getWorkersCopy()).thenReturn(List.of(fixture.provider));
+            fixture.accept(5, true);
+            for (int cycle = 0; cycle < 3; cycle++) {
+                fixture.runNext();
+            }
+            fixture.runNext();
+            assertThat(fixture.nextDelay()).isEqualTo(100);
+            fixture.runNext();
+            assertThat(fixture.nextDelay()).isEqualTo(100);
+            assertThat(fixture.pipeline.call().getStatus()).isEqualTo(HealthCheckResponse.Status.UP);
+            var field = FileRoutedWorkStore.class.getDeclaredField("active");
+            field.setAccessible(true);
+            // The inspected candidate relinquishes a slot instead of remaining pinned
+            // in the two-item window. The old release-only implementation retains both.
+            assertThat(((Map<?, ?>) field.get(fixture.fileRouted)).size()).isLessThan(2);
+            assertThat(fixture.filePending.sourcesAfter(null, 16)).hasSize(5);
+        }
+    }
+
     @Test
     void recoverableCycleFailureBacksOffAndKeepsReadinessUp() throws Exception {
         try (var fixture = new SchedulingFixture()) {
@@ -186,26 +221,53 @@ class StandaloneOutboundSchedulingTest {
     private static final class SchedulingFixture implements AutoCloseable {
         private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         private final StandardRoutingManager routing = mock(StandardRoutingManager.class);
+        private final SmppClientWorker<StandardMessage> provider = mock(SmppClientWorker.class);
         private final StandaloneOutboundPipeline pipeline = spy(new StandaloneOutboundPipeline());
         private final List<Runnable> cycles = new ArrayList<>();
         private final List<Long> delays = new ArrayList<>();
         private int nextCycle;
         private boolean closed;
+        private FilePendingMessageStore filePending;
+        private FileRoutedWorkStore fileRouted;
 
         private SchedulingFixture() throws Exception {
+            this(null);
+        }
+
+        private SchedulingFixture(Path root) throws Exception {
             var config = mock(Config.class);
             when(config.getOptionalValue(anyString(), eq(Integer.class))).thenReturn(Optional.empty());
             when(config.getOptionalValue("sendium.message.selection-batch-size", Integer.class)).thenReturn(Optional.of(2));
-            pipeline.coordinator = spy(StandaloneOutboundPipeline.coordinator(
-                    new MessageStorageProfile("memory", "memory", "memory"), config,
-                    new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+            if (root == null) {
+                pipeline.coordinator = spy(StandaloneOutboundPipeline.coordinator(
+                        new MessageStorageProfile("memory", "memory", "memory"), config,
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+            } else {
+                filePending = new FilePendingMessageStore(root, 32);
+                fileRouted = new FileRoutedWorkStore(filePending, 32, 2);
+                OutboundDlrPolicy disabled = new OutboundDlrPolicy() {
+                    @Override
+                    public Reservation reserveAdmission(SourceId source, StandardMessage message) {
+                        return Reservation.UNCHANGED;
+                    }
+
+                    @Override
+                    public void prepareProvider(String id, Set<SourceId> required) {
+                        if (!required.isEmpty()) {
+                            throw new Blocked(BlockReason.DISABLED, required.size(), 0);
+                        }
+                    }
+                };
+                pipeline.coordinator = spy(new DefaultOutboundCoordinator<>(filePending,
+                        new MemorySelectedRouterStore<>(filePending, 32), fileRouted, 2, disabled));
+                pipeline.coordinator.start();
+            }
             pipeline.config = config;
             pipeline.routing = routing;
             pipeline.workers = mock(OutgoingWorkerManager.class);
             when(pipeline.workers.getWorkersCopy()).thenReturn(List.of());
             when(pipeline.workers.stop()).thenReturn(true);
             pipeline.configuration = mock(SendiumConfigurationHandler.class);
-            var provider = mock(SmppClientWorker.class);
             when(provider.getFullName()).thenReturn("smppclient.provider");
             when(routing.lookupForLifecycle(any())).thenReturn(new RoutingLookupResult(List.of(provider), true));
             when(scheduler.awaitTermination(anyLong(), any())).thenReturn(true);
@@ -223,10 +285,19 @@ class StandaloneOutboundSchedulingTest {
         }
 
         private void accept(int count) {
+            accept(count, false);
+        }
+
+        private void accept(int count, boolean dlr) {
             for (int i = 0; i < count; i++) {
                 var message = new StandardMessage();
                 message.body = "message-" + i;
-                pipeline.coordinator.accept(new SourceId(UUID.randomUUID()), message);
+                var source = new SourceId(UUID.randomUUID());
+                message.serial = source.value().toString();
+                if (dlr) {
+                    message.dlrReturnMetadata = DlrReturnMetadata.http("account", "sender", "recipient", "https://callback.test");
+                }
+                pipeline.coordinator.accept(source, message);
             }
         }
 

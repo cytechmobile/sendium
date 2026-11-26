@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -68,7 +69,7 @@ class ManagedDlrStorageTest {
         "negative retention; file; dlr; -PT1S; false; reason:invalidFailedRetention",
         "sub-millisecond retention; file; dlr; PT0.0005S; false; reason:invalidFailedRetention",
         "active postgresql override; file; dlr; P7D; true; reason:postgresqlDatasourceActive",
-        "memory selector; memory; dlr; P7D; false; backend:memory|reason:unsupported",
+        "active postgresql memory override; memory; dlr; P7D; true; backend:memory|reason:postgresqlDatasourceActive",
         "unknown selector; sqlite; dlr; P7D; false; backend:sqlite|reason:unknownBackend",
         "unsanitized selector; 'x|y'; dlr; P7D; false; backend:x_y|reason:unknownBackend"})
     void rejectsUnsupportedSelectionsWithoutFallback(String name, String backend, String path, String retention,
@@ -85,6 +86,53 @@ class ManagedDlrStorageTest {
                 .hasMessageContaining(reason);
         verify(postgresqlDataSource, never()).get();
         assertThat(root.resolve("dlr")).doesNotExist();
+    }
+
+    @Test
+    void memoryFailureDoesNotFallback() {
+        storage.selectedBackend = "memory";
+        storage.initialize();
+        try {
+            var owner = (MemoryDlrReservations) DisabledDlrProcessingTest.policy(storage);
+            owner.lock.lock();
+            try {
+                owner.fail(new DlrStorageException("testDlr|error|reason:injected"));
+            } finally {
+                owner.lock.unlock();
+            }
+            assertThatThrownBy(storage::verifyAvailable).isInstanceOf(DlrStorageException.class);
+            assertThat(storage.backend()).isEqualTo("memory");
+            verify(postgresqlDataSource, never()).get();
+        } finally {
+            storage.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"memoryCorrelationTtl", "memoryDeliveryTtl", "memoryCleanupInterval", "deliveryClaimDuration"})
+    void invalidMemoryConfigurationFailsExplicitly(String fieldName) throws Exception {
+        storage.selectedBackend = "memory";
+        var field = ManagedDlrStorage.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        for (Duration invalid : new Duration[]{Duration.ZERO, Duration.ofMillis(-1), Duration.ofNanos(1),
+                Duration.ofSeconds(Long.MAX_VALUE)}) {
+            field.set(storage, invalid);
+            assertThatThrownBy(storage::initialize).isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("dlrStorage|error|backend:memory|reason:");
+        }
+        verify(postgresqlDataSource, never()).get();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1})
+    void invalidMemoryMaximumFailsExplicitly(int maximum) throws Exception {
+        storage.selectedBackend = "memory";
+        var field = ManagedDlrStorage.class.getDeclaredField("memoryMaximum");
+        field.setAccessible(true);
+        field.set(storage, maximum);
+        assertThatThrownBy(storage::initialize).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("nonPositiveCapacity");
+        verify(postgresqlDataSource, never()).get();
     }
 
     @ParameterizedTest(name = "{0}")

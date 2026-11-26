@@ -5,10 +5,56 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class NativeE2eSmokeTest {
+
+    @Test
+    void capacityBatchesUseBoundedConcurrencyAndAwaitEveryOperation() throws Exception {
+        var firstPair = new CountDownLatch(2);
+        var active = new AtomicInteger();
+        var peak = new AtomicInteger();
+        var completed = new AtomicInteger();
+        var sum = new AtomicInteger();
+        NativeE2eSmoke.runBoundedSmppBatch(1, 200, index -> {
+            int concurrent = active.incrementAndGet();
+            peak.accumulateAndGet(concurrent, Math::max);
+            try {
+                firstPair.countDown();
+                assertThat(firstPair.await(5, TimeUnit.SECONDS)).isTrue();
+                sum.addAndGet(index);
+                completed.incrementAndGet();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            } finally {
+                active.decrementAndGet();
+            }
+        });
+        assertThat(peak.get()).isBetween(2, 100);
+        assertThat(completed.get()).isEqualTo(200);
+        assertThat(sum.get()).isEqualTo(20_100);
+        assertThat(active.get()).isZero();
+    }
+
+    @Test
+    void capacityBatchPropagatesNetworkTaskFailure() {
+        assertThatThrownBy(() -> NativeE2eSmoke.runBoundedSmppBatch(1, 10, index -> {
+            throw new IllegalStateException("receipt acknowledgement failed");
+        })).hasRootCauseMessage("receipt acknowledgement failed");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1001})
+    void capacityBatchCannotQueueAnUnboundedWorkload(int count) {
+        assertThatThrownBy(() -> NativeE2eSmoke.runBoundedSmppBatch(0, count, ignored -> { }))
+                .isInstanceOf(IllegalStateException.class);
+    }
 
     @Test
     void storageProfileDefaultsPreserveExistingSmokeModes() {
@@ -52,11 +98,25 @@ class NativeE2eSmokeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", "memory", "FILE", "file|secret\n"})
+    @ValueSource(strings = {"memory", "disabled"})
+    void acceptsProcessLocalDlrModes(String backend) {
+        assertThat(NativeE2eSmoke.dlrBackend(backend, false)).isEqualTo(backend);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"memory", "disabled"})
+    void processLocalModesOwnTheirRecoveryScenarios(String backend) {
+        assertThatThrownBy(() -> NativeE2eSmoke.dlrBackend(backend, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Process-local DLR smoke runs its own recovery scenarios; unset SENDIUM_E2E_PENDING_RESTART");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "unknown", "FILE", "file|secret\n"})
     void rejectsUnsupportedDlrBackendsWithoutEchoingTheInput(String backend) {
         assertThatThrownBy(() -> NativeE2eSmoke.dlrBackend(backend, false))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("SENDIUM_E2E_DLR_BACKEND must be postgresql or file");
+                .hasMessage("SENDIUM_E2E_DLR_BACKEND must be postgresql, file, memory or disabled");
     }
 
     @Test
@@ -74,6 +134,25 @@ class NativeE2eSmokeTest {
                 """;
         assertThat(NativeE2eSmoke.successfulStorageOperationCount(metrics, "file", "provider_batch")).isEqualTo(2);
         assertThat(NativeE2eSmoke.successfulStorageOperationCount(metrics, "postgresql", "provider_batch")).isEqualTo(5);
+    }
+
+    @Test
+    void capacityEvidenceRequiresPresentFiniteSelectedMetrics() {
+        String metrics = """
+                jvm_memory_used_bytes{area="heap",id="G1 Eden Space"} 100.0
+                jvm_memory_used_bytes{area="heap",id="G1 Old Gen"} 250.0
+                jvm_memory_used_bytes{area="nonheap",id="Metaspace"} 50.0
+                """;
+        assertThat(NativeE2eSmoke.metricSum(metrics, "jvm_memory_used_bytes", "area=\"heap\"")).isEqualTo(350);
+        assertThatThrownBy(() -> NativeE2eSmoke.metricSum(metrics, "missing", ""))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Missing metric");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"NaN", "Infinity", "-1"})
+    void invalidValuesCannotQualifyCapacity(String value) {
+        assertThatThrownBy(() -> NativeE2eSmoke.metricSum("used{backend=\"memory\"} " + value, "used", ""))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Invalid metric");
     }
 
     @Test

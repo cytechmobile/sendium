@@ -1,18 +1,20 @@
 # DLR Persistence
 
-Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and durably track terminal HTTP/SMPP delivery after an upstream provider outcome. PostgreSQL is the default backend. A single instance can instead use [local file storage](#local-file-storage) without a database service.
+Sendium stores the state needed to correlate upstream delivery receipts (DLRs) and track terminal HTTP/SMPP delivery after an upstream provider outcome. PostgreSQL is the durable default. A single instance can instead use [local file storage](#local-file-storage), [process-local memory](#memory-and-disabled-handling), or explicit disabled handling.
 
 This storage boundary does not make Sendium's message queues or all delivery processing durable. Review [Durability Boundaries](#durability-boundaries) before using restart recovery as a delivery guarantee.
 
 ## Application Boundary
 
-The standalone `sendium-app` enables DLR persistence and requires the selected backend to be available; PostgreSQL is selected unless `sendium.dlr.storage.backend=file` is configured. Applications that embed `sendium-core` default to no Sendium-owned DLR subsystem and can run without a DLR database.
+The standalone `sendium-app` enables the DLR subsystem and requires its startup-selected handling policy to initialize successfully. `sendium.dlr.storage.backend` defaults to `postgresql`; `file`, `memory` and `disabled` are explicit alternatives. There is no automatic fallback. Applications that embed `sendium-core` default to no Sendium-owned DLR subsystem and can run without a DLR database.
 
 The `sendium.dlr.persistence.enabled` build-time property controls this boundary. `sendium-core` leaves it undefined and an undefined property means disabled, so an embedding application opts in by declaring it as `true` itself before Quarkus augmentation. When it is not enabled, the DLR services, PostgreSQL datasource, Flyway migration, and storage readiness check are absent; partial or no-op persistence is not provided.
 
 Message paths degrade rather than fail when the subsystem is absent. HTTP and downstream SMPP submissions are accepted and routed without gateway DLR state, undelivered downstream receipts fall back to the worker's in-memory retry, and provider receipts are not correlated, so Sendium emits no delivery receipts of its own. An application that embeds `sendium-core` without this subsystem is expected to supply its own `Tracker` and message store if it needs delivery receipts.
 
 ## Storage Model
+
+The SQL rows below describe the durable backends. Memory mode uses bounded process-local ownership instead; it reserves capacity at ingress, before acceptance, rather than waiting for a provider response.
 
 `sendium_dlr.dlr_message` contains one row per tracked gateway UUID. A row is created only when the upstream provider accepts or rejects the submission, never at HTTP or downstream SMPP ingress. It holds body-free return metadata, the provider outcome, the downstream delivery channel and status, the retry schedule, and the monotonically increasing attempt number used for fencing. SMS message bodies are never stored in this schema.
 
@@ -28,7 +30,7 @@ Select file storage once at startup; there is no runtime switching and no fallba
 
 | Property | Default | Purpose |
 | :--- | :--- | :--- |
-| `sendium.dlr.storage.backend` | `postgresql` | Startup-only DLR backend: `postgresql` or `file`. Any other value, including `memory`, fails startup. |
+| `sendium.dlr.storage.backend` | `postgresql` | Startup-only handling: `postgresql`, `file`, `memory` or `disabled`. Unknown values fail startup. |
 | `sendium.dlr.storage.file.path` | None | Required for `file`. A directory owned exclusively by one Sendium process. It holds the database, its rollback journal and an ownership lock. |
 | `sendium.dlr.storage.file.failed-retention` | `7D` | Positive time a receipt whose downstream delivery finally failed is kept, measured from that failure. |
 
@@ -93,7 +95,7 @@ Health data and metric labels contain only the backend and a sanitized reason. D
 | `dlrStorage\|error\|backend:file\|reason:missingPath` | No `sendium.dlr.storage.file.path` is configured. |
 | `dlrStorage\|error\|backend:file\|reason:overlapsPendingPath` | The DLR directory equals, contains or lies inside the pending SMS path. |
 | `dlrStorage\|error\|backend:file\|reason:postgresqlDatasourceActive` | The PostgreSQL datasource was explicitly activated while selecting `file`. |
-| `dlrStorage\|error\|backend:...\|reason:unknownBackend` or `unsupported` | The selector is not `postgresql` or `file`. |
+| `dlrStorage\|error\|backend:...\|reason:unknownBackend` or `unsupported` | The selector is not a supported backend. |
 | `fileDlrOpen\|error\|reason:ownershipConflict` | Another process owns the directory. |
 | `fileDlrOpen\|error\|reason:foreignDatabase`, `unsupportedSchemaVersion`, `missingSchemaObject`, `emptyDatabaseFile` | The database is not a compatible Sendium DLR store. Use a compatible binary or restore a backup. |
 | `fileDlrOpen\|error\|reason:sqliteCode26` or `sqliteCode11` | SQLite reports the file is not a database or is corrupt. Restore a stopped backup. |
@@ -115,7 +117,83 @@ A restore brings back the pending receipts, provider correlations, attempt numbe
 
 ### Upgrades, rollback and switching backends
 
-Changing the backend does not migrate data in either direction. Switching from `file` to `postgresql`, or back, starts with whatever the selected backend already holds. Before switching away from `file`, either let pending deliveries drain, or stop Sendium and keep the whole directory for a later return. The current schema version is `1`. A binary refuses a database with a schema version it does not support, and Sendium never upgrades or downgrades a database automatically, so keep a compatible binary with a preserved directory.
+Changing the backend does not migrate data in either direction. Switching starts with whatever the selected backend already holds. Follow the [drain-before-change procedure](#changing-handling-or-storage-modes) before switching; preserve the whole file directory for a later return. Merely stopping does not drain pending obligations. The current schema version is `1`. A binary refuses a database with a schema version it does not support, and Sendium never upgrades or downgrades a database automatically, so keep a compatible binary with a preserved directory.
+
+## Memory and disabled handling
+
+These are startup selections of the enabled DLR subsystem, not aliases for build-time exclusion.
+
+| Selection | New DLR requests | Restart | Readiness |
+| :--- | :--- | :--- | :--- |
+| `postgresql` (default) | Accepted subject to ordinary admission | Committed correlations and deliveries retained | DOWN on storage failure |
+| `file` | Accepted subject to ordinary admission | Committed state retained on the same volume | DOWN on storage failure |
+| `memory` | Reserve capacity before acceptance; full/recovering requests receive HTTP 503 or SMPP `STATUS_THROTTLED` | All DLR state lost | UP when operational, including full/recovering capacity |
+| `disabled` | Native/Kannel HTTP 400; SMPP `STATUS_SUBMITFAIL` | No DLR state maintained | UP when intentionally disabled |
+| Build-time subsystem excluded | Legacy paths without gateway DLR tracking; not disabled-mode rejection | No Sendium-owned DLR state | No DLR storage check |
+
+Initialization or internal storage failure is not an intentional disabled state: it fails startup/readiness without selecting another backend. Memory/disabled require no `SENDIUM_DLR_POSTGRESQL_*` settings and no DLR file volume. Explicitly activating the PostgreSQL datasource with a non-PostgreSQL selection is an error. Outbound SMS storage is configured independently.
+
+### Memory settings and accounting
+
+| Property | Environment variable | Default |
+| :--- | :--- | :--- |
+| `sendium.dlr.storage.backend` | `SENDIUM_DLR_STORAGE_BACKEND` | `postgresql` |
+| `sendium.dlr.storage.memory.max-tracked-submissions` | `SENDIUM_DLR_STORAGE_MEMORY_MAX_TRACKED_SUBMISSIONS` | `100000` |
+| `sendium.dlr.storage.memory.provider-correlation-ttl` | `SENDIUM_DLR_STORAGE_MEMORY_PROVIDER_CORRELATION_TTL` | `3D` |
+| `sendium.dlr.storage.memory.pending-delivery-ttl` | `SENDIUM_DLR_STORAGE_MEMORY_PENDING_DELIVERY_TTL` | `7D` |
+| `sendium.dlr.storage.memory.cleanup-interval` | `SENDIUM_DLR_STORAGE_MEMORY_CLEANUP_INTERVAL` | `1M` |
+
+Run one process; replicas cannot share or recover this DLR state. Each accepted DLR-requesting ingress submission reserves one slot, including **each SMPP multipart part** and each separately accepted duplicate. Provider-side splits, submission retries and callback attempts add no slots. The entry limit is not a hard heap/RSS bound: provider fan-out, metadata, the SMS pipeline and JVM/native overhead also consume memory.
+
+Reservations remain held while provider work, required receipt delivery/retries, or uncertain cleanup still require ownership. Successful downstream acknowledgement releases completed state once outbound ownership is also finished. A disconnected SMPP recipient can reconnect within the pending-delivery lifetime; a live HTTP receiver is retried using the [configured interval](#http-callback-retry-interval).
+
+Correlation lifetime starts at its original provider acceptance; repeated acceptance handoffs do not refresh it. Terminal receipt lifetime starts at resolution/rejection; retrying or claiming delivery does not extend it. Expiry deliberately loses the ability to correlate or deliver the expired receipt, but cannot free capacity still needed by active outbound work. Bounded cleanup runs at the configured interval; expiry is not an exact-time delivery guarantee.
+
+`sendium_dlr_storage_capacity_used{backend="memory"}` and `sendium_dlr_storage_capacity_maximum{backend="memory"}` show reserved ingress submissions and the configured limit. Observe these together with provider work, receipt state and storage errors, not just ingress queue depth. See the [measured capacity evidence](#measured-capacity-evidence); configured entries are not a heap/RSS or AWS-host-fit guarantee.
+
+### Measured capacity evidence
+
+The packaged JVM application reached the **100,000-submission default** within `-Xms512m -Xmx512m -XX:+UseG1GC` on Linux/amd64, Eclipse Adoptium OpenJDK `25.0.5+8-LTS` (2026-11-24, application source `7fbfbf5`). The fixture retained 99,000 unresolved provider correlations, 500 HTTP retry obligations and 500 disconnected SMPP receipts. SMS stages drained between bounded ingress batches; they did not need to hold 100,000 ordinary SMS bodies simultaneously.
+
+| Live observation | Heap used bytes | Process RSS KiB |
+| :--- | ---: | ---: |
+| Baseline | 43,237,504 | 246,292 |
+| 100,000 occupied slots | 224,264,592 | 875,040 |
+| Fully delivered, zero occupied slots | 504,548,288 | 968,856 |
+
+HTTP/SMPP overload was rejected, non-DLR traffic reached the provider while full, and actual receipt delivery drained capacity to zero. Cumulative observed GC pauses increased from 5 to 32, with total pause time increasing from 0.030 to 0.382 seconds. Heap values are live samples, not post-GC retained-memory measurements: garbage produced during draining can leave a high heap reading after ownership reaches zero. No OOM or progress assertion failed, and no fixed headroom percentage was assumed.
+
+The separate isolated DLR fixture measured approximately 141 MiB incremental retained heap at 100,000 sources, using longer metadata and provider fan-out; it is not a substitute for the packaged result. Neither fixture is a worst-case workload bound. In particular, application RSS exceeds the Java heap, and this Docker/amd64 measurement does **not** qualify total host fit on the ARM/2 GiB AWS `t4g.small`.
+
+Reproduce the full application proof with the [existing packaged smoke runner](../sendium-core/src/test/java/utils/NativeE2eSmoke.java), setting `SENDIUM_E2E_IMAGE` to a built JVM image and `SENDIUM_E2E_DLR_BACKEND=memory`, then running:
+
+```sh
+./mvnw -B -pl sendium-core -DskipTests test-compile \
+  org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
+  -Dexec.classpathScope=test -Dexec.mainClass=utils.NativeE2eSmoke
+```
+
+The `memoryCapacityAtDefault` scenario requires actual occupancy, overload rejection, non-DLR progress, network acknowledgements and final cleanup, not merely a successful process exit. Missing evidence or a failed assertion leaves the default unqualified for that run; do not silently raise the heap or lower capacity to obtain a pass.
+
+### Accepted SMS recovery and disabled backlog
+
+With file-backed outbound SMS, startup restores accepted DLR reservations before opening ingress when they all fit. With a reduced limit, accepted but unprotected obligations take priority over new DLR requests. Recovered groups acquire capacity atomically; an oversized group stays retained and requires an operator to restore sufficient capacity. Priority protects reservations; it does **not** require draining all old receipts before spare capacity can admit new work.
+
+Disabled handling retains previously accepted durable DLR-requesting SMS without provider submission. Re-enable handling to resume it; do not delete it to unblock the queue. Eligible non-DLR SMS remains dispatchable, including beyond a blocked file prefetch window. Memory-full and disabled rejection do not by themselves reject non-DLR ingress.
+
+### Changing handling or storage modes
+
+No mode switch migrates or deletes durable backend data. There is no blanket startup prohibition on a retained SMS backlog, but changing modes with pending work can lose receipts or leave accepted SMS blocked.
+
+Before changing DLR handling, capacity, or outbound storage modes:
+
+1. Pause/fence new HTTP and SMPP ingress.
+2. Drain **all** pending, selected/router-queue and routed SMS stages, including multipart groups.
+3. Wait for in-flight provider submissions and their acceptance/correlation handoffs to finish.
+4. Resolve or explicitly account for unresolved provider correlations and pending HTTP/SMPP deliveries, retries and active claims. Restore disconnected recipients where necessary.
+5. Verify these states are empty, then stop, preserve durable stores, change configuration and restart. Verify the selected backend/readiness before reopening ingress.
+
+An empty ingress queue or a stopped process does not demonstrate a drain. Reverting binaries or configuration cannot recover memory reservations, correlations, callback retries or disconnected-client receipts after process loss. If an emergency change accepts outstanding receipt loss, record that explicitly; preserving a file SMS volume preserves SMS work, not its previous memory DLR state.
 
 ## Quick Start PostgreSQL
 
@@ -279,13 +357,25 @@ rejection also produces `failed`. `errorCode` carries the recorded provider erro
 absent. Requests use `Content-Type: application/json`. The callback URL is used as supplied, without
 Kannel placeholder substitution or callback-host preapproval. Receipt callbacks require DLR persistence
 to be enabled. Both formats share the existing delivery policy: a 5-second request timeout, any 2xx
-response completes the attempt, other responses/transport failures retry after one hour, and attempt
+response completes the attempt, other responses/transport failures retry after the configured interval (one hour by default), and attempt
 10 failure marks delivery `FAILED`. Redirects are not followed. Receivers must handle duplicate
 callbacks idempotently by `messageId`.
 
 The initial V1 schema includes `http_callback_format`, defaulting Kannel writers to `KANNEL_GET`;
 native callbacks persist `JSON_POST`. The format survives provider-event batching, process restart,
 and callback retries.
+
+### HTTP callback retry interval
+
+| Property | Environment variable | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `sendium.dlr.http.retry-interval` | `SENDIUM_DLR_HTTP_RETRY_INTERVAL` | `1H` | Startup-configured delay before the next retry of a failed HTTP callback, for both Kannel GET and native JSON POST callbacks. |
+
+For example, `SENDIUM_DLR_HTTP_RETRY_INTERVAL=5S` schedules subsequent retries five seconds after a failed attempt. The every-second dispatcher and in-flight work can add delay; this is not a guaranteed callback deadline. Short intervals increase callback traffic during receiver failures.
+
+When HTTP callback processing is enabled, the interval must be positive, at least one millisecond, and representable as a future millisecond timestamp; invalid or overflowing values fail startup. Startup-disabled handling does not use this setting.
+
+Changing the setting affects retry timestamps written after subsequent failures. It does not rewrite already scheduled receipt due times or reset attempts. The ten-attempt limit, five-second request timeout, per-host concurrency limits, attempt fencing and SMPP retry behavior are unchanged.
 
 ## Retention
 
@@ -319,7 +409,7 @@ The table describes PostgreSQL. File storage keeps the same ingress, batching, f
 | Terminal HTTP/SMPP delivery | The common payload and exact provider outcome remain in one row until fenced completion. | Delivery is at-least-once; acknowledgement can be received before the final delete commits. |
 | Active delivery attempt | The database attempt number fences stale completion, retry, and failure updates. HTTP batch claims and SMPP attempt starts use a database lease so active replicas cannot start the same delivery. | An attempt that outlives its lease can overlap a replacement. |
 | Multipart submission | Segments and aggregate payloads remain in memory. After provider acceptance, the aggregate DLR row retains the original gateway part IDs needed for downstream receipt delivery. | Multipart assembly and its pending timers are process-local and are not reconstructed after restart. |
-| HTTP DLR callback retry | Pending state, attempt count, next-attempt timestamp, and active lease are durable. Every second, the dispatcher checks for up to 500 due rows and atomically claims them with locked-row skipping. Batches do not overlap; each callback uses its own virtual thread, with at most 10 callbacks in flight per host. Failures retry after one hour and attempt 10 failures become `FAILED`. | The batch limit is not a guaranteed delivery rate. A request accepted before a crash or failed completion update can be repeated. A running batch delays the next due-callback check, and an attempt that outlives its lease can overlap a replacement. |
+| HTTP DLR callback retry | Pending state, attempt count, next-attempt timestamp, and active lease are durable. Every second, the dispatcher checks for up to 500 due rows and atomically claims them with locked-row skipping. Batches do not overlap; each callback uses its own virtual thread, with at most 10 callbacks in flight per host. Failures retry after the configured interval (one hour by default) and attempt 10 failures become `FAILED`. | The batch limit is not a guaranteed delivery rate. A request accepted before a crash or failed completion update can be repeated. A running batch delays the next due-callback check, and an attempt that outlives its lease can overlap a replacement. |
 | SMPP DLR delivery | One leased attempt covers every generated receipt part and completes only after matching successful `deliver_sm_resp` PDUs for all parts. Pending rows are enqueued when the same `system_id` binds. | Timeout, `generic_nack`, wrong/non-OK response, enqueue/send failure, or session closure releases the attempt. Replay is bind-driven rather than periodic, and partial success is not checkpointed. |
 | Database files | The Quick Start named volume survives normal container replacement and `docker compose down`. | Volume deletion, host-disk loss, and disaster recovery require backups or external PostgreSQL replication managed by the operator. |
 

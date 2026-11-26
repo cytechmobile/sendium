@@ -40,6 +40,17 @@ public interface RoutedWorkStore<M extends StandardMessage> extends OutboundStag
     void release(Routed<M> work);
 
     /**
+     * Defers a current take without completing it. Durable implementations relinquish its hydrated
+     * prefetch slot and advance bounded traversal; a later take uses the recorded durable payload.
+     * Use only before provider processing begins. Unlike release, runtime mutations need not survive.
+     * Unsupported stores must reject explicitly rather than approximate this with release.
+     */
+    default void defer(Routed<M> work) {
+        throw new OutboundStorageException(Role.ROUTED_WORK, OutboundStorageException.Reason.UNSUPPORTED,
+                "routedDefer|error|reason:unsupportedStore");
+    }
+
+    /**
      * Called only after all provider parts and required handoffs for the active work are terminal.
      * Provider-part aggregation belongs to the provider-processing boundary, not separate routed items.
      * Returns the completed selection for source cleanup. Until forget, repeating completion of the terminal work

@@ -73,6 +73,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static gr.cytech.sendium.core.smpp.client.SmppClientWorker.TYPE_SMPP_CLIENT;
@@ -563,6 +564,13 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                 (payload, policy) -> retry.retry(payload, policy == NackHandlePolicy.RETRY_ROUTER), retryAttempt);
     }
 
+    @Override
+    public CoordinatedSmppSubmission<M> submitPrepared(M message,
+            OutboundProvider.Retry<M> retry, boolean retryAttempt, Consumer<? super M> beforeSend) throws Exception {
+        return submitPreparedCoordinated(message,
+                (payload, policy) -> retry.retry(payload, policy == NackHandlePolicy.RETRY_ROUTER), retryAttempt, beforeSend);
+    }
+
     /** Applies worker preparation before an initial or replacement provider attempt. */
     public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry)
             throws Exception {
@@ -571,6 +579,20 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
 
     /** Marks replacement work explicitly; message retry counters are not request-attempt identity. */
     public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry, boolean retryAttempt)
+            throws Exception {
+        return prepareCoordinated(message, retry, retryAttempt, null);
+    }
+
+    /** Runs the owning lifecycle's guard after preparation filters and before provider requests. */
+    public CoordinatedSmppSubmission<M> submitPreparedCoordinated(M message, CoordinatedRetry<M> retry, boolean retryAttempt,
+                                                                 Consumer<? super M> beforeSend)
+            throws Exception {
+        return prepareCoordinated(message, retry, retryAttempt,
+                Objects.requireNonNull(beforeSend, "dlrProvider|error|reason:missingPreparationGuard"));
+    }
+
+    private CoordinatedSmppSubmission<M> prepareCoordinated(M message, CoordinatedRetry<M> retry, boolean retryAttempt,
+                                                            Consumer<? super M> beforeSend)
             throws Exception {
         if (!keepOnRunning || isPause()) {
             throw new IllegalStateException("Worker is stopped or paused: " + getFullName());
@@ -590,6 +612,9 @@ public class SmppClientWorker<M extends StandardMessage> extends AbstractOutWork
                 logger.info("{}", message);
             }
             checkBeforeDoMessageFilters(message);
+            if (beforeSend != null) {
+                beforeSend.accept(message);
+            }
             return submitCoordinated(message, retry, retryAttempt);
         } catch (FilterException failure) {
             message.body = originalBody;

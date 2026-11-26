@@ -7,6 +7,8 @@ import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
+import gr.cytech.sendium.core.storage.OutboundStage;
+import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.pending.MultipartMembership;
 import gr.cytech.sendium.core.storage.pending.PendingMultipartRecovery;
 
@@ -14,6 +16,7 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Consumer;
 
 /**
  * Application-facing lifecycle boundary. Implementations receive pending, selected-router, and
@@ -87,12 +90,32 @@ public interface OutboundCoordinator<M extends StandardMessage> extends AutoClos
     /** Takes already-routed work for the named destination without completing its stored ownership or sending it. */
     Optional<Routed<M>> takeFromRouted(String destination, Duration timeout) throws InterruptedException;
 
+    /** Attests enforcement of this exact selected policy, including required blocked-work deferral. */
+    default boolean enforcesDlrPolicy(OutboundDlrPolicy policy) {
+        return policy == OutboundDlrPolicy.UNRESTRICTED;
+    }
+
+    /**
+     * Optional post-filter provider guard for the owned execution, including replacement attempts.
+     * Legacy/external ownership remains unchanged when empty; selected managed modes must
+     * explicitly compose a coordinator that supplies their enforcement.
+     */
+    default Optional<Consumer<M>> providerPreparation(WorkId work) {
+        return Optional.empty();
+    }
+
     /**
      * Returns the current unfinished take to routed scheduling at the same recorded destination.
      * Use the original take handle with its updated payload. Once terminal completion begins, retry
      * handoff/cleanup instead of returning the work for provider redispatch.
      */
     void returnToRouted(Routed<M> work);
+
+    /** Relinquishes a pre-provider take's scheduling window without completing source/destination ownership. */
+    default void deferFromRouted(Routed<M> work) {
+        throw new OutboundStorageException(OutboundStage.Role.ROUTED_WORK, OutboundStorageException.Reason.UNSUPPORTED,
+                "routedDefer|error|reason:unsupportedCoordinator");
+    }
 
     /**
      * Reports terminal processing of all provider parts for this work, conditional on successful required
