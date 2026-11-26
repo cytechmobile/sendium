@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Optional;
 import java.util.logging.Handler;
+import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import java.util.concurrent.CountDownLatch;
@@ -42,12 +43,16 @@ class DlrStorageMetricsTest {
             @Override public void flush() { }
             @Override public void close() { }
         };
+        var previousLevel = logger.getLevel();
+        // CI uses ERROR globally; explicitly enable the startup warning being asserted here.
+        logger.setLevel(Level.ALL);
         logger.addHandler(handler);
         ManagedDlrStorage managed;
         try {
             managed = DisabledDlrProcessingTest.selected("memory");
         } finally {
             logger.removeHandler(handler);
+            logger.setLevel(previousLevel);
         }
         try {
             assertThat(messages).anySatisfy(message ->
