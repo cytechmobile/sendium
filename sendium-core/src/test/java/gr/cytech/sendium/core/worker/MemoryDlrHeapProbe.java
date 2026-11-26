@@ -101,9 +101,18 @@ public final class MemoryDlrHeapProbe {
         if (!Files.isReadable(status)) {
             return -1;
         }
-        for (String line : Files.readAllLines(status)) {
+        return residentBytes(Files.readAllLines(status));
+    }
+
+    static long residentBytes(List<String> status) {
+        for (String line : status) {
             if (line.startsWith("VmRSS:")) {
-                return Long.parseLong(line.substring(6).strip().split("\\s+")[0]) * 1024;
+                try {
+                    long kibibytes = Long.parseLong(line.substring(6).strip().split("\\s+")[0]);
+                    return kibibytes < 0 ? -1 : Math.multiplyExact(kibibytes, 1024);
+                } catch (NumberFormatException | ArithmeticException invalidRss) {
+                    return -1;
+                }
             }
         }
         return -1;

@@ -80,10 +80,15 @@ class SimulatorWorkerTest {
     @Test
     void providersWithoutPostFilterProtectionFailExplicitly() {
         OutboundProvider<StandardMessage> unsupported = new OutboundProvider<>() {
+            @Override
             public String getFullName() { return "unsupported"; }
+            @Override
             public boolean isKeepOnRunning() { return true; }
+            @Override
             public boolean isPause() { return false; }
+            @Override
             public int getThreadCount() { return 1; }
+            @Override
             public Submission submitPrepared(StandardMessage message, Retry<StandardMessage> retry, boolean retryAttempt) {
                 throw new AssertionError("Unguarded provider submission must not be used");
             }
