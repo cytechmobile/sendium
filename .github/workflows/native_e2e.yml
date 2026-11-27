@@ -55,8 +55,7 @@ jobs:
           chmod +x ./mvnw
           # Build core and app together: no preliminary JVM package/install is needed.
           # Full JVM verification runs in Run Tests; compile smoke utilities only when used below.
-          ./mvnw -B package -pl sendium-app -am -Pnative -DskipTests -Dmaven.test.skip=true \
-            -Dquarkus.native.container-build=false
+          ./mvnw -B package -pl sendium-app -am -Pnative -DskipTests -Dmaven.test.skip=true
 
       - name: Build native Docker image
         run: docker build -t sendium:native-e2e -f sendium-app/src/main/docker/Dockerfile.native sendium-app

@@ -1,7 +1,5 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Assignment;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
@@ -18,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -253,7 +252,7 @@ class FileRoutedWorkStoreTest {
             id = routed.take("provider-A", Duration.ZERO).orElseThrow().id();
             pending.complete(routed.complete(id).sources());
         }
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         var intent = mapper.createObjectNode();
         UUID intentId = UUID.randomUUID();
         intent.put("schemaVersion", 1);
@@ -308,9 +307,9 @@ class FileRoutedWorkStoreTest {
         } else if (corruption.equals("unexpectedEntry")) {
             Files.createDirectory(stagePath(root, "routed", id).resolveSibling("unexpected"));
         } else {
-            var mapper = new ObjectMapper(new CBORFactory());
+            var mapper = new CBORMapper();
             Path marker = stagePath(root, "routed-terminal", id);
-            var node = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(Files.readAllBytes(marker));
+            var node = (tools.jackson.databind.node.ObjectNode) mapper.readTree(Files.readAllBytes(marker));
             node.put("selectionId", selection(2).value().toString());
             Files.write(marker, mapper.writeValueAsBytes(node));
         }
@@ -324,7 +323,7 @@ class FileRoutedWorkStoreTest {
     }
 
     static void writeRecord(Path root, Routed<StandardMessage> work, Set<SourceId> sources) throws Exception {
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         var node = mapper.createObjectNode();
         node.put("schemaVersion", 1);
         node.put("workId", work.id().value().toString());

@@ -1,8 +1,5 @@
 package gr.cytech.sendium.core.outbound;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Assignment;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
@@ -17,6 +14,8 @@ import gr.cytech.sendium.core.storage.file.FileSelectedRouterStore;
 import gr.cytech.sendium.core.storage.memory.MemorySelectedRouterStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -120,7 +119,7 @@ class DurableRoutingRecoveryTest {
             valid.start();
             assertThat(valid.isReady()).isTrue();
         }
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         Path originalPath = root.resolve("routed").resolve(original.value().toString().substring(0, 2)).resolve(original.value() + ".cbor");
         var node = (ObjectNode) mapper.readTree(Files.readAllBytes(originalPath));
         UUID conflicting = UUID.randomUUID();

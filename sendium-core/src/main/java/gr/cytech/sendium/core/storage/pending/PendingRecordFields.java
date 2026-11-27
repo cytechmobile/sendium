@@ -1,8 +1,8 @@
 package gr.cytech.sendium.core.storage.pending;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import gr.cytech.sendium.core.storage.OutboundStage;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import tools.jackson.databind.JsonNode;
 
 /** Strict field readers shared by the explicit pending schema and its extension format. */
 final class PendingRecordFields {

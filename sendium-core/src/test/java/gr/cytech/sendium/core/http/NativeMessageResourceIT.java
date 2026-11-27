@@ -1,6 +1,5 @@
 package gr.cytech.sendium.core.http;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import gr.cytech.sendium.auth.CredentialFileWatcher;
 import gr.cytech.sendium.core.AbstractOutWorker;
@@ -26,6 +25,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.ObjectMapper;
 import utils.OutboundIngressFixture;
 
 import java.io.IOException;

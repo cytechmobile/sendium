@@ -1,7 +1,5 @@
 package gr.cytech.sendium.core.outbound;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Destination;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
@@ -18,6 +16,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -163,7 +162,7 @@ class ForcedStageRestartTest {
                     harness.coordinator.takeFromRouted("old-provider", Duration.ZERO).orElseThrow();
                     harness.routed.complete(work.id());
                     // A physical fixture represents an authorized cleanup after its first source deletion.
-                    var mapper = new ObjectMapper(new CBORFactory());
+                    var mapper = new CBORMapper();
                     var intent = mapper.createObjectNode();
                     UUID id = UUID.randomUUID();
                     intent.put("schemaVersion", 1);

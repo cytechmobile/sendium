@@ -227,6 +227,12 @@ class SmppClientWorkerTest {
                 assertThat(execution.attempts()).extracting(StandardOutboundDispatch.AttemptSnapshot::destination)
                         .containsExactly(first.getFullName(), second.getFullName());
 
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (execution.attempts().getLast().state() != StandardOutboundDispatch.AttemptState.AWAITING_COMPLETION
+                        && System.nanoTime() < deadline) {
+                    TimeUnit.MILLISECONDS.sleep(1);
+                }
+                assertThat(execution.attempts().getLast().state()).isEqualTo(StandardOutboundDispatch.AttemptState.AWAITING_COMPLETION);
                 second.failCoordinatedHandoff = true;
                 second.coordinatedRequests.forEach(request -> respond(handler(second), request, SmppConstants.STATUS_OK));
                 respond(handler(first), first.coordinatedRequests.getLast(), SmppConstants.STATUS_OK);

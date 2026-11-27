@@ -1,7 +1,5 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
@@ -12,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -101,8 +100,8 @@ class PendingSpoolTest {
     void rejectsUnknownRecordVersion() throws Exception {
         PendingSourceRecord record = record(UUID.randomUUID(), "payload");
         writeSource(record);
-        var mapper = new ObjectMapper(new CBORFactory());
-        var node = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(Files.readAllBytes(path(record)));
+        var mapper = new CBORMapper();
+        var node = (tools.jackson.databind.node.ObjectNode) mapper.readTree(Files.readAllBytes(path(record)));
         node.put("schemaVersion", 999);
         Files.write(path(record), mapper.writeValueAsBytes(node));
         assertThatThrownBy(() -> new PendingSpool(root).open()).isInstanceOfSatisfying(OutboundStorageException.class,

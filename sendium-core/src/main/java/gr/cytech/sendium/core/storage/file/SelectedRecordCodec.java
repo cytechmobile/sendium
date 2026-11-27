@@ -1,18 +1,19 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.core.StreamReadConstraints;
-import com.fasterxml.jackson.core.StreamReadFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.StreamReadConstraints;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.cbor.CBORFactory;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
-import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
@@ -23,9 +24,9 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
 
 /** Explicit immutable selected execution, independent of accepted-record envelopes and runtime retries. */
 final class SelectedRecordCodec {
-    private final ObjectMapper mapper = new ObjectMapper(CBORFactory.builder()
+    private final ObjectMapper mapper = CBORMapper.builder(CBORFactory.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
-            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(256).build()).build());
+            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(256).build()).build()).build();
 
     byte[] encode(Selected<StandardMessage> selected) {
         validateSources(selected.sources(), selected.message());
@@ -37,7 +38,7 @@ final class SelectedRecordCodec {
         node.set("message", PendingMessageData.capture(selected.message()).toNode());
         try {
             return mapper.writeValueAsBytes(node);
-        } catch (IOException failure) {
+        } catch (JacksonException failure) {
             throw invalid(failure);
         }
     }
@@ -72,7 +73,7 @@ final class SelectedRecordCodec {
             StandardMessage message = PendingMessageData.fromNode(node.required("message")).restore();
             validateSources(sources, message);
             return new Selected<>(id, sources, message);
-        } catch (IOException | IllegalArgumentException failure) {
+        } catch (JacksonException | IllegalArgumentException failure) {
             throw invalid(failure);
         } catch (OutboundStorageException failure) {
             throw new OutboundStorageException(ROUTER_QUEUE, failure.reason(), "selectedRecovery|error|reason:invalidEnvelope", failure);

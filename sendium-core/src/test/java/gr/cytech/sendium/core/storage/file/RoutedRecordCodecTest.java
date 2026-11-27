@@ -1,14 +1,13 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.file.RoutedRecordCodec.StoredWork;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,7 +34,7 @@ class RoutedRecordCodecTest {
         assertThat(codec.decode(codec.encode(decoded)).work().message().body).isEqualTo(work.message().body);
         var terminal = new StoredWork(work, assignment.sources()).terminal();
         assertThat(codec.decodeTerminal(codec.encodeTerminal(terminal))).isEqualTo(terminal);
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         for (String corruption : new String[]{"blankDestination", "emptySources", "duplicateSource", "nonCanonicalId", "classField", "truncated"}) {
             var node = (ObjectNode) mapper.readTree(bytes);
             switch (corruption) {

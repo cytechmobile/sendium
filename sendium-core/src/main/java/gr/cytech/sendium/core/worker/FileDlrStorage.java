@@ -1,8 +1,5 @@
 package gr.cytech.sendium.core.worker;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.util.MessageTrace;
 import org.slf4j.Logger;
@@ -10,6 +7,10 @@ import org.slf4j.LoggerFactory;
 import org.sqlite.ProgressHandler;
 import org.sqlite.SQLiteConfig;
 import org.sqlite.SQLiteDataSource;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -155,7 +156,7 @@ final class FileDlrStorage implements DlrStorageBackend {
             dlr_state, error_code, delivery_channel, delivery_status, delivery_attempt_count, last_attempt_at,
             next_attempt_at, last_delivery_result, resolved_at, updated_at
             """;
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = new JsonMapper();
 
     // Test seam: runs inside each write transaction just before commit.
     SqlHook beforeCommit = ignored -> { };
@@ -916,7 +917,7 @@ final class FileDlrStorage implements DlrStorageBackend {
         }
         try {
             return JSON.writeValueAsString(parts);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalArgumentException("fileDlrEncoding|error|reason:reassembledParts", e);
         }
     }
@@ -927,7 +928,7 @@ final class FileDlrStorage implements DlrStorageBackend {
         }
         try {
             return JSON.readValue(encoded, new TypeReference<List<String>>() { });
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new SQLException("fileDlrDecoding|error|reason:reassembledParts", e);
         }
     }

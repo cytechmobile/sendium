@@ -1,6 +1,5 @@
 package gr.cytech.sendium.core.worker;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.util.MessageTrace;
 import io.micrometer.core.instrument.Counter;
@@ -13,6 +12,8 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.net.URI;
@@ -34,7 +35,7 @@ import java.util.concurrent.Semaphore;
 @IfBuildProperty(name = "sendium.dlr.persistence.enabled", stringValue = "true", enableIfMissing = false)
 public class ForwardDlrService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardDlrService.class);
-    private static final ObjectMapper CALLBACK_JSON = new ObjectMapper();
+    private static final ObjectMapper CALLBACK_JSON = new JsonMapper();
 
     private static final int DUE_BATCH_SIZE = 500;
     private static final int MAX_IN_FLIGHT_PER_HOST = 10;

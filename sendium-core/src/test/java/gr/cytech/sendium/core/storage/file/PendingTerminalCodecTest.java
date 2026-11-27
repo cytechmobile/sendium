@@ -1,14 +1,14 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.file.PendingTerminalCodec.Intent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.util.Arrays;
 import java.util.Set;
@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PendingTerminalCodecTest {
     private final PendingTerminalCodec codec = new PendingTerminalCodec();
-    private final ObjectMapper cbor = new ObjectMapper(new CBORFactory());
+    private final ObjectMapper cbor = new CBORMapper();
 
     @Test
     void roundTripsSourceAndClosureOwnership() {

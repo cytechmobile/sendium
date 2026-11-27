@@ -1,8 +1,5 @@
 package gr.cytech.sendium.core.storage.pending;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStage;
@@ -12,6 +9,8 @@ import gr.cytech.sendium.core.storage.memory.MemoryPendingMessageStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -68,7 +67,7 @@ class PendingMultipartRecoveryTest {
             fixture.part(1, 3, "original");
             SourceId duplicate = fixture.part(1, 3, "duplicate");
             fixture.seal();
-            var mapper = new ObjectMapper(new CBORFactory());
+            var mapper = new CBORMapper();
             ObjectNode record = (ObjectNode) mapper.readTree(fixture.records.get(duplicate));
             ((ObjectNode) record.get("multipart")).put("originalSourceId", UUID.randomUUID().toString());
             fixture.records.put(duplicate, mapper.writeValueAsBytes(record));
@@ -167,7 +166,7 @@ class PendingMultipartRecoveryTest {
             SourceId second = fixture.part(2, 2, "two");
             fixture.seal();
             if (unknownVersion) {
-                var cbor = new ObjectMapper(new CBORFactory());
+                var cbor = new CBORMapper();
                 var node = (ObjectNode) cbor.readTree(fixture.records.get(second));
                 node.put("schemaVersion", 999);
                 fixture.records.put(second, cbor.writeValueAsBytes(node));

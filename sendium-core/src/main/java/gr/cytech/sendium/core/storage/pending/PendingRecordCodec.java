@@ -1,14 +1,15 @@
 package gr.cytech.sendium.core.storage.pending;
 
-import com.fasterxml.jackson.core.StreamReadConstraints;
-import com.fasterxml.jackson.core.StreamReadFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.StreamReadConstraints;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORFactory;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
-import java.io.IOException;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.Objects;
@@ -17,10 +18,10 @@ import java.util.UUID;
 /** Versioned CBOR representation of accepted sources; has no filesystem or lifecycle side effects. */
 public final class PendingRecordCodec {
     public static final int SCHEMA_VERSION = 1;
-    private final ObjectMapper mapper = new ObjectMapper(CBORFactory.builder()
+    private final ObjectMapper mapper = CBORMapper.builder(CBORFactory.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(256).build())
-            .build());
+            .build()).build();
 
     public byte[] encode(PendingSourceRecord record) {
         Objects.requireNonNull(record, "record");
@@ -32,7 +33,7 @@ public final class PendingRecordCodec {
         envelope.set("multipart", membership(record.multipart()));
         try {
             return mapper.writeValueAsBytes(envelope);
-        } catch (IOException failure) {
+        } catch (JacksonException failure) {
             throw PendingRecordFields.unsupported();
         }
     }
@@ -56,7 +57,7 @@ public final class PendingRecordCodec {
             var message = PendingMessageData.fromNode(PendingRecordFields.required(envelope, "message"));
             var multipart = readMembership(PendingRecordFields.required(envelope, "multipart"));
             return new PendingSourceRecord(new SourceId(uuid), disposition, message, multipart);
-        } catch (IOException | IllegalArgumentException | DateTimeException failure) {
+        } catch (JacksonException | IllegalArgumentException | DateTimeException failure) {
             throw PendingRecordFields.corrupt();
         }
     }

@@ -1,11 +1,5 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.core.StreamReadConstraints;
-import com.fasterxml.jackson.core.StreamReadFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Completed;
 import gr.cytech.sendium.core.outbound.OutboundWork.Routed;
@@ -14,8 +8,15 @@ import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.outbound.OutboundWork.WorkId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
 import gr.cytech.sendium.core.storage.pending.PendingMessageData;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.StreamReadConstraints;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORFactory;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
-import java.io.IOException;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -27,9 +28,9 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
 
 /** Immutable routing-time payload and a separate final processing fact, never provider-part checkpoints. */
 final class RoutedRecordCodec {
-    private final ObjectMapper mapper = new ObjectMapper(CBORFactory.builder()
+    private final ObjectMapper mapper = CBORMapper.builder(CBORFactory.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
-            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(256).build()).build());
+            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(256).build()).build()).build();
 
     byte[] encode(StoredWork record) {
         ObjectNode node = identity(record.work().id(), record.work().selection(), record.sources());
@@ -84,7 +85,7 @@ final class RoutedRecordCodec {
     private byte[] bytes(JsonNode node) {
         try {
             return mapper.writeValueAsBytes(node);
-        } catch (IOException failure) {
+        } catch (JacksonException failure) {
             throw invalid(failure);
         }
     }
@@ -106,7 +107,7 @@ final class RoutedRecordCodec {
                 throw new OutboundStorageException(ROUTED_WORK, UNSUPPORTED, "routedRecovery|error|reason:unsupportedVersion");
             }
             return node;
-        } catch (IOException | IllegalArgumentException failure) {
+        } catch (JacksonException | IllegalArgumentException failure) {
             throw invalid(failure);
         }
     }

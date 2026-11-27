@@ -1,8 +1,5 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStage;
@@ -14,6 +11,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,7 +42,7 @@ class PendingTerminalRecoveryTest {
         FileSelectedRouterStoreTest.writeSelected(root,
                 new gr.cytech.sendium.core.outbound.OutboundWork.Selected<>(id, Set.of(source), FileSelectedRouterStoreTest.message(1, 2)));
         // Publish physical authorization, then simulate death after deleting the accepted source only.
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         var node = mapper.createObjectNode();
         UUID intentId = UUID.randomUUID();
         node.put("schemaVersion", 1);
@@ -205,7 +204,7 @@ class PendingTerminalRecoveryTest {
         if (corruption.equals("empty")) {
             bytes = new byte[0];
         } else {
-            var mapper = new ObjectMapper(new CBORFactory());
+            var mapper = new CBORMapper();
             var node = (ObjectNode) mapper.readTree(bytes);
             switch (corruption) {
                 case "unknownVersion" -> node.put("schemaVersion", 999);

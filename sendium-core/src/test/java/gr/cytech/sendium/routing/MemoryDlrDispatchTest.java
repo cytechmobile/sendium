@@ -114,7 +114,14 @@ class MemoryDlrDispatchTest {
             harness.failNextHandoff.set(true);
             var message = message(true);
             var execution = harness.submit(message);
-            harness.provider.respond(harness.provider.next(), "accepted");
+            var request = harness.provider.next();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (execution.attempts().getFirst().state() != StandardOutboundDispatch.AttemptState.AWAITING_COMPLETION
+                    && System.nanoTime() < deadline) {
+                TimeUnit.MILLISECONDS.sleep(1);
+            }
+            assertThat(execution.attempts().getFirst().state()).isEqualTo(StandardOutboundDispatch.AttemptState.AWAITING_COMPLETION);
+            harness.provider.respond(request, "accepted");
             assertThat(execution.completion().toCompletableFuture()).isNotDone();
             assertThat(harness.pending.find(source(message))).isPresent();
             assertThat(policy.owner.usedCapacity()).isEqualTo(1);

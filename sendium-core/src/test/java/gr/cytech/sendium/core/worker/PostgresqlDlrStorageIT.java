@@ -1,6 +1,5 @@
 package gr.cytech.sendium.core.worker;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import gr.cytech.sendium.core.message.StandardMessage;
@@ -12,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import tools.jackson.databind.json.JsonMapper;
 
 import javax.sql.DataSource;
 import java.lang.reflect.InvocationTargetException;
@@ -123,7 +123,7 @@ class PostgresqlDlrStorageIT {
                      SELECT delivery_status FROM sendium_dlr.dlr_message LIMIT 101
                      """)) {
             assertThat(result.next()).isTrue();
-            var plan = new ObjectMapper().readTree(result.getString(1)).get(0).get("Plan");
+            var plan = new JsonMapper().readTree(result.getString(1)).get(0).get("Plan");
             assertThat(plan.get("Node Type").asText()).isEqualTo("Limit");
             assertThat(plan.get("Actual Rows").asLong()).isEqualTo(101);
             assertThat(plan.get("Plans").get(0).get("Actual Rows").asLong()).isEqualTo(101);
@@ -240,7 +240,7 @@ class PostgresqlDlrStorageIT {
             assertThat(methods).containsExactly("POST", "POST");
             assertThat(received).hasSize(2);
             assertThat(received.get(1)).isEqualTo(received.getFirst());
-            var payload = new ObjectMapper().readTree(received.getFirst());
+            var payload = new JsonMapper().readTree(received.getFirst());
             assertThat(payload.get("messageId").asText()).isEqualTo(message.getGatewayMsgId());
             assertThat(payload.get("status").asText()).isEqualTo("delivered");
             assertThat(storage.getState(message.getGatewayMsgId())).isEmpty();
