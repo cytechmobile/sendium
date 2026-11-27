@@ -1,13 +1,13 @@
 package gr.cytech.sendium.core.storage.pending;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.pending.PendingPublicationCodec.Publication;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.util.Set;
 import java.util.List;
@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PendingPublicationCodecTest {
     private final PendingPublicationCodec codec = new PendingPublicationCodec();
-    private final ObjectMapper cbor = new ObjectMapper(new CBORFactory());
+    private final ObjectMapper cbor = new CBORMapper();
 
     @Test
     void recipeContainsSourceReferencesButNoExecutionPayload() throws Exception {

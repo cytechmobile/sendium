@@ -1,10 +1,10 @@
 package gr.cytech.sendium.core.storage.pending;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -157,7 +157,7 @@ final class PendingExtensionValues {
         }
         try {
             return node.binaryValue().clone();
-        } catch (IOException failure) {
+        } catch (JacksonException failure) {
             throw PendingRecordFields.corrupt();
         }
     }

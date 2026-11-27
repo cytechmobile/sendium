@@ -1,14 +1,15 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.core.StreamReadConstraints;
-import com.fasterxml.jackson.core.StreamReadFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.outbound.OutboundWork.SourceId;
 import gr.cytech.sendium.core.storage.OutboundStorageException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.StreamReadConstraints;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.cbor.CBORFactory;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
-import java.io.IOException;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -21,9 +22,9 @@ import static gr.cytech.sendium.core.storage.OutboundStorageException.Reason.UNS
 
 /** Metadata for an already-authorized terminal removal, not a provider-outcome checkpoint. */
 final class PendingTerminalCodec {
-    private final ObjectMapper mapper = new ObjectMapper(CBORFactory.builder()
+    private final ObjectMapper mapper = CBORMapper.builder(CBORFactory.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
-            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(16).build()).build());
+            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(16).build()).build()).build();
 
     byte[] encode(Intent intent) {
         var node = mapper.createObjectNode();
@@ -39,7 +40,7 @@ final class PendingTerminalCodec {
         intent.routedWork().stream().sorted().forEach(id -> routed.add(id.toString()));
         try {
             return mapper.writeValueAsBytes(node);
-        } catch (IOException failure) {
+        } catch (JacksonException failure) {
             throw invalid();
         }
     }
@@ -64,7 +65,7 @@ final class PendingTerminalCodec {
                     ids(node.required("sources")).stream().map(SourceId::new).collect(Collectors.toSet()),
                     ids(node.required("closedGroups")), node.has("selections") ? ids(node.required("selections")) : Set.of(),
                     node.has("routedWork") ? ids(node.required("routedWork")) : Set.of());
-        } catch (IOException | IllegalArgumentException failure) {
+        } catch (JacksonException | IllegalArgumentException failure) {
             throw invalid();
         }
     }

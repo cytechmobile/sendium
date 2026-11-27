@@ -1,10 +1,11 @@
 package gr.cytech.sendium.core.worker;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.net.URI;
@@ -18,7 +19,7 @@ import java.time.Duration;
 @ApplicationScoped
 public class ForwardMoService {
     private static final Logger logger = LoggerFactory.getLogger(ForwardMoService.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new JsonMapper();
 
     private static final int MAX_RETRIES = 10;
     private static final long RETRY_INTERVAL_MS = 120_000;
@@ -104,7 +105,7 @@ public class ForwardMoService {
     String buildJsonBody(MoContext ctx) {
         try {
             return MAPPER.writeValueAsString(ctx);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             // Throwing an exception here ensures the failure is caught in doForward and triggers a retry,
             throw new RuntimeException("Failed to serialize MoContext to JSON", e);
         }

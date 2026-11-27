@@ -22,11 +22,11 @@ import com.cloudhopper.smpp.type.Address;
 import com.cloudhopper.smpp.type.SmppChannelException;
 import com.cloudhopper.smpp.type.SmppInvalidArgumentException;
 import com.cloudhopper.smpp.type.SmppProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.sun.net.httpserver.HttpServer;
 import io.netty.channel.nio.NioEventLoopGroup;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -363,7 +363,6 @@ public class NativeE2eSmoke {
         String rss = status.lines().filter(line -> line.startsWith("VmRSS:")).findFirst().orElseThrow();
         System.out.println("memoryCapacitySample|success|phase:" + phase + "|heapUsedBytes:" + (long) heap
                 + "|gcPauses:" + (long) gcCount + "|gcPauseSeconds:" + gcSeconds + "|rss:" + rss.replaceAll("\\s+", " "));
-        System.out.println(metrics.lines().filter(line -> line.startsWith("jvm_info")).findFirst().orElseThrow());
         return metrics;
     }
 
@@ -661,7 +660,7 @@ public class NativeE2eSmoke {
                         + "\"callbackUrl\":\"http://host.docker.internal:" + callbacks.port() + "/dlr\"}")).build();
         var nativeResponse = HTTP.send(nativeRequest, HttpResponse.BodyHandlers.ofString());
         require(nativeResponse.statusCode() == 400, "Disabled native DLR request was not rejected");
-        var error = new ObjectMapper().readTree(nativeResponse.body());
+        var error = new JsonMapper().readTree(nativeResponse.body());
         require(error.path("code").asText().equals("INVALID_REQUEST")
                         && error.path("message").asText().equals("Unsupported message submission"),
                 "Disabled native request failed for a reason other than selected DLR policy");
@@ -1066,7 +1065,7 @@ public class NativeE2eSmoke {
                 "sh", namespace).start();
         String paths = new String(listing.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         require(listing.waitFor(10, TimeUnit.SECONDS) && listing.exitValue() == 0, "Cannot inspect stage records");
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         for (String path : paths.lines().toList()) {
             var read = new ProcessBuilder("docker", "exec", container, "cat", path).start();
             byte[] bytes = read.getInputStream().readAllBytes();

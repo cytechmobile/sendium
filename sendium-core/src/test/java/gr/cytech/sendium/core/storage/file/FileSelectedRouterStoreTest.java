@@ -1,8 +1,5 @@
 package gr.cytech.sendium.core.storage.file;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundWork.Selected;
 import gr.cytech.sendium.core.outbound.OutboundWork.SelectionId;
@@ -16,6 +13,8 @@ import gr.cytech.sendium.core.storage.pending.PendingRecordCodec;
 import gr.cytech.sendium.core.storage.pending.PendingSourceRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.dataformat.cbor.CBORMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -244,7 +243,7 @@ class FileSelectedRouterStoreTest {
     }
 
     static void writeSelected(Path directory, Selected<StandardMessage> selected) throws Exception {
-        var mapper = new ObjectMapper(new CBORFactory());
+        var mapper = new CBORMapper();
         var accepted = new PendingSourceRecord(new SourceId(UUID.fromString(selected.message().serial)),
                 PendingSourceRecord.Disposition.READY, PendingMessageData.capture(selected.message()));
         var node = mapper.createObjectNode();

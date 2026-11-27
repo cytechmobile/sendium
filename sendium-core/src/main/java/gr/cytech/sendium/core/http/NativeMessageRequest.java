@@ -1,9 +1,9 @@
 package gr.cytech.sendium.core.http;
 
 import com.cloudhopper.commons.charset.CharsetUtil;
-import com.fasterxml.jackson.databind.JsonNode;
 import gr.cytech.sendium.core.message.StandardMessage;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import tools.jackson.databind.JsonNode;
 
 import java.net.URI;
 import java.util.Set;
@@ -27,7 +27,7 @@ public record NativeMessageRequest(
         if (json == null || !json.isObject()) {
             throw new IllegalArgumentException("Request must be a JSON object");
         }
-        json.fieldNames().forEachRemaining(field -> {
+        json.propertyNames().forEach(field -> {
             if (!FIELDS.contains(field)) {
                 throw new IllegalArgumentException("Request contains an unsupported field");
             }

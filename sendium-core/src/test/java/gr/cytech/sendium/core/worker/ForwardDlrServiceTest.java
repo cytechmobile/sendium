@@ -1,6 +1,5 @@
 package gr.cytech.sendium.core.worker;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import gr.cytech.sendium.core.message.DlrReturnMetadata.HttpCallbackFormat;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -8,12 +7,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -381,7 +381,7 @@ class ForwardDlrServiceTest {
         assertThat(method.get()).isEqualTo("POST");
         assertThat(contentType.get()).isEqualTo("application/json");
         assertThat(query.get()).isEqualTo("token=a%20b");
-        var json = new ObjectMapper().readTree(body.get());
+        var json = new JsonMapper().readTree(body.get());
         assertThat(json.size()).isEqualTo(3);
         assertThat(json.get("messageId").asText()).isEqualTo(GATEWAY_ID);
         assertThat(json.get("status").asText()).isEqualTo(status == MessageState.MessageStatus.DELIVERED ? "delivered" : "failed");

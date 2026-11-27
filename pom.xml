@@ -36,7 +36,7 @@
 
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-        <quarkus.platform.version>3.40.1.2</quarkus.platform.version>
+        <quarkus.platform.version>4.0.1</quarkus.platform.version>
 
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
         <checkstyle-tools.version>14.4.0</checkstyle-tools.version>
@@ -47,7 +47,7 @@
         <skipUT>${skipTests}</skipUT>
         <skipIT>${skipTests}</skipIT>
 
-        <cloudhopper.smpp.version>7.2.2</cloudhopper.smpp.version>
+        <cloudhopper.smpp.version>7.3.0</cloudhopper.smpp.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.24.0</mockito.version>
         <sqlite-jdbc.version>3.54.1.0</sqlite-jdbc.version>

@@ -1,11 +1,11 @@
 package gr.cytech.sendium.auth;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.yaml.YAMLMapper;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -15,7 +15,7 @@ import java.util.stream.Collectors;
 public class CredentialFileParser {
     private static final Logger logger = LoggerFactory.getLogger(CredentialFileParser.class);
 
-    private static final ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+    private static final ObjectMapper mapper = new YAMLMapper();
 
     public static Map<String, CredentialFileWatcher.Credential> loadAndParse(Path filePath) throws Exception {
         CredentialWrapper wrapper = mapper.readValue(filePath.toFile(), CredentialWrapper.class);

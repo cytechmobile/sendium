@@ -1,9 +1,5 @@
 package gr.cytech.sendium.core.http;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import gr.cytech.sendium.core.message.DlrReturnMetadata;
 import gr.cytech.sendium.core.message.StandardMessage;
 import gr.cytech.sendium.core.outbound.OutboundCoordinator;
@@ -38,6 +34,10 @@ import org.eclipse.microprofile.openapi.annotations.security.SecurityScheme;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -108,9 +108,9 @@ public class NativeMessageResource {
                 return error(413, "PAYLOAD_TOO_LARGE", "Request body must not exceed 32768 bytes");
             }
             request = NativeMessageRequest.parse(mapper.reader()
-                    .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .with(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
                     .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(bytes));
-        } catch (JsonProcessingException invalid) {
+        } catch (JacksonException invalid) {
             return error(400, "INVALID_REQUEST", "Request must contain one valid JSON object");
         } catch (IllegalArgumentException invalid) {
             return error(400, "INVALID_REQUEST", invalid.getMessage());

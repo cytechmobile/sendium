@@ -267,7 +267,7 @@ class FileHeldPublicationTest {
                 assertThat(recipe.originals()).containsExactly(source(first), source(last));
                 assertThat(recipe.sources()).containsExactlyInAnyOrder(source(first), source(duplicate), source(last));
                 assertThat(recipe.priority()).isEqualTo(1);
-                var node = new com.fasterxml.jackson.databind.ObjectMapper(new com.fasterxml.jackson.dataformat.cbor.CBORFactory())
+                var node = new tools.jackson.dataformat.cbor.CBORMapper()
                         .readTree(recipeBytes);
                 assertThat(node.has("message")).isFalse();
                 assertThat(node.toString()).doesNotContain(first.body, duplicate.body, last.body);
