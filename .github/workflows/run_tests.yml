@@ -98,10 +98,17 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Backend
+        id: backend_build
         run: |
           export QUARKUS_LOG_LEVEL=ERROR
           chmod +x ./mvnw
-          ./mvnw -B -ntp -V -e verify
+          started_at=$(date +%s)
+          verify_status=0
+          ./mvnw -B -ntp -V -e verify || verify_status=$?
+          if ! printf 'elapsed-seconds=%s\n' "$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"; then
+            echo "::warning::Maven timing unavailable; preserving verification exit status."
+          fi
+          exit "$verify_status"
       - name: Upload backend failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
@@ -129,6 +136,8 @@ jobs:
           SENDIUM_DLR_POSTGRESQL_JDBC_URL: jdbc:postgresql://host.docker.internal:5432/sendium
           SENDIUM_DLR_POSTGRESQL_USERNAME: sendium
           SENDIUM_DLR_POSTGRESQL_PASSWORD: sendium-test
+          SENDIUM_E2E_TIMING_FILE: ${{ runner.temp }}/jvm-scenarios.tsv
+          SENDIUM_E2E_TIMING_RUNTIME: jvm
         run: |
           ./mvnw -B -pl sendium-core -DskipTests test-compile org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
             -Dexec.classpathScope=test \
@@ -146,6 +155,47 @@ jobs:
               -Dexec.classpathScope=test \
               -Dexec.mainClass=utils.NativeE2eSmoke
           done
+      - name: Test JVM timing collectors
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s .github/scripts/timing/tests -p 'test_*.py'
+      - name: Publish JVM timing summary
+        if: always()
+        continue-on-error: true
+        env:
+          TIMING_BUILD_SECONDS: ${{ steps.backend_build.outputs.elapsed-seconds }}
+          TIMING_BUILD_OUTCOME: ${{ steps.backend_build.outcome }}
+          TIMING_RUNNER_LABEL: ubuntu-latest
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 .github/scripts/timing/java_reports.py \
+            --reports sendium-core/target/surefire-reports \
+            --reports sendium-core/target/failsafe-reports \
+            --reports sendium-app/target/surefire-reports \
+            --output "$RUNNER_TEMP/jvm-timing" \
+            --build-seconds "$TIMING_BUILD_SECONDS" \
+            --build-outcome "$TIMING_BUILD_OUTCOME"
+      - name: Publish packaged JVM scenario timings
+        if: always() && needs.classify.outputs.release-only != 'true'
+        continue-on-error: true
+        env:
+          TIMING_RUNNER_LABEL: ubuntu-latest
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 .github/scripts/timing/scenario_reports.py \
+            --input "$RUNNER_TEMP/jvm-scenarios.tsv" \
+            --output "$RUNNER_TEMP/jvm-timing" \
+            --expected-backend postgresql --expected-backend file \
+            --expected-backend memory --expected-backend disabled
+      - name: Upload JVM timing artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: timing-jvm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jvm-timing/
+          if-no-files-found: warn
+          retention-days: 30
       - id: result
         name: Sendium Test Result
         if: always()

@@ -77,6 +77,7 @@ public class NativeE2eSmoke {
     private static final boolean FILE_DLR = DLR_BACKEND.equals("file");
     private static final boolean MEMORY_DLR = DLR_BACKEND.equals("memory");
     private static final boolean DISABLED_DLR = DLR_BACKEND.equals("disabled");
+    private static final ScenarioTiming TIMING = ScenarioTiming.fromEnvironment(DLR_BACKEND);
 
     static String dlrBackend(String configured, boolean pendingRestart) {
         String backend = configured == null ? "postgresql" : configured;
@@ -122,6 +123,10 @@ public class NativeE2eSmoke {
     }
 
     public static void main(String[] args) throws Exception {
+        TIMING.run("packaged", NativeE2eSmoke::runSmoke);
+    }
+
+    private static void runSmoke() throws Exception {
         String containerName = "sendium-e2e-" + UUID.randomUUID().toString().substring(0, 8);
         String spoolVolume = containerName + "-pending";
         String dlrVolume = containerName + "-dlr";
@@ -160,30 +165,36 @@ public class NativeE2eSmoke {
             require(upstream.awaitSessionBound(), "Sendium container did not bind to the upstream SMPP server");
 
             if (MEMORY_DLR) {
-                verifyMemoryHttpRetry(upstream, callbackServer);
-                verifyMemorySmppReconnect(upstream);
-                container = verifyMemoryLossOnReplacement(containerName, workDir, upstream, callbackServer);
+                TIMING.run("memory-http-retry", () -> verifyMemoryHttpRetry(upstream, callbackServer));
+                TIMING.run("memory-smpp-reconnect", () -> verifyMemorySmppReconnect(upstream));
+                container = TIMING.call("memory-replacement",
+                        () -> verifyMemoryLossOnReplacement(containerName, workDir, upstream, callbackServer));
                 require(stopContainer(containerName), "Cannot stop live memory scenario");
                 container = null;
-                verifyRecoveredMemoryCapacity(upstream, callbackServer);
-                verifyNonDlrBeyondBlockedWindow(upstream, callbackServer);
+                TIMING.run("memory-recovered-capacity", () -> verifyRecoveredMemoryCapacity(upstream, callbackServer));
+                TIMING.run("non-dlr-blocked-window", () -> verifyNonDlrBeyondBlockedWindow(upstream, callbackServer));
                 if (containerUsesJvm()) {
-                    verifyMemoryCapacityAtDefault(upstream, callbackServer);
+                    TIMING.run("memory-default-capacity", () -> verifyMemoryCapacityAtDefault(upstream, callbackServer));
                 }
             } else if (DISABLED_DLR) {
-                verifyDisabledIngress(upstream, callbackServer);
+                TIMING.run("disabled-ingress", () -> verifyDisabledIngress(upstream, callbackServer));
                 require(stopContainer(containerName), "Cannot stop disabled ingress scenario");
                 container = null;
-                verifyNonDlrBeyondBlockedWindow(upstream, callbackServer);
+                TIMING.run("non-dlr-blocked-window", () -> verifyNonDlrBeyondBlockedWindow(upstream, callbackServer));
             } else if (PENDING_RESTART) {
-                container = verifyPendingSurvivesReplacement(containerName, workDir, upstream, callbackServer);
+                container = TIMING.call("pending-replacement",
+                        () -> verifyPendingSurvivesReplacement(containerName, workDir, upstream, callbackServer));
             } else if (FILE_DLR) {
-                container = verifyFileHttpRetrySurvivesReplacement(containerName, workDir, upstream, callbackServer,
-                        helper, dlrVolume);
-                container = verifyFileSmppReplaySurvivesReplacement(containerName, workDir, upstream, helper, dlrVolume);
+                Path stagedHelper = helper;
+                container = TIMING.call("file-http-retry",
+                        () -> verifyFileHttpRetrySurvivesReplacement(containerName, workDir, upstream, callbackServer,
+                                stagedHelper, dlrVolume));
+                container = TIMING.call("file-smpp-replay",
+                        () -> verifyFileSmppReplaySurvivesReplacement(containerName, workDir, upstream, stagedHelper, dlrVolume));
             } else {
-                container = verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 1);
-                verifySmppSubmitGetsDeliverSm(upstream, 2);
+                container = TIMING.call("postgresql-http-restart",
+                        () -> verifyHttpCorrelationSurvivesRestart(containerName, workDir, upstream, callbackServer, 1));
+                TIMING.run("postgresql-smpp-delivery", () -> verifySmppSubmitGetsDeliverSm(upstream, 2));
             }
         } catch (Throwable t) {
             if (container != null) {
