@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.11.0](https://github.com/cytechmobile/sendium/compare/v0.10.0...v0.11.0) (2026-11-27)
+
+
+### Features
+
+* **dlr:** add bounded memory and disabled receipt handling ([#424](https://github.com/cytechmobile/sendium/issues/424)) ([2c9a9ec](https://github.com/cytechmobile/sendium/commit/2c9a9ec6c07da5237f2aab4701deb80f21b7c9bf))
+* **worker:** add simulated outbound delivery ([35bcfc8](https://github.com/cytechmobile/sendium/commit/35bcfc88c9a20e5bb0b56dfec323115f67080e9f))
+
+
+### Bug Fixes
+
+* **deps:** migrate Sendium to Quarkus 4 ([dcc974d](https://github.com/cytechmobile/sendium/commit/dcc974dcfa5775d0867eeea90eba232c90890bf0))
+
+
+### Documentation
+
+* illustrate Sendium SMS connectivity in README ([0548ab0](https://github.com/cytechmobile/sendium/commit/0548ab0eee991ded1a8f61cd1560d500ec911ac2))
+
 ## [0.10.0](https://github.com/cytechmobile/sendium/compare/v0.9.0...v0.10.0) (2026-11-20)
 
 
