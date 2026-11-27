@@ -136,6 +136,8 @@ jobs:
           SENDIUM_DLR_POSTGRESQL_JDBC_URL: jdbc:postgresql://host.docker.internal:5432/sendium
           SENDIUM_DLR_POSTGRESQL_USERNAME: sendium
           SENDIUM_DLR_POSTGRESQL_PASSWORD: sendium-test
+          SENDIUM_E2E_TIMING_FILE: ${{ runner.temp }}/jvm-scenarios.tsv
+          SENDIUM_E2E_TIMING_RUNTIME: jvm
         run: |
           ./mvnw -B -pl sendium-core -DskipTests test-compile org.codehaus.mojo:exec-maven-plugin:3.5.1:java \
             -Dexec.classpathScope=test \
@@ -173,6 +175,18 @@ jobs:
             --output "$RUNNER_TEMP/jvm-timing" \
             --build-seconds "$TIMING_BUILD_SECONDS" \
             --build-outcome "$TIMING_BUILD_OUTCOME"
+      - name: Publish packaged JVM scenario timings
+        if: always() && needs.classify.outputs.release-only != 'true'
+        continue-on-error: true
+        env:
+          TIMING_RUNNER_LABEL: ubuntu-latest
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 .github/scripts/timing/scenario_reports.py \
+            --input "$RUNNER_TEMP/jvm-scenarios.tsv" \
+            --output "$RUNNER_TEMP/jvm-timing" \
+            --expected-backend postgresql --expected-backend file \
+            --expected-backend memory --expected-backend disabled
       - name: Upload JVM timing artifacts
         if: always()
         continue-on-error: true

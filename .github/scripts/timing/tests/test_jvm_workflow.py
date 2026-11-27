@@ -68,6 +68,20 @@ class JvmWorkflowTests(unittest.TestCase):
         self.assertIn("SENDIUM_E2E_DLR_BACKEND=file", smoke)
         self.assertIn("100,000-entry", smoke)
 
+    def test_scenario_reporting_is_advisory_and_uses_existing_artifact(self):
+        smoke = step("Test packaged DLR modes and default memory capacity on JVM")
+        self.assertIn("SENDIUM_E2E_TIMING_FILE: ${{ runner.temp }}/jvm-scenarios.tsv", smoke)
+        self.assertIn("SENDIUM_E2E_TIMING_RUNTIME: jvm", smoke)
+        publish = step("Publish packaged JVM scenario timings")
+        self.assertIn("if: always() && needs.classify.outputs.release-only != 'true'", publish)
+        self.assertIn("continue-on-error: true", publish)
+        self.assertIn('--input "$RUNNER_TEMP/jvm-scenarios.tsv"', publish)
+        self.assertIn('--output "$RUNNER_TEMP/jvm-timing"', publish)
+        for backend in ("postgresql", "file", "memory", "disabled"):
+            self.assertIn(f"--expected-backend {backend}", publish)
+        self.assertLess(WORKFLOW.read_text().index("Publish packaged JVM scenario timings"),
+                        WORKFLOW.read_text().index("Upload JVM timing artifacts"))
+
 
 if __name__ == "__main__":
     unittest.main()
